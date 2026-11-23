@@ -11,7 +11,8 @@
 //!
 //! `Manifest.txt` is not shown this way: its content is the manifest's own
 //! branch, where its credentials are hidden field by field. The dump is not
-//! text, and an archive is shown by its members.
+//! text, and an archive is shown by its members. A symbol file is never
+//! text, and is shown as what it draws ([`super::symbol_preview`]).
 //!
 //! The text of a file can be megabytes, so only the selected file's is kept
 //! ([`Section::keeps_only_selected`]).
@@ -49,7 +50,7 @@ enum Preview {
 }
 
 /// Where the content of a node is.
-enum Source {
+pub(super) enum Source {
     /// A file on disk.
     File(PathBuf),
     /// A member of a zip on disk: its position and its name.
@@ -60,9 +61,19 @@ enum Source {
     },
 }
 
+/// Where the text of `id` is, when `id` is a file whose content is its own
+/// to show and is not a symbol's.
+fn source(index: &BackupIndex, id: &NodeId) -> Option<Source> {
+    if super::symbol_preview::is_symbol(index, id) {
+        None
+    } else {
+        content(index, id)
+    }
+}
+
 /// Where the content of `id` is, when `id` is a file whose content is its
 /// own to show.
-fn source(index: &BackupIndex, id: &NodeId) -> Option<Source> {
+pub(super) fn content(index: &BackupIndex, id: &NodeId) -> Option<Source> {
     match id {
         NodeId::File(at) => {
             let file = index.files.get(*at)?;
@@ -475,19 +486,25 @@ mod tests {
     #[test]
     fn a_file_that_is_not_text_says_so() {
         let (root, mut state) = backup("binary");
-        let not_text = t!("Not a text file; its content is not shown.").into_owned();
-        for node in [
-            file(&state, "RefData~4~683"),
-            member(&state, "RefData~4~809.zip", "Maps/valve.sym"),
-        ] {
-            assert!(select(&mut state, &node), "{node:?}");
-            let rows = detail_rows(&state, &node);
-            assert!(
-                rows.contains(&(not_text.clone(), String::new())),
-                "{rows:?}"
-            );
-            assert_eq!(value(&rows, &t!("Text encoding")), None);
-        }
+        let not_text = (
+            t!("Not a text file; its content is not shown.").into_owned(),
+            String::new(),
+        );
+        let styles = file(&state, "RefData~4~683");
+        assert!(select(&mut state, &styles));
+        let rows = detail_rows(&state, &styles);
+        assert!(rows.contains(&not_text), "{rows:?}");
+        assert_eq!(value(&rows, &t!("Text encoding")), None);
+
+        // A symbol file is read once, as what it draws: it is never text,
+        // and does not say that it is none.
+        let symbol = member(&state, "RefData~4~809.zip", "Maps/valve.sym");
+        assert!(select(&mut state, &symbol));
+        let rows = detail_rows(&state, &symbol);
+        assert!(!rows.contains(&not_text), "{rows:?}");
+        assert_eq!(value(&rows, &t!("Text encoding")), None);
+        // What the symbol preview says of it is a plain line of its own.
+        assert!(rows.iter().any(|(_, value)| value.is_empty()), "{rows:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -1384,11 +1384,13 @@ impl OpenCADStudio {
             // ATTSYNC <block> names its block on the line; a bare ATTSYNC
             // still asks its [?/Name/Select] question.
             || (tokens[0].eq_ignore_ascii_case("ATTSYNC") && tokens.len() > 1)
-            // `PIDTAG <old> <new>` re-tags in one line. The one-word form is
+            // `PIDTAG <old> <new>` re-tags in one line, and a tag the plant's
+            // data gives may hold spaces (`PIDTAG LG-Magnetic Float
+            // Gauge-0203`): either is one whole line. The one-word form is
             // the jump-to-tag command and must keep going through the
             // first-word path (bare `PIDTAG` prompts), so the condition names
-            // the three-token shape rather than the verb.
-            || (tokens[0].eq_ignore_ascii_case("PIDTAG") && tokens.len() == 3)
+            // the shape of three tokens or more rather than the verb.
+            || (tokens[0].eq_ignore_ascii_case("PIDTAG") && tokens.len() >= 3)
             // `PIDSETPROP [<tag>] <key> <value>` is one whole line; the verb
             // alone only says how it is written.
             || tokens[0].eq_ignore_ascii_case("PIDSETPROP")
@@ -1404,6 +1406,15 @@ impl OpenCADStudio {
             || tokens[0].eq_ignore_ascii_case("PIDBACKUPPDF")
             // `PIDBACKUPEXPORT [Plant=<name>] [Ref=<folder>] <folder>` likewise.
             || tokens[0].eq_ignore_ascii_case("PIDBACKUPEXPORT")
+            // `PIDMASTERDATA INIT DRAWING`, `... IMPORT <file>` and the rest
+            // are one whole line; the bare verb would first report the status.
+            || tokens[0].eq_ignore_ascii_case("PIDMASTERDATA")
+            // `PIDINDEX DUPLICATES` and `PIDINDEX LINKS` likewise: the bare
+            // verb would first scan the project and report the totals.
+            || tokens[0].eq_ignore_ascii_case("PIDINDEX")
+            // `PIDLOCATE <tag> [<drawing>]` likewise: the bare verb only says
+            // how it is written.
+            || tokens[0].eq_ignore_ascii_case("PIDLOCATE")
         {
             return self.dispatch_command(cmd);
         }

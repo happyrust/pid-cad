@@ -4308,11 +4308,11 @@ fn emit_wire(
                     let v = accum_xform.apply(Vector3::new(p[0], p[1], p[2]));
                     key_vertices.push([v.x, v.y, v.z]);
                 }
-                let local_depth = if d_range != (0.0, 1.0) {
-                    Some(d_range.0)
-                } else {
-                    None
-                };
+                // The curve leaves the batch but not its place among the
+                // members: it takes the same block-local rank the batched
+                // wires take below, so a fill stored after it still lies
+                // over it and one stored before it under it.
+                let local_depth = Some(d_range.0 + lw.local_rank * d_range.1);
 
                 // A wide or tapered polyline arc keeps its band: the
                 // analytical arc pipeline draws both (`circle_gpu`).

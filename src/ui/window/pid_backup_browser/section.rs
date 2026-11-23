@@ -23,8 +23,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use super::{
-    database, datamap, diagnostics, drawing_data, manifest, text_preview, DetailLine, Effect,
-    NodeId, PidBackupBrowser, Row,
+    database, datamap, diagnostics, drawing_data, manifest, symbol_preview, text_preview,
+    DetailLine, Effect, NodeId, PidBackupBrowser, Row,
 };
 use crate::io::pid_backup_browse::BackupIndex;
 
@@ -37,6 +37,7 @@ pub(super) static SECTIONS: &[&dyn Section] = &[
     &drawing_data::DrawingDataSection,
     &datamap::DataMapSection,
     &diagnostics::DiagnosticsSection,
+    &symbol_preview::SymbolPreview,
 ];
 
 /// The sections a panel state works with: [`SECTIONS`], unless a test gave

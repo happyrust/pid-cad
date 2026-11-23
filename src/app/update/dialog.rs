@@ -108,6 +108,11 @@ impl OpenCADStudio {
 
     pub(in crate::app) fn open_unsaved_dialog_window(&mut self) -> Task<Message> {
         self.active_modal = Some(crate::app::ModalKind::Unsaved);
+        self.raise_main_window()
+    }
+
+    /// Bring the main window forward for a question asked on the way out.
+    pub(in crate::app) fn raise_main_window(&self) -> Task<Message> {
         // The unsaved-changes prompt renders inside the main window, so bring
         // that window to the foreground — a close signal can arrive while the
         // app is backgrounded, leaving the prompt unseen behind other windows.
@@ -218,7 +223,7 @@ impl OpenCADStudio {
         Task::none()
     }
 
-    pub(super) fn on_unsaved_dialog_discard(&mut self) -> Task<Message> {
+    pub(in crate::app) fn on_unsaved_dialog_discard(&mut self) -> Task<Message> {
         match self.pending_close.take() {
             Some(crate::app::PendingClose::Tab(tab_id)) => {
                 let close_win = self.close_unsaved_dialog_window();
@@ -228,6 +233,12 @@ impl OpenCADStudio {
                 let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
                     return Task::batch([close_win, self.continue_tab_close_queue()]);
                 };
+                if let Some(ask) = self.ask_before_leaving(crate::app::collab::Leaving::Close {
+                    tab: tab_id,
+                    discard: true,
+                }) {
+                    return Task::batch([close_win, ask]);
+                }
                 // …and, on the web, its retained in-place save handle — the
                 // same hook on_tab_close runs: the user declined the save,
                 // so the picked file must never receive a later write, and
@@ -294,7 +305,7 @@ impl OpenCADStudio {
                     self.pending_close = Some(crate::app::PendingClose::Quit);
                 } else {
                     let close_win = self.close_unsaved_dialog_window();
-                    return Task::batch(vec![close_win, self.exit_app()]);
+                    return Task::batch(vec![close_win, self.quit_unless_unsynced()]);
                 }
             }
             None => {}
@@ -325,7 +336,10 @@ impl OpenCADStudio {
                 crate::app::PendingClose::Quit => {
                     let Some(idx) = self.tabs.iter().position(|tab| tab.dirty) else {
                         self.pending_close = None;
-                        return Task::batch([self.close_unsaved_dialog_window(), self.exit_app()]);
+                        return Task::batch([
+                            self.close_unsaved_dialog_window(),
+                            self.quit_unless_unsynced(),
+                        ]);
                     };
                     (idx, crate::app::SaveContinuation::Quit)
                 }

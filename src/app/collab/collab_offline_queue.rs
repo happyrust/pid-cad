@@ -12,6 +12,7 @@
 
 use crate::app::collab::{messages, CollabEvent, Outgoing, Refused};
 use crate::app::OpenCADStudio;
+use crate::pid::collab_state::REMOTE_UNAPPLIED;
 use crate::pid::persist::PidAuthor;
 use crate::pid::propagate::split_props;
 use document::entities::Insert;
@@ -34,31 +35,37 @@ const TEMPERATURE: &str = "设计温度";
 fn editor(user: &str) -> OpenCADStudio {
     let mut app = OpenCADStudio::new_for_test();
     let _ = app.automation_op(r#"{"op":"new"}"#);
-    let i = app.active_tab;
-    let document = &mut app.tabs[i].scene.document;
-    let objects = [
-        (PUMP, 0.0, r#"{"设计压力":"1.0MPa","设计温度":"80℃"}"#),
-        (VESSEL, 40.0, "{}"),
-    ];
-    for (tag, x, props) in objects {
-        let handle = document
-            .add_entity(EntityType::Insert(Insert::new(
-                "PID_SYM_equipment_vessel",
-                Vector3::new(x, 0.0, 0.0),
-            )))
-            .expect("entity");
-        PidAuthor {
-            type_code: "EQUIPMENT".to_owned(),
-            tag: tag.to_owned(),
-            tag_source: "auto".to_owned(),
-            tag_status: "ok".to_owned(),
-            props: props.to_owned(),
-            ..PidAuthor::default()
-        }
-        .store(document, handle);
-    }
+    draw(
+        &mut app,
+        PUMP,
+        0.0,
+        r#"{"设计压力":"1.0MPa","设计温度":"80℃"}"#,
+    );
+    draw(&mut app, VESSEL, 40.0, "{}");
     app.collab.user_id = user.to_owned();
     app
+}
+
+/// An object put straight onto the drawing in front: no step of anyone's,
+/// and nothing the room hears of.
+fn draw(app: &mut OpenCADStudio, tag: &str, x: f64, props: &str) {
+    let i = app.active_tab;
+    let document = &mut app.tabs[i].scene.document;
+    let handle = document
+        .add_entity(EntityType::Insert(Insert::new(
+            "PID_SYM_equipment_vessel",
+            Vector3::new(x, 0.0, 0.0),
+        )))
+        .expect("entity");
+    PidAuthor {
+        type_code: "EQUIPMENT".to_owned(),
+        tag: tag.to_owned(),
+        tag_source: "auto".to_owned(),
+        tag_status: "ok".to_owned(),
+        props: props.to_owned(),
+        ..PidAuthor::default()
+    }
+    .store(document, handle);
 }
 
 fn handle_of(app: &OpenCADStudio, tag: &str) -> Handle {
@@ -589,20 +596,132 @@ fn only_a_step_made_right_on_top_of_ones_own_op_takes_its_revision() {
 /// Back without a replay — a server that keeps no log — to a room that
 /// moved on: what happened in between cannot be had, the session says so,
 /// and the queue is kept and not sent (it would be written on top of the
-/// gap).
+/// gap). It is the connection that is held apart (`OFF-2`), not the drawing
+/// parted for good: the next connection is judged afresh.
 #[test]
 fn back_to_a_room_that_moved_on_with_no_replay_the_queue_stays_where_it_is() {
     let (mut a, mut b, mut room) = two_in_the_room();
     drop_session(&mut a);
     set(&mut a, PUMP, &[(PRESSURE, "1.6MPa")]);
     set(&mut b, PUMP, &[(TEMPERATURE, "120℃")]);
-    assert_eq!(exchange(&mut room, &mut b, &mut [&mut a]), Vec::<String>::new());
+    assert_eq!(
+        exchange(&mut room, &mut b, &mut [&mut a]),
+        Vec::<String>::new()
+    );
 
     join(&mut a, "s-a2", &room);
-    assert!(a.collab.diverged.is_some(), "the gap is known");
+    let apart = a.collab.not_aligned.clone().expect("the gap is known");
+    assert_eq!(apart.code, codes::REPLAY_GAP);
+    assert_eq!(a.collab.diverged, None);
     assert!(on_the_wire(&a).is_none());
     assert_eq!(a.collab.outbox.len(), 1);
     assert_eq!(a.collab.status_json()["queued_ops"], 1);
+}
+
+/// What the room did meanwhile is written into the drawing before any of
+/// the queue goes out (`SPEC-collab-offline-sync.md` §5.3): heard is not
+/// enough, the drawing is not where the room is until then.
+#[test]
+fn the_queue_waits_for_the_rooms_changes_to_be_written_not_just_heard() {
+    let (mut a, mut b, mut room) = two_in_the_room();
+    drop_session(&mut a);
+    set(&mut a, PUMP, &[(PRESSURE, "1.6MPa")]);
+    set(&mut b, VESSEL, &[(PRESSURE, "0.6MPa")]);
+    assert_eq!(
+        exchange(&mut room, &mut b, &mut [&mut a]),
+        Vec::<String>::new()
+    );
+    welcome_back(&mut a, "s-a2", &room);
+
+    // The replay in the two halves the app takes it in (`hear`): into the
+    // session's state, then onto the drawing.
+    let (revision, op_id, changes) = room.log[0].clone();
+    a.collab.apply(CollabEvent::OpApplied {
+        op_id,
+        revision,
+        changes,
+    });
+    assert_eq!(a.collab.catching_up, None, "the replay is through");
+    assert_eq!(prop(&a, VESSEL, PRESSURE), "", "and not written yet");
+    assert!(on_the_wire(&a).is_none(), "nothing goes out before it is");
+
+    a.apply_remote_changes();
+    assert_eq!(prop(&a, VESSEL, PRESSURE), "0.6MPa");
+    let (_, base, _) = on_the_wire(&a).expect("its own step goes out now");
+    assert_eq!(base, 0, "against the revision it was made at");
+    assert_eq!(
+        exchange(&mut room, &mut a, &mut [&mut b]),
+        Vec::<String>::new()
+    );
+    assert_eq!(picture(&a), picture(&b));
+}
+
+/// What the room did meanwhile and this drawing cannot follow — here a
+/// change to an object it does not have — parts it from the room, and the
+/// queue stays where it is: none of it goes out on top of the difference
+/// (OS-10). It used to go out as soon as the replay had been heard, before
+/// the change was found to be one the drawing could not take.
+#[test]
+fn a_replay_the_drawing_cannot_follow_sends_none_of_the_queue() {
+    let (mut a, mut b, mut room) = two_in_the_room();
+    draw(&mut b, "V-9001", 80.0, "{}");
+    drop_session(&mut a);
+    set(&mut a, PUMP, &[(PRESSURE, "1.6MPa")]);
+    set(&mut b, "V-9001", &[(PRESSURE, "0.6MPa")]);
+    assert_eq!(
+        exchange(&mut room, &mut b, &mut [&mut a]),
+        Vec::<String>::new()
+    );
+
+    come_back(&mut a, "s-a2", &room);
+    assert_eq!(
+        a.collab.diverged_as.map(|(code, _)| code),
+        Some(REMOTE_UNAPPLIED)
+    );
+    assert!(on_the_wire(&a).is_none(), "none of the queue goes out");
+    assert_eq!(a.collab.status_json()["queued_ops"], 1);
+    assert_eq!(
+        prop(&a, PUMP, PRESSURE),
+        "1.6MPa",
+        "the step stays on the drawing"
+    );
+}
+
+/// A step of this person's still open when the replay arrives is closed
+/// before the room's changes are written, as theirs, and goes to the back
+/// of the queue: it does not send the queue out ahead of them. When they
+/// cannot be written, none of the queue goes out.
+#[test]
+fn a_step_left_open_over_a_replay_sends_none_of_the_queue_ahead_of_it() {
+    let (mut a, mut b, mut room) = two_in_the_room();
+    draw(&mut b, "V-9001", 80.0, "{}");
+    drop_session(&mut a);
+    set(&mut a, PUMP, &[(PRESSURE, "1.6MPa")]);
+    set(&mut b, "V-9001", &[(PRESSURE, "0.6MPa")]);
+    assert_eq!(
+        exchange(&mut room, &mut b, &mut [&mut a]),
+        Vec::<String>::new()
+    );
+    welcome_back(&mut a, "s-a2", &room);
+
+    let tab = a.active_tab;
+    let pump = handle_of(&a, PUMP);
+    a.push_undo_snapshot(tab, "TEST");
+    {
+        let document = &mut a.tabs[tab].scene.document;
+        let mut record = PidAuthor::load(document, pump).expect("author");
+        record.props = r#"{"设计压力":"1.6MPa","设计温度":"120℃"}"#.to_owned();
+        record.store(document, pump);
+    }
+
+    assert!(replay_one(&mut a, &room));
+    assert_eq!(
+        a.collab.diverged_as.map(|(code, _)| code),
+        Some(REMOTE_UNAPPLIED)
+    );
+    assert_eq!(stacks(&a), (2, 0), "the open step was closed");
+    assert_eq!(a.collab.outbox.len(), 2, "and queued behind the other");
+    assert!(on_the_wire(&a).is_none(), "none of the queue goes out");
 }
 
 // ── A step the server refuses ────────────────────────────────────────────
@@ -856,6 +975,10 @@ fn queued(op_id: &str, steps: &[u64], on: bool) -> Outgoing {
         sent: false,
         label: String::new(),
         restored: false,
+        user_id: None,
+        queued_at: None,
+        inverse: None,
+        inverse_read: false,
     }
 }
 

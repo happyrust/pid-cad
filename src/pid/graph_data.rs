@@ -140,10 +140,26 @@ pub fn store(doc: &mut Document, key: &str, items: &[serde_json::Value]) {
 /// 读回 `key` 的条目列表。记录不存在返回 `None`（空表与无表同义）。
 ///
 /// 跳过 `kind=` / `key=` 两条前缀，其余按 `entries` 顺序收集。解析失败的
-/// 条目被跳过，不会把整表读成 `None`。
+/// 条目被跳过，不会把整表读成 `None`；要知道跳过了哪些，用
+/// [`load_reporting`]。
 pub fn load(doc: &Document, key: &str) -> Option<Vec<serde_json::Value>> {
+    load_reporting(doc, key).map(|loaded| loaded.items)
+}
+
+/// [`load_reporting`] 读回的一个 key。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Loaded {
+    /// 读得出的条目，按 `entries` 顺序。
+    pub items: Vec<serde_json::Value>,
+    /// 读不出的条目的原文，按 `entries` 顺序：不是 JSON 的一条，或拼好后
+    /// 仍不是 JSON 的分片（拼好的整段）。
+    pub unreadable: Vec<String>,
+}
+
+/// 同 [`load`]，读不出的条目不丢：原文收在 [`Loaded::unreadable`]。
+pub fn load_reporting(doc: &Document, key: &str) -> Option<Loaded> {
     let record = doc.xrecord(owner(doc), key)?;
-    let mut items = Vec::new();
+    let mut loaded = Loaded::default();
     let mut pending = String::new();
     for entry in &record.entries {
         let Some(text) = entry.value.as_string() else {
@@ -153,18 +169,23 @@ pub fn load(doc: &Document, key: &str) -> Option<Vec<serde_json::Value>> {
             continue;
         }
         if let Some(rest) = text.strip_prefix(PART_PREFIX) {
-            if let Some((_, chunk)) = rest.split_once(':') {
+            if let Some((index, chunk)) = rest.split_once(':') {
+                // 序号 0 是下一条的头一片：紧挨着的上一条分片条目到此为止。
+                if index == "0" {
+                    flush_pending(&mut pending, &mut loaded);
+                }
                 pending.push_str(chunk);
                 continue;
             }
         }
-        flush_pending(&mut pending, &mut items);
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-            items.push(value);
+        flush_pending(&mut pending, &mut loaded);
+        match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) => loaded.items.push(value),
+            Err(_) => loaded.unreadable.push(text.to_owned()),
         }
     }
-    flush_pending(&mut pending, &mut items);
-    Some(items)
+    flush_pending(&mut pending, &mut loaded);
+    Some(loaded)
 }
 
 /// 数据条目数（排除 `kind=` / `key=` 两条前缀）。记录不存在按 0 算。
@@ -312,15 +333,16 @@ fn split_text(json: &str) -> Vec<String> {
     chunks
 }
 
-/// 把攒下的分片拼回一个对象，解析失败就丢弃。
-fn flush_pending(pending: &mut String, items: &mut Vec<serde_json::Value>) {
+/// 把攒下的分片拼回一个对象，解析失败就记作读不出的一条。
+fn flush_pending(pending: &mut String, loaded: &mut Loaded) {
     if pending.is_empty() {
         return;
     }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(pending) {
-        items.push(value);
+    let text = std::mem::take(pending);
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => loaded.items.push(value),
+        Err(_) => loaded.unreadable.push(text),
     }
-    pending.clear();
 }
 
 #[cfg(test)]
@@ -780,6 +802,25 @@ mod tests {
             1,
             "分片应当拼回一条数据条目，实际 {}",
             items.len()
+        );
+    }
+
+    /// 相邻两条都超过单条上限、都切成分片：读回仍是两条，按原顺序。
+    #[test]
+    fn two_split_items_in_a_row_come_back_as_two() {
+        let first = serde_json::json!({ "which": "first", "text": "甲".repeat(MAX_TEXT_BYTES) });
+        let second = serde_json::json!({ "which": "second", "text": "乙".repeat(MAX_TEXT_BYTES) });
+        let mut doc = Document::new();
+        store(
+            &mut doc,
+            PID_AUTHOR_TOPOLOGY,
+            &[first.clone(), second.clone()],
+        );
+
+        assert_eq!(
+            load(&doc, PID_AUTHOR_TOPOLOGY),
+            Some(vec![first, second]),
+            "相邻两条分片条目应当各自拼回"
         );
     }
 }

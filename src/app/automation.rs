@@ -1995,7 +1995,8 @@ impl OpenCADStudio {
                         path.file_name().unwrap().to_string_lossy()
                     ));
                     self.tabs[i].scene.update_fields(2, None);
-                    let document = self.tabs[i].scene.document_for_save();
+                    let mut document = self.tabs[i].scene.document_for_save();
+                    self.write_collab_state_into_snapshot(i, &mut document);
                     if let Err(e) = crate::io::save(&document, &scratch) {
                         return err(format!("save: {e}"));
                     }
@@ -2861,8 +2862,11 @@ impl OpenCADStudio {
 
         self.prepare_native_save(i);
         // The same snapshot a normal save writes: display-only overrides and
-        // resolved xref content stay out of the file.
-        let snapshot = self.tabs[i].scene.document_for_save();
+        // resolved xref content stay out of the file, and the sync records
+        // say where the drawing stands now. Written before the manifest, so
+        // the reopened file is checked against them.
+        let mut snapshot = self.tabs[i].scene.document_for_save();
+        self.write_collab_state_into_snapshot(i, &mut snapshot);
         // Bake simulation: save_as_version mints *D geometry blocks on its
         // private clone, so the reopened manifest always contains baked
         // sub-entities. Compare against the same baked view or every new

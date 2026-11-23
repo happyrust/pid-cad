@@ -12,6 +12,11 @@
 //! the rules file: [`Rules`] is data (`assets/pid-legend.json`), and a new
 //! block id is a new line in it, not new code.
 //!
+//! A sheet opened from a native `.pid` brings its symbols as block references
+//! that already say what they are (`role=symbol` in their `PID_SEMANTICS`
+//! record). The block pass leaves those out: they are neither recognised nor
+//! reported as blocks the rules lack.
+//!
 //! A second family (the loading-island sheets) has its symbols exploded into
 //! loose strokes. Those are recovered as connected components of short
 //! geometry, each reduced to a shape id that is the same for every placement
@@ -340,6 +345,10 @@ pub fn recognise_with_units(doc: &Document, rules: &Rules, units_per_mm: f64) ->
             continue;
         };
         if excluded_handles.contains(&insert.common.handle) {
+            continue;
+        }
+        // A symbol the `.pid` importer placed says what it is itself.
+        if xdata::is_imported_symbol(insert) {
             continue;
         }
         let name = insert.block_name.as_str();

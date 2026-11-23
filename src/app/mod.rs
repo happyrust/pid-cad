@@ -88,7 +88,13 @@ mod object_isolation_tests;
 mod options_session;
 #[cfg(test)]
 mod paste_special_tests;
+#[cfg(test)]
+mod pid_read_only_view_tests;
 pub mod pid_shell;
+#[cfg(test)]
+mod pid_symbol_block_tests;
+#[cfg(test)]
+mod pid_symbol_view_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod plugin_host;
 mod presspull_ops;
@@ -1649,7 +1655,16 @@ pub(super) struct OpenCADStudio {
     /// one to PDF: the two may run at once.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) pid_backup_export: commands::pidbackupexport::BackupExport,
+    /// The tags that backup's database gives its items, and the drawings
+    /// opened from the panel that wait for them. App-level as well: the
+    /// tags are the backup's, and go on every drawing opened from it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) pid_backup_tags: commands::pidbackup::tags::BackupTags,
     pub(crate) pid_symbols: crate::pid::symbols::SymbolLibrary,
+    /// The P&ID project index (`commands::pidindex`): summaries of the
+    /// project drawings on disk, kept while the file is unchanged, and the
+    /// scan reading them in the background.
+    pub(in crate::app) pid_index: commands::pidindex::PidIndex,
     /// Which group of symbols the P&ID legend list shows (its filter row).
     pub(crate) pid_legend_filter: crate::ui::window::pid_legend_list::PidLegendFilter,
     /// Whether the P&ID panel's five exception summaries are expanded.
@@ -2443,6 +2458,12 @@ pub(super) struct OpenCADStudio {
     /// "Close All Other Drawings". Dirty drawings pause this queue at the
     /// existing unsaved-changes dialog and resume after Save or Discard.
     pending_tab_closes: std::collections::VecDeque<u64>,
+    /// The question quitting, or closing the session's drawing, asks while
+    /// steps wait for the room; `None` while it is not up.
+    unsynced_question: Option<collab::UnsyncedQuestion>,
+    /// Set while 退出 / 关闭 goes on with what the question was asked about,
+    /// so the way out does not ask it a second time.
+    leaving_anyway: bool,
     /// Latest save job per stable tab id. Older completions may finish, but
     /// cannot mark a newer document state clean or redirect its path.
     #[cfg(not(target_arch = "wasm32"))]
@@ -3462,6 +3483,7 @@ pub enum ModalKind {
     StyleImport,
     Unsaved,
     BlockEditChanges,
+    CollabUnsynced,
     BlockEditPicker,
     Rename,
     Purge,
@@ -4194,6 +4216,10 @@ pub enum Message {
     BlockEditChangesSave,
     BlockEditChangesDiscard,
     BlockEditChangesCancel,
+    /// 退出 / 关闭 in the question about steps not synced.
+    CollabUnsyncedLeave,
+    /// 取消 in it.
+    CollabUnsyncedCancel,
     BlockSaveAsName(String),
     BlockSaveAsApply,
     BlockVisibility(crate::ui::window::block_visibility::Action),
@@ -4401,6 +4427,10 @@ pub enum Message {
     /// command layer only carries out the effect it asks for.
     #[cfg(not(target_arch = "wasm32"))]
     PidBackup(crate::ui::window::pid_backup_browser::PidBackupMsg),
+    /// PIDINDEX's background read of the project drawings on disk: one file
+    /// read into its summary (or why it could not be), or the reading over.
+    /// The number is the scan's, so the reads of a cancelled scan are known.
+    PidIndexRead(u64, commands::pidindex::Read),
     /// Web SCRIPT: the picked .scr file's name and text. `None` = the
     /// browser dialog was cancelled.
     #[cfg(target_arch = "wasm32")]
@@ -6756,7 +6786,10 @@ impl OpenCADStudio {
             pid_backup_pdf: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             pid_backup_export: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            pid_backup_tags: Default::default(),
             pid_symbols: crate::pid::symbols::SymbolLibrary::load_from_env(),
+            pid_index: Default::default(),
             pid_legend_filter: Default::default(),
             pid_legend_exceptions_open: false,
             show_tool_palettes: false,
@@ -6984,6 +7017,8 @@ impl OpenCADStudio {
             pending_close: None,
             pending_tab_closes: std::collections::VecDeque::new(),
             pending_block_close: None,
+            unsynced_question: None,
+            leaving_anyway: false,
             #[cfg(not(target_arch = "wasm32"))]
             active_save_jobs: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -7203,6 +7238,13 @@ impl OpenCADStudio {
         let id = tab.id;
         self.tabs.push(tab);
         id
+    }
+
+    /// Test hook for code outside `crate::app` (the drawing summary tests):
+    /// the active tab's drawing, read without reaching into `tabs`.
+    #[cfg(test)]
+    pub(crate) fn active_document_for_test(&self) -> &document::Document {
+        &self.tabs[self.active_tab].scene.document
     }
 
     /// Open a declarative plugin modal dialog on the currently active tab.
@@ -7587,6 +7629,7 @@ impl OpenCADStudio {
         if let Some(drawing) = cfg.collab_drawing.as_deref().map(str::trim) {
             if !drawing.is_empty() {
                 s.collab.drawing_id = drawing.to_owned();
+                s.collab.drawing_given = true;
             }
         }
         if let Some(mode) = cfg.collab_mode.as_deref().map(str::trim) {
@@ -7595,7 +7638,9 @@ impl OpenCADStudio {
             }
         }
         // The drawing id defaults to the drawing being opened, so `--collab`
-        // alone still names a room; `--drawing` overrides it.
+        // alone still names a room; `--drawing` overrides it. Without
+        // `--drawing`, the one the drawing's sync record names wins over both
+        // (`OpenCADStudio::record_allows`).
         if s.collab.drawing_id.is_empty() {
             if let Some(path) = cfg.files.first() {
                 if let Some(stem) = path.file_stem() {

@@ -63,6 +63,10 @@ pub struct HeldOp {
     /// Unix seconds it arrived at; the audit rows it writes carry this.
     pub received_at: i64,
     pub due: Instant,
+    /// Sent again while the op of its id that came first was held: it
+    /// waits behind that one, ties with nothing, and is answered with what
+    /// came of it (`OFF-4`).
+    pub repeat: bool,
 }
 
 /// What handling one op came to.
@@ -127,7 +131,7 @@ impl DrawingOps {
     fn held_against(&self, change: &Change, session_id: &str) -> Option<(&HeldOp, &Change)> {
         self.held
             .iter()
-            .filter(|held| held.session.session_id != session_id)
+            .filter(|held| !held.repeat && held.session.session_id != session_id)
             .find_map(|held| {
                 held.changes
                     .iter()
@@ -154,6 +158,132 @@ struct Incoming<'a> {
     op_id: &'a str,
     base_revision: i64,
     now: i64,
+}
+
+/// Whether op `op_id` from `session` is one its drawing has had before, and
+/// if so the answer to it (`OFF-4`). Asked before anything else is asked of
+/// an op: one taken before was allowed when it came, and a refusal now
+/// would have its sender take back a step the room has. [`receive`] asks
+/// again under the lock the judgment runs under, for two sendings of one
+/// op that cross.
+pub fn heard_before(
+    state: &AppState,
+    session: &Session,
+    peer_addr: &str,
+    base_revision: i64,
+    op_id: &str,
+    payload: &Value,
+    now: i64,
+) -> Option<Outcome> {
+    let mut drawings = state.drawings.lock().expect("drawings mutex poisoned");
+    let drawing = drawings
+        .entry(session.drawing_id.clone())
+        .or_insert_with(|| DrawingOps::load(state, &session.drawing_id));
+    let incoming = Incoming {
+        session,
+        peer_addr,
+        op_id,
+        base_revision,
+        now,
+    };
+    heard(state, drawing, &incoming, payload)
+}
+
+/// [`heard_before`] under the lock. An op that took effect, or waits in a
+/// conflict entry, is answered with what came of it. One whose first
+/// sending is still held in the tie window waits behind it, ties with
+/// nothing, and is answered when that one is through ([`flush_due`]).
+/// `None` for an op the drawing has not had, or refused: it is judged like
+/// any other.
+fn heard(
+    state: &AppState,
+    drawing: &mut DrawingOps,
+    incoming: &Incoming<'_>,
+    payload: &Value,
+) -> Option<Outcome> {
+    if let Some(said) = taken_before(state, incoming.session, incoming.op_id) {
+        return Some(said_again(incoming.session, incoming.op_id, said));
+    }
+    let due = drawing
+        .held
+        .iter()
+        .find(|held| held.op_id == incoming.op_id)?
+        .due;
+    println!(
+        "[ocs_collab_server] 入站 op session={} user={} op_id={} -> 重复提交：先到的那次还在并列窗口内，排在它后面等它的结果 at={}",
+        incoming.session.session_id, incoming.session.user_id, incoming.op_id, incoming.now
+    );
+    drawing.held.push(HeldOp {
+        op_id: incoming.op_id.to_owned(),
+        session: incoming.session.clone(),
+        peer_addr: incoming.peer_addr.to_owned(),
+        base_revision: incoming.base_revision,
+        changes: Change::list(payload),
+        received_at: incoming.now,
+        due,
+        repeat: true,
+    });
+    Some(Outcome::default())
+}
+
+/// What came of op `op_id` on `session`'s drawing the first time: the
+/// `conflict` of every entry that holds it and waits for a ruling, then the
+/// `op_applied` its row of the op log says — the revision and the changes
+/// it went out with. `None` when neither has it. Without a database there
+/// is no log to ask.
+fn taken_before(state: &AppState, session: &Session, op_id: &str) -> Option<Vec<ServerMessage>> {
+    let store = state.store.as_ref()?;
+    let drawing_id = &session.drawing_id;
+    let entries = store
+        .pending_conflicts_holding(drawing_id, op_id)
+        .unwrap_or_else(|err| {
+            eprintln!("[ocs_collab_server] 按编号查 {drawing_id} 的冲突条目失败：{err}");
+            Vec::new()
+        });
+    let logged = store.logged_op(drawing_id, op_id).unwrap_or_else(|err| {
+        eprintln!("[ocs_collab_server] 按编号查 {drawing_id} 的操作日志失败：{err}");
+        None
+    });
+    let mut said: Vec<ServerMessage> = entries
+        .into_iter()
+        .map(|(row, op_ids)| ServerMessage::Conflict {
+            conflict_id: row.conflict_id,
+            object_ref: row.object_ref,
+            field: row.field,
+            value_a: row.value_a,
+            value_b: row.value_b,
+            op_ids,
+        })
+        .collect();
+    said.extend(logged.map(|op| ServerMessage::OpApplied {
+        op_id: op.op_id,
+        revision: op.revision,
+        changes: op.changes,
+    }));
+    (!said.is_empty()).then_some(said)
+}
+
+/// The answer to op `op_id` sent again by `session`: what came of it, said
+/// to that session alone — not judged, not logged, not told to the room. It
+/// goes by the session's own channel, which says it after what the room
+/// was told before ([`ws::earlier_in_the_room`]).
+fn said_again(session: &Session, op_id: &str, said: Vec<ServerMessage>) -> Outcome {
+    println!(
+        "[ocs_collab_server] 入站 op session={} user={} op_id={op_id} -> 重复提交：不裁决、不入日志、不广播，只回发送者当初的结果（{} 条）",
+        session.session_id,
+        session.user_id,
+        said.len()
+    );
+    Outcome {
+        reactions: said
+            .into_iter()
+            .map(|message| Reaction::SendTo {
+                session_id: session.session_id.clone(),
+                message,
+            })
+            .collect(),
+        revision: None,
+    }
 }
 
 /// Take one op from `session`.
@@ -183,6 +313,9 @@ pub fn receive(
         now,
     };
 
+    if let Some(outcome) = heard(state, drawing, &incoming, &payload) {
+        return outcome;
+    }
     if base_revision > current {
         return stale(&incoming, current);
     }
@@ -200,7 +333,8 @@ pub fn receive(
         // still inside the window and stakes a different claim to something
         // this one stakes a claim to.
         let tied = drawing.held.iter().position(|held| {
-            held.session.session_id != session.session_id
+            !held.repeat
+                && held.session.session_id != session.session_id
                 && held.base_revision == base_revision
                 && held
                     .changes
@@ -231,6 +365,7 @@ pub fn receive(
                 changes,
                 received_at: now,
                 due: Instant::now() + state.tie_window,
+                repeat: false,
             });
             return Outcome::default();
         }
@@ -421,6 +556,23 @@ pub fn flush_due(state: &AppState, now: Instant) -> Vec<(String, Outcome)> {
     for (drawing_id, drawing) in drawings.iter_mut() {
         while let Some(index) = drawing.held.iter().position(|held| held.due <= now) {
             let held = drawing.held.remove(index);
+            // Sent again behind its first sending, which is through by now:
+            // answered with what came of it. Judged only when nothing did —
+            // the first was refused.
+            if held.repeat {
+                if let Some(said) = taken_before(state, &held.session, &held.op_id) {
+                    outcomes.push((
+                        drawing_id.clone(),
+                        said_again(&held.session, &held.op_id, said),
+                    ));
+                    made_by.push((
+                        held.session.clone(),
+                        held.peer_addr.clone(),
+                        held.received_at,
+                    ));
+                    continue;
+                }
+            }
             let incoming = Incoming {
                 session: &held.session,
                 peer_addr: &held.peer_addr,
@@ -1370,7 +1522,8 @@ fn tie(
                 resolved_value: None,
                 resolved_by: None,
             };
-            if let Err(err) = store.insert_conflict(&row) {
+            let held = [first.op_id.clone(), second.op_id.to_owned()];
+            if let Err(err) = store.insert_conflict_holding(&row, &held) {
                 eprintln!("[ocs_collab_server] 写入冲突条目失败：{err}");
             }
             // Both attempts go on record, each under the person who made it.
@@ -2878,5 +3031,312 @@ mod tests {
         let _u1 = join_with(&state, "u1", None, &["V-1001"]).await;
         let mut u2 = join(&state, "u2").await;
         assert_eq!(place(&state, &mut u2, "op-1", "V-1001").await, "V-1002");
+    }
+
+    fn valve(tag: &str) -> Value {
+        json!({"kind": "insert_symbol", "type": "VALVE", "tag": tag, "position": [0, 0]})
+    }
+
+    /// What `reactions` say to `conn`'s session alone.
+    fn said_to(reactions: &[Reaction], conn: &Connection) -> Vec<ServerMessage> {
+        let own = &conn.session.as_ref().expect("session").session_id;
+        reactions
+            .iter()
+            .filter_map(|reaction| match reaction {
+                Reaction::SendTo {
+                    session_id,
+                    message,
+                } if session_id == own => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `(op_id, revision)` of every `op_applied` the room was told since
+    /// `room` subscribed.
+    fn heard_in(room: &mut crate::bus::Subscription) -> Vec<(String, i64)> {
+        std::iter::from_fn(|| room.try_recv())
+            .filter_map(|message| match message {
+                ServerMessage::OpApplied {
+                    op_id, revision, ..
+                } => Some((op_id, revision)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn claim(state: &AppState, conn: &mut Connection, tag: &str) {
+        let session_id = conn.session.as_ref().expect("session").session_id.clone();
+        let claim = ClientMessage::Claim {
+            session_id,
+            tag: tag.into(),
+        };
+        let reactions = handle_message(state, conn, claim, T0).await;
+        assert!(
+            reactions.iter().any(|reaction| matches!(
+                reaction,
+                Reaction::Send(ServerMessage::ClaimGranted { .. })
+            )),
+            "{reactions:?}"
+        );
+    }
+
+    async fn release(state: &AppState, conn: &mut Connection, tag: &str) {
+        let session_id = conn.session.as_ref().expect("session").session_id.clone();
+        let release = ClientMessage::Release {
+            session_id,
+            tag: tag.into(),
+        };
+        handle_message(state, conn, release, T0).await;
+    }
+
+    /// `OFF-4`: the same op twice — a copy that sent it again, not knowing
+    /// the first had got through. It takes effect once: one valve, one
+    /// revision, one row of the op log, one `op_applied` for the room. Its
+    /// sender alone is told again what came of it: the revision of that row
+    /// and the changes it went out with.
+    #[tokio::test]
+    async fn duplicate_op_a_valve_sent_twice_is_placed_once() {
+        let state = state();
+        let mut s1 = join(&state, "u1").await;
+        let _s2 = join(&state, "u2").await;
+        let mut room = state.bus.subscribe(DRAWING);
+
+        let first = submit(&state, &mut s1, 0, "op-r-1-1", valve("V-1001")).await;
+        let (_, revision, changes) = applied(&first).expect("placed");
+        assert_eq!(revision, 1);
+        let again = submit(&state, &mut s1, 0, "op-r-1-1", valve("V-1001")).await;
+
+        assert_eq!(objects(&state, DRAWING, None).0, 1, "one valve");
+        assert_eq!(crate::ws::current_revision(&state, DRAWING), 1);
+        let log: Vec<(String, i64)> = op_log(&state, DRAWING)
+            .into_iter()
+            .map(|op| (op.op_id, op.revision))
+            .collect();
+        assert_eq!(log, [("op-r-1-1".to_owned(), 1)]);
+        assert_eq!(
+            heard_in(&mut room),
+            [("op-r-1-1".to_owned(), 1)],
+            "the room hears it once"
+        );
+        let session_id = s1.session.as_ref().expect("session").session_id.clone();
+        assert_eq!(
+            again,
+            [Reaction::SendTo {
+                session_id,
+                message: ServerMessage::OpApplied {
+                    op_id: "op-r-1-1".into(),
+                    revision: 1,
+                    changes,
+                },
+            }],
+            "its sender alone, told what it was told the first time"
+        );
+    }
+
+    /// `OFF-4`: one queue in two copies — a file saved with steps still to
+    /// send, opened in two places — and both copies send it, one after the
+    /// other. Each step takes effect once, at the revision the first copy
+    /// got it in at; the second copy is told each step's revision for an
+    /// answer, and is refused nothing.
+    #[tokio::test]
+    async fn duplicate_op_one_queue_sent_from_two_copies_takes_effect_once() {
+        let state = state();
+        let mut first = join(&state, "u1").await;
+        let mut second = join(&state, "u1").await;
+        let queue = [
+            ("op-r-1-1", set("设计压力", "1.6MPa")),
+            ("op-r-1-2", set("设计压力", "2.0MPa")),
+            ("op-r-1-3", valve("V-1001")),
+        ];
+        for (op_id, payload) in &queue {
+            let reactions = submit(&state, &mut first, 0, op_id, payload.clone()).await;
+            assert!(applied(&reactions).is_some(), "{op_id}: {reactions:?}");
+        }
+
+        let mut told = Vec::new();
+        for (op_id, payload) in &queue {
+            let reactions = submit(&state, &mut second, 0, op_id, payload.clone()).await;
+            assert!(errors(&reactions).is_empty(), "{op_id}: {reactions:?}");
+            for message in said_to(&reactions, &second) {
+                if let ServerMessage::OpApplied {
+                    op_id, revision, ..
+                } = message
+                {
+                    told.push((op_id, revision));
+                }
+            }
+        }
+        let expected: Vec<(String, i64)> = vec![
+            ("op-r-1-1".into(), 1),
+            ("op-r-1-2".into(), 2),
+            ("op-r-1-3".into(), 3),
+        ];
+        assert_eq!(told, expected);
+        let log: Vec<(String, i64)> = op_log(&state, DRAWING)
+            .into_iter()
+            .map(|op| (op.op_id, op.revision))
+            .collect();
+        assert_eq!(log, expected);
+        assert_eq!(crate::ws::current_revision(&state, DRAWING), 3);
+        assert_eq!(value_of(&state, "设计压力").as_deref(), Some("2.0MPa"));
+    }
+
+    /// `OFF-4`: only what the op log has is answered from it. An op refused
+    /// the first time — somebody held the tag — is not in the log, and sent
+    /// again it is judged again: the tag is free now, and it takes effect.
+    #[tokio::test]
+    async fn duplicate_op_one_refused_before_is_judged_again() {
+        let state = state();
+        let mut s1 = join(&state, "u1").await;
+        let mut s2 = join(&state, "u2").await;
+        claim(&state, &mut s2, "P-1001").await;
+        let refused = submit(&state, &mut s1, 0, "op-r-1-1", set("设计压力", "1.6MPa")).await;
+        assert_eq!(errors(&refused)[0].0, codes::CLAIM_HELD, "{refused:?}");
+        assert!(op_log(&state, DRAWING).is_empty());
+
+        release(&state, &mut s2, "P-1001").await;
+        let again = submit(&state, &mut s1, 0, "op-r-1-1", set("设计压力", "1.6MPa")).await;
+        let (_, revision, _) = applied(&again).expect("judged, and taken");
+        assert_eq!(revision, 1);
+        assert_eq!(value_of(&state, "设计压力").as_deref(), Some("1.6MPa"));
+    }
+
+    /// `OFF-4`: an op that went into a conflict entry, sent again while the
+    /// entry waits for its ruling, is answered with the entry as it was told
+    /// the first time — not judged again, not held, no second entry.
+    #[tokio::test]
+    async fn duplicate_op_one_in_a_conflict_entry_is_answered_with_the_entry() {
+        let state = windowed();
+        let mut s1 = join(&state, "u1").await;
+        let mut s2 = join(&state, "u2").await;
+        submit(&state, &mut s1, 0, "op-r-1-1", set("设计压力", "1.6MPa")).await;
+        let tied = submit(&state, &mut s2, 0, "op-r-2-1", set("设计压力", "2.5MPa")).await;
+        let entry = conflicts_published(&tied).pop().expect("a conflict entry");
+
+        let again = submit(&state, &mut s1, 0, "op-r-1-1", set("设计压力", "1.6MPa")).await;
+        assert_eq!(said_to(&again, &s1), [entry], "{again:?}");
+        let later = flush_due(&state, Instant::now() + Duration::from_secs(5));
+        assert!(later.is_empty(), "nothing held: {later:?}");
+        assert_eq!(conflict_rows(&state).len(), 1);
+        assert_eq!(value_of(&state, "设计压力"), None);
+        assert!(op_log(&state, DRAWING).is_empty());
+    }
+
+    /// `OFF-4`: the op log outlives the process. A server started again on
+    /// the same database answers an op it took before from the log.
+    #[tokio::test]
+    async fn duplicate_op_one_taken_before_a_restart_is_answered_after_it() {
+        let dir = std::env::temp_dir().join("ocs_collab_ops_tests");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(format!("restart-{}.db", uuid::Uuid::new_v4()));
+        let started = || {
+            let store = Store::open(&path).expect("store");
+            AppState::new(
+                Some(store),
+                None,
+                path.display().to_string(),
+                SessionConfig::default(),
+            )
+        };
+
+        let before = started();
+        let mut s1 = join(&before, "u1").await;
+        let first = submit(&before, &mut s1, 0, "op-r-1-1", valve("V-1001")).await;
+        let (_, _, changes) = applied(&first).expect("placed");
+        drop(s1);
+        drop(before);
+
+        let after = started();
+        let mut s2 = join(&after, "u1").await;
+        let again = submit(&after, &mut s2, 0, "op-r-1-1", valve("V-1001")).await;
+        assert_eq!(
+            said_to(&again, &s2),
+            [ServerMessage::OpApplied {
+                op_id: "op-r-1-1".into(),
+                revision: 1,
+                changes,
+            }],
+            "{again:?}"
+        );
+        assert_eq!(op_log(&after, DRAWING).len(), 1);
+        assert_eq!(objects(&after, DRAWING, None).0, 1);
+        drop(after);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    /// `OFF-4`: two copies send one op inside the tie window. The second
+    /// waits behind the first and ties with nothing; when the window has
+    /// passed the first takes effect, and the second is answered with it.
+    #[tokio::test]
+    async fn duplicate_op_sent_again_inside_the_window_is_answered_with_the_first() {
+        let state = windowed();
+        let mut first = join(&state, "u1").await;
+        let mut second = join(&state, "u1").await;
+        let held = submit(&state, &mut first, 0, "op-r-1-1", set("设计压力", "1.6MPa")).await;
+        assert!(held.is_empty(), "{held:?}");
+        let again = submit(
+            &state,
+            &mut second,
+            0,
+            "op-r-1-1",
+            set("设计压力", "1.6MPa"),
+        )
+        .await;
+        assert!(again.is_empty(), "{again:?}");
+
+        let reactions: Vec<Reaction> = flush_due(&state, Instant::now() + Duration::from_secs(1))
+            .into_iter()
+            .flat_map(|(_, outcome)| outcome.reactions)
+            .collect();
+        assert!(errors(&reactions).is_empty(), "{reactions:?}");
+        let (_, revision, changes) = applied(&reactions).expect("the first takes effect");
+        assert_eq!(revision, 1);
+        assert_eq!(
+            said_to(&reactions, &second),
+            [ServerMessage::OpApplied {
+                op_id: "op-r-1-1".into(),
+                revision: 1,
+                changes,
+            }],
+            "{reactions:?}"
+        );
+        assert_eq!(op_log(&state, DRAWING).len(), 1);
+        assert!(conflict_rows(&state).is_empty());
+    }
+
+    /// `OFF-4`: an op taken before is answered before anything else is asked
+    /// of it. Since it took effect somebody else has taken the tag it
+    /// wrote; a copy that sends it again is told it took effect, not refused
+    /// — a refusal would have that copy take back a step the room has.
+    #[tokio::test]
+    async fn duplicate_op_a_tag_taken_since_does_not_refuse_an_op_taken_before() {
+        let state = state();
+        let mut first = join(&state, "u1").await;
+        let mut second = join(&state, "u1").await;
+        let mut other = join(&state, "u2").await;
+        let taken = submit(&state, &mut first, 0, "op-r-1-1", set("设计压力", "1.6MPa")).await;
+        let (_, _, changes) = applied(&taken).expect("taken");
+        claim(&state, &mut other, "P-1001").await;
+
+        let again = submit(
+            &state,
+            &mut second,
+            0,
+            "op-r-1-1",
+            set("设计压力", "1.6MPa"),
+        )
+        .await;
+        assert!(errors(&again).is_empty(), "{again:?}");
+        assert_eq!(
+            said_to(&again, &second),
+            [ServerMessage::OpApplied {
+                op_id: "op-r-1-1".into(),
+                revision: 1,
+                changes,
+            }]
+        );
     }
 }

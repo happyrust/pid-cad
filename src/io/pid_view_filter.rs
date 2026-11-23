@@ -448,7 +448,8 @@ fn remove_xrecord(doc: &mut Document, owner: Handle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use document::entities::Line;
+    use document::entities::{Insert, Line};
+    use document::tables::BlockRecord;
     use document::types::Vector3;
     use document::xdata::ExtendedDataRecord;
 
@@ -468,19 +469,34 @@ mod tests {
         assert!(!is_hidden_sheet_layer("Labels"));
     }
 
-    fn line_with(pairs: &[&str]) -> EntityType {
-        let mut line = EntityType::Line(Line::from_points(
-            Vector3::new(0.0, 0.0, 0.0),
-            Vector3::new(1.0, 0.0, 0.0),
-        ));
+    /// `entity` with `pairs` as its `PID_SEMANTICS` record -- with no record
+    /// at all when there are none.
+    fn saying(mut entity: EntityType, pairs: &[&str]) -> EntityType {
         if !pairs.is_empty() {
             let mut record = ExtendedDataRecord::new(PID_SEMANTICS_XDATA_APP);
             for pair in pairs {
                 record.add_value(XDataValue::String(pair.to_string()));
             }
-            line.common_mut().extended_data.add_record(record);
+            entity.common_mut().extended_data.add_record(record);
         }
-        line
+        entity
+    }
+
+    fn line_with(pairs: &[&str]) -> EntityType {
+        saying(
+            EntityType::Line(Line::from_points(
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            )),
+            pairs,
+        )
+    }
+
+    /// A reference to the block `block`, filed on `layer`.
+    fn reference_on(layer: &str, block: &str, pairs: &[&str]) -> EntityType {
+        let mut reference = EntityType::Insert(Insert::new(block, Vector3::new(0.0, 0.0, 0.0)));
+        reference.common_mut().layer = layer.to_string();
+        saying(reference, pairs)
     }
 
     fn document_with(entities: Vec<EntityType>) -> Document {
@@ -489,6 +505,49 @@ mod tests {
             let _ = doc.add_entity(entity);
         }
         doc
+    }
+
+    /// File `members` as the definition of the block `name`: a record of the
+    /// block table owns them, where model space owns a loose entity.
+    fn define(doc: &mut Document, name: &str, members: Vec<EntityType>) {
+        let owner = doc.allocate_handle();
+        let mut record = BlockRecord::new(name);
+        record.handle = owner;
+        doc.block_records
+            .add(record)
+            .expect("no block of that name yet");
+        for mut member in members {
+            member.common_mut().owner_handle = owner;
+            let _ = doc.add_entity(member);
+        }
+    }
+
+    /// Declare a layer of the table, switched off.
+    fn layer_off(doc: &mut Document, name: &str) {
+        let mut layer = document::tables::layer::Layer::new(name);
+        layer.flags.off = true;
+        doc.layers.add(layer).expect("no layer of that name yet");
+    }
+
+    /// The `invisible` bits of what is in model space, in the order filed.
+    fn dark_in_model_space(doc: &Document) -> Vec<bool> {
+        doc.model_space_entities()
+            .map(|entity| entity.common().invisible)
+            .collect()
+    }
+
+    /// The `invisible` bits of a block's members, in the order filed.
+    fn dark_in_block(doc: &Document, block: &str) -> Vec<bool> {
+        doc.entities_in_block(block)
+            .map(|entity| entity.common().invisible)
+            .collect()
+    }
+
+    /// The rows of one axis of a summary: name, count, switch.
+    fn rows(rows: &[PidViewRow]) -> Vec<(String, usize, bool)> {
+        rows.iter()
+            .map(|row| (row.name.clone(), row.entities, row.on))
+            .collect()
     }
 
     #[test]
@@ -596,11 +655,6 @@ mod tests {
         assert!(PidViewSummary::of(&document_with(Vec::new())).is_empty());
 
         let summary = PidViewSummary::of(&doc);
-        let rows = |rows: &[PidViewRow]| -> Vec<(String, usize, bool)> {
-            rows.iter()
-                .map(|row| (row.name.clone(), row.entities, row.on))
-                .collect()
-        };
         assert_eq!(
             rows(&summary.layers),
             [
@@ -743,6 +797,171 @@ mod tests {
         assert_eq!(
             switched.entities, 0,
             "switching what is already off changes nothing"
+        );
+    }
+
+    /// A sheet the way an import files one: a valve placed on `Process` and
+    /// again on `Utility`, both references to one block, and a pipe on
+    /// `Process`. A reference says where the drawing files the placement and
+    /// that it is a symbol; the members of the block -- two strokes, a fill
+    /// and the symbol's name -- say only what each is.
+    fn two_valves_and_a_pipe() -> Document {
+        let mut doc = document_with(Vec::new());
+        define(
+            &mut doc,
+            "VALVE",
+            vec![
+                line_with(&["role=symbol"]),
+                line_with(&["role=symbol"]),
+                line_with(&["role=fill"]),
+                line_with(&["role=symbol-label"]),
+            ],
+        );
+        for entity in [
+            reference_on("Process", "VALVE", &["sheet_layer=Process", "role=symbol"]),
+            reference_on("Utility", "VALVE", &["sheet_layer=Utility", "role=symbol"]),
+            line_with(&["sheet_layer=Process", "role=geometry"]),
+        ] {
+            let _ = doc.add_entity(entity);
+        }
+        doc
+    }
+
+    /// A symbol filed as a block answers along both axes, in two places: its
+    /// reference to the sheet layer the drawing files it on and to being a
+    /// symbol, each member of its block to what that member is. So a sheet
+    /// layer switched off darkens the references on it and leaves the
+    /// definition, which the references on other layers draw too; a role
+    /// switched off darkens the members that state it, in the definition.
+    #[test]
+    fn a_block_reference_answers_to_its_sheet_layer_and_the_members_to_their_roles() {
+        let mut doc = two_valves_and_a_pipe();
+        assert_eq!(dark_in_model_space(&doc), [false; 3]);
+        assert_eq!(dark_in_block(&doc, "VALVE"), [false; 4]);
+        let all_on = PidViewFilter::default();
+        let without = |role: &str| {
+            let mut filter = PidViewFilter::default();
+            filter.set_role(role, false);
+            filter
+        };
+
+        assert_eq!(
+            PidViewFilter::with_layers_off(["Process"]).apply(&mut doc),
+            2,
+            "the reference on Process and the pipe"
+        );
+        assert_eq!(dark_in_model_space(&doc), [true, false, true]);
+        assert_eq!(
+            dark_in_block(&doc, "VALVE"),
+            [false; 4],
+            "the valve on Utility draws the same definition"
+        );
+        assert_eq!(all_on.apply(&mut doc), 2);
+
+        assert_eq!(
+            without("symbol").apply(&mut doc),
+            4,
+            "both references and the two strokes"
+        );
+        assert_eq!(dark_in_model_space(&doc), [true, true, false]);
+        assert_eq!(dark_in_block(&doc, "VALVE"), [true, true, false, false]);
+        assert_eq!(all_on.apply(&mut doc), 4);
+
+        assert_eq!(without("fill").apply(&mut doc), 1);
+        assert_eq!(dark_in_model_space(&doc), [false; 3]);
+        assert_eq!(dark_in_block(&doc, "VALVE"), [false, false, true, false]);
+        assert_eq!(all_on.apply(&mut doc), 1);
+
+        assert_eq!(without("symbol-label").apply(&mut doc), 1);
+        assert_eq!(dark_in_model_space(&doc), [false; 3]);
+        assert_eq!(dark_in_block(&doc, "VALVE"), [false, false, false, true]);
+    }
+
+    /// The sheet-layer view counts what states each name. On its sheet layer
+    /// a symbol is one entity, its reference, however much its block draws.
+    /// Along the roles the reference counts as a symbol and each member of
+    /// the definition under what it is -- once, however many references
+    /// draw the definition.
+    #[test]
+    fn the_summary_counts_a_reference_on_its_sheet_layer_and_the_members_under_their_roles() {
+        let summary = PidViewSummary::of(&two_valves_and_a_pipe());
+        assert_eq!(
+            rows(&summary.layers),
+            [
+                ("Process".to_string(), 2, true),
+                ("Utility".to_string(), 1, true),
+            ],
+            "a reference each, and the pipe"
+        );
+        assert_eq!(
+            rows(&summary.roles),
+            [
+                ("geometry".to_string(), 1, true),
+                ("symbol".to_string(), 4, true),
+                ("symbol-label".to_string(), 1, true),
+                ("fill".to_string(), 1, true),
+            ],
+            "the two references and the two strokes are symbol"
+        );
+    }
+
+    /// Switching a hidden sheet layer on has to show the symbols on it, and
+    /// a symbol shows through its reference. So the layer of the table the
+    /// switch turns on with it is the one the reference is filed on --
+    /// `PID-HIDDEN`, or the layer named like the sheet layer -- as it is for
+    /// a loose entity, and the definition is left as it was.
+    #[test]
+    fn lighting_a_sheet_layer_releases_the_layer_its_block_reference_is_on() {
+        let mut doc = document_with(Vec::new());
+        define(
+            &mut doc,
+            "VALVE",
+            vec![line_with(&["role=symbol"]), line_with(&["role=fill"])],
+        );
+        layer_off(&mut doc, LAYER_HIDDEN);
+        layer_off(&mut doc, "Spare");
+        for entity in [
+            reference_on(
+                LAYER_HIDDEN,
+                "VALVE",
+                &["sheet_layer=HiddenObjects", "role=symbol"],
+            ),
+            reference_on("Spare", "VALVE", &["sheet_layer=Spare", "role=symbol"]),
+        ] {
+            let _ = doc.add_entity(entity);
+        }
+        let initial = PidViewFilter::with_layers_off(["HiddenObjects", "Spare"]);
+        initial.store(&mut doc);
+        assert_eq!(initial.apply(&mut doc), 2);
+        assert_eq!(dark_in_model_space(&doc), [true, true]);
+        let is_off = |doc: &Document, layer: &str| doc.layers.get(layer).unwrap().flags.off;
+
+        let switched = switch_sheet_layer(&mut doc, "HiddenObjects", true);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 1,
+                released_layer: Some(LAYER_HIDDEN.to_string())
+            }
+        );
+        assert_eq!(dark_in_model_space(&doc), [false, true]);
+        assert!(!is_off(&doc, LAYER_HIDDEN));
+        assert!(is_off(&doc, "Spare"), "the other sheet layer's stays off");
+
+        let switched = switch_sheet_layer(&mut doc, "Spare", true);
+        assert_eq!(
+            switched,
+            Switched {
+                entities: 1,
+                released_layer: Some("Spare".to_string())
+            }
+        );
+        assert_eq!(dark_in_model_space(&doc), [false, false]);
+        assert!(!is_off(&doc, "Spare"));
+        assert_eq!(
+            dark_in_block(&doc, "VALVE"),
+            [false; 2],
+            "no sheet layer switch touches the definition"
         );
     }
 }

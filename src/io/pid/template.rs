@@ -22,7 +22,7 @@ use super::*;
 /// the importer looks for the template next to the drawing the same way
 /// [`discover_symbol_library`] looks for the symbol share: a SmartPlant
 /// project keeps drawings and reference data under one root.
-const TEMPLATE_LIBRARY_ENV: &str = "PID_TEMPLATE_LIBRARY";
+pub(super) const TEMPLATE_LIBRARY_ENV: &str = "PID_TEMPLATE_LIBRARY";
 
 /// Deepest the basename search recurses below a template root. `Template
 /// Files` holds its `.igr` flat; the bound is for a root that turns out to
@@ -83,15 +83,48 @@ pub(super) struct TemplateOverlay {
     pub(super) page_frame_covered: bool,
 }
 
+/// What became of the border template the drawing links.
+#[derive(Debug)]
+pub(super) enum LinkedTemplate {
+    /// The drawing links none: nothing to draw, and nothing to say.
+    Unnamed,
+    /// A file its links name was found, fits the page, and drew.
+    Drawn(TemplateOverlay),
+    /// The drawing links one and none was drawn: which, and why, for the
+    /// summary to carry to the command line.
+    NotDrawn(TemplateNotDrawn),
+}
+
+impl LinkedTemplate {
+    /// What the template added to the drawing, when one was drawn.
+    pub(super) fn overlay(&self) -> Option<&TemplateOverlay> {
+        match self {
+            Self::Drawn(overlay) => Some(overlay),
+            Self::Unnamed | Self::NotDrawn(_) => None,
+        }
+    }
+
+    /// Which template was not drawn, and why, when the drawing links one
+    /// and none was.
+    pub(super) fn not_drawn(&self) -> Option<&TemplateNotDrawn> {
+        match self {
+            Self::NotDrawn(not_drawn) => Some(not_drawn),
+            Self::Unnamed | Self::Drawn(_) => None,
+        }
+    }
+}
+
 /// Overlay the sheet's linked border template onto `doc`, if a file its
 /// links name can be found, fits the page and parses.
 ///
-/// `None` is a silent-sheet answer only when the file names no template at
-/// all; a name no file on disk answers, or answers only in another size, is
-/// said in the log. The drawing imports identically with or without the
-/// overlay -- the template is the frame around the drawing, never a
-/// prerequisite. Where it lands is the drawing's frame record's call,
-/// `placement`.
+/// [`LinkedTemplate::Unnamed`] is the silent-sheet answer, and only for a
+/// file that names no template at all. A name no file on disk answers, or
+/// answers only in another size or with nothing to draw, is said in the log
+/// and handed back as [`LinkedTemplate::NotDrawn`], for the summary to
+/// carry to the command line. The drawing imports identically with or
+/// without the overlay -- the template is the frame around the drawing,
+/// never a prerequisite. Where it lands is the drawing's frame record's
+/// call, `placement`.
 pub(super) fn overlay_linked_template(
     parsed: &pid_parse::PidDocument,
     geometry: &NormalizedPidGeometry,
@@ -100,13 +133,13 @@ pub(super) fn overlay_linked_template(
     doc: &mut Document,
     paper_style_scale: f64,
     placement: FramePlacement,
-) -> Option<TemplateOverlay> {
+) -> LinkedTemplate {
     let links = linked_templates(parsed);
     if linked_template_prefixes(&links).is_empty() {
-        return None;
+        return LinkedTemplate::Unnamed;
     }
-    // One link arrives as two strings, with its path and bare; the log names
-    // it once.
+    // One link arrives as two strings, with its path and bare; it is named
+    // once.
     let mut named: Vec<&str> = Vec::new();
     for link in &links {
         let name = template_basename(link);
@@ -116,60 +149,173 @@ pub(super) fn overlay_linked_template(
     }
     let named = named.join(", ");
     let Some(page_mm) = sheet_page_mm(geometry, unit) else {
-        log::warn!(
-            "{}: names border template(s) {named}, but states no page and its strokes fit no standard sheet to choose one by; the sheet imports without its title block and margin strips",
-            drawing.display()
-        );
-        return None;
+        return not_drawn(drawing, named, TemplateGap::NoPage, "");
     };
     let page = format!(
-        "{:.2} x {:.2} mm page{}",
-        page_mm.0,
-        page_mm.1,
+        "{} page{}",
+        page_size(page_mm),
         if geometry.page_dimensions_mm.is_some() {
             ""
         } else {
             " (not stated: the standard sheet its strokes fit)"
         }
     );
-    // Only the files the links name are read, and none of them touches the
-    // document until one is picked: a candidate that loses leaves no
-    // linetype or text style behind.
-    let mut templates: Vec<ReadTemplate> = named_template_files(&links, &template_roots(drawing))
-        .into_iter()
-        .filter_map(|(file, stated)| read_template(&file, stated))
-        .collect();
-    let candidates: Vec<TemplateCandidate> =
-        templates.iter().map(ReadTemplate::candidate).collect();
-    let found = candidates
-        .iter()
-        .map(|candidate| match candidate.stroked_mm {
-            Some((width, height)) => {
-                format!("{} ({width:.2} x {height:.2} mm)", candidate.file_name)
-            }
-            None => format!("{} (no strokes)", candidate.file_name),
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let Some(picked) = pick_linked_template(&candidates, &links, page_mm) else {
-        let why = if candidates.is_empty() {
-            "no file under the template folders has such a name".to_string()
-        } else {
-            format!("none of the files so named fits its {page}: {found}")
-        };
-        log::warn!(
-            "{}: names border template(s) {named}, but {why}; the sheet imports without its title block and margin strips",
-            drawing.display()
-        );
-        return None;
+    let files = NamedTemplates::find(&links, &template_roots(drawing));
+    let found = files.measured();
+    let template = match files.choose(&links, page_mm) {
+        Ok(template) => template,
+        Err(why) => return not_drawn(drawing, named, why, &page),
     };
-    let template = templates.swap_remove(picked);
     log::info!(
         "{}: border template {} for the link(s) {named}, on its {page}; files so named: {found}",
         drawing.display(),
         template.file.display()
     );
-    overlay_template(&template, geometry, doc, paper_style_scale, placement)
+    overlay_picked(
+        &template,
+        named,
+        geometry,
+        drawing,
+        doc,
+        paper_style_scale,
+        placement,
+    )
+}
+
+/// The template files the drawing's links name, as far as each could be
+/// read.
+struct NamedTemplates {
+    /// The ones that parsed, in search order.
+    read: Vec<ReadTemplate>,
+    /// The names of the ones that did not, in search order.
+    unread: Vec<String>,
+}
+
+impl NamedTemplates {
+    /// Read every file `links` name under `roots`
+    /// ([`named_template_files`]). Only the files the links name are read,
+    /// and none of them touches the document until one is picked: a
+    /// candidate that loses leaves no linetype or text style behind.
+    fn find(links: &[String], roots: &[PathBuf]) -> Self {
+        let mut found = Self {
+            read: Vec::new(),
+            unread: Vec::new(),
+        };
+        for (file, stated) in named_template_files(links, roots) {
+            match read_template(&file, stated) {
+                Some(template) => found.read.push(template),
+                None => found.unread.push(file_name_of(&file)),
+            }
+        }
+        found
+    }
+
+    /// The files found, each with what it measures: the extent its strokes
+    /// span, that it has none, or that it could not be read.
+    fn measured(&self) -> String {
+        let read = self.read.iter().map(|template| {
+            let name = file_name_of(&template.file);
+            match template.stroked_mm {
+                Some((width, height)) => format!("{name} ({width:.2} x {height:.2} mm)"),
+                None => format!("{name} (no strokes)"),
+            }
+        });
+        let unread = self
+            .unread
+            .iter()
+            .map(|name| format!("{name} (could not be read)"));
+        read.chain(unread).collect::<Vec<_>>().join(", ")
+    }
+
+    /// The file a sheet that links `links` wears on a page of `page_mm`
+    /// ([`pick_linked_template`]), or why it wears none: files of the name
+    /// were read and none fits such a page, the files found could not be
+    /// read, or there was no file.
+    fn choose(
+        mut self,
+        links: &[String],
+        page_mm: (f64, f64),
+    ) -> Result<ReadTemplate, TemplateGap> {
+        let candidates: Vec<TemplateCandidate> =
+            self.read.iter().map(ReadTemplate::candidate).collect();
+        if let Some(picked) = pick_linked_template(&candidates, links, page_mm) {
+            return Ok(self.read.swap_remove(picked));
+        }
+        if !self.read.is_empty() {
+            return Err(TemplateGap::NoneFits {
+                page: page_size(page_mm),
+                found: self.measured(),
+            });
+        }
+        if self.unread.is_empty() {
+            return Err(TemplateGap::NoFile);
+        }
+        // One name found under two folders is named once.
+        let mut files: Vec<&str> = Vec::new();
+        for name in &self.unread {
+            if !files.contains(&name.as_str()) {
+                files.push(name);
+            }
+        }
+        Err(TemplateGap::Undrawable {
+            files: files.join(", "),
+        })
+    }
+}
+
+/// A page's size as the log and the command line spell it.
+fn page_size(page_mm: (f64, f64)) -> String {
+    format!("{:.2} x {:.2} mm", page_mm.0, page_mm.1)
+}
+
+/// The answer for a template the drawing links and the import did not draw:
+/// said once in the log, and handed back for the summary to carry to the
+/// command line. `page` is the page the files were measured against, as the
+/// log words it; only [`TemplateGap::NoneFits`] names it.
+fn not_drawn(drawing: &Path, named: String, why: TemplateGap, page: &str) -> LinkedTemplate {
+    let said = match &why {
+        TemplateGap::NoPage => {
+            "states no page and its strokes fit no standard sheet to choose one by".to_string()
+        }
+        TemplateGap::NoFile => "no file under the template folders has such a name".to_string(),
+        TemplateGap::NoneFits { found, .. } => {
+            format!("none of the files so named fits its {page}: {found}")
+        }
+        TemplateGap::Undrawable { files } => {
+            format!("nothing could be drawn from the file(s) found for it: {files}")
+        }
+    };
+    log::warn!(
+        "{}: names border template(s) {named}, but {said}; the sheet imports without its title block and margin strips",
+        drawing.display()
+    );
+    LinkedTemplate::NotDrawn(TemplateNotDrawn { named, why })
+}
+
+/// Draw the file picked, `template`, and answer for it. A file that reads
+/// and leaves nothing on the sheet -- no record in it decoded, or none at
+/// all -- is a template the drawing links and does not wear, the same as
+/// one that was never found.
+fn overlay_picked(
+    template: &ReadTemplate,
+    named: String,
+    geometry: &NormalizedPidGeometry,
+    drawing: &Path,
+    doc: &mut Document,
+    paper_style_scale: f64,
+    placement: FramePlacement,
+) -> LinkedTemplate {
+    match overlay_template(template, geometry, doc, paper_style_scale, placement) {
+        Some(overlay) => LinkedTemplate::Drawn(overlay),
+        None => not_drawn(
+            drawing,
+            named,
+            TemplateGap::Undrawable {
+                files: file_name_of(&template.file),
+            },
+            "",
+        ),
+    }
 }
 
 /// The distinct template targets the drawing's `JSite` OLE streams name, as
@@ -1737,6 +1883,142 @@ mod tests {
         );
     }
 
+    /// A sheet's symbols are block references, and the import's summary
+    /// counts them and the definitions they share (plan
+    /// 2026-11-19-pid-symbol-block, SB-5). The symbols its border template
+    /// places are neither: they stay the border's loose drafting on
+    /// `PID-FRAME`, add no reference and no definition, and are not among
+    /// the two counts -- even where the template places the very symbol the
+    /// sheet does. Here the sheet places a valve twice and a gauge once,
+    /// and its template the valve.
+    #[test]
+    fn pid_template_placements_are_not_among_the_symbol_blocks_the_summary_counts() {
+        let valve = pid_parse::PidSymbolDefinitionRef { site: 40, sheet: 7 };
+        let gauge = pid_parse::PidSymbolDefinitionRef { site: 41, sheet: 2 };
+        let stroke = |end: (f64, f64)| {
+            let start = (0.0, 0.0);
+            (SymbolPrimitive::Line { start, end }, 8, pen(0.25))
+        };
+        let valve_body = || cached_body(valve, vec![stroke((0.004, 0.0)), stroke((0.0, 0.003))]);
+        let shown = Some(("Default", Some(true)));
+        let sheet = NormalizedPidGeometry {
+            entities: vec![
+                entity(
+                    placement((0.100, 0.200), "Ball Valve.sym", Some(valve)),
+                    shown,
+                ),
+                entity(
+                    placement((0.300, 0.200), "Ball Valve.sym", Some(valve)),
+                    shown,
+                ),
+                entity(placement((0.200, 0.300), "Gauge.sym", Some(gauge)), shown),
+            ],
+            symbol_definitions: vec![
+                valve_body(),
+                cached_body(gauge, vec![stroke((0.002, 0.002))]),
+            ],
+            page_dimensions_mm: Some(A2),
+            ..Default::default()
+        };
+        let template = template_of(
+            "VALVE-A2.igr",
+            NormalizedPidGeometry {
+                entities: vec![
+                    entity(line((0.0, 0.0), (0.594, 0.0)), shown),
+                    entity(
+                        placement((0.500, 0.020), "Ball Valve.sym", Some(valve)),
+                        shown,
+                    ),
+                ],
+                symbol_definitions: vec![valve_body()],
+                ..Default::default()
+            },
+        );
+
+        // The steps `load_pid_with` takes once the file is parsed.
+        let parsed = pid_parse::PidDocument::default();
+        let file = Path::new("sheet.pid");
+        let mut doc = prepare_document(&parsed);
+        let tables = resolve_styles(&parsed, &sheet, file, &mut doc, 1.0);
+        let built = build_document_entities(
+            &sheet,
+            &tables,
+            Stated {
+                items: &SheetItems::default(),
+                labels: &SheetLabels::default(),
+            },
+            &mut None,
+            &ImportUnit::AssumedMetre,
+            &mut doc,
+            1.0,
+        );
+        let overlay = overlay_template(&template, &sheet, &mut doc, 1.0, FramePlacement::NONE)
+            .expect("the template draws");
+        assert_eq!(
+            overlay.drawn, 3,
+            "the template's own line and the two strokes of its valve"
+        );
+        let summary = finish(
+            file,
+            &sheet,
+            None,
+            &tables,
+            ImportUnit::AssumedMetre,
+            built,
+            &LinkedTemplate::Drawn(overlay),
+            FramePlacement::NONE,
+            &mut doc,
+        );
+
+        let references: Vec<&str> = doc
+            .model_space_entities()
+            .filter_map(|entity| match entity {
+                EntityType::Insert(insert) => Some(insert.block_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            references,
+            ["SPPID_Ball Valve", "SPPID_Ball Valve", "SPPID_Gauge"],
+            "the sheet's three placements and none of the template's"
+        );
+        let of_the_templates_valve: Vec<&EntityType> = doc
+            .model_space_entities()
+            .filter(|entity| {
+                xdata_strings(entity)
+                    .iter()
+                    .any(|said| said == "template_symbol=Ball Valve")
+            })
+            .collect();
+        assert_eq!(of_the_templates_valve.len(), 2, "its two strokes");
+        assert!(
+            of_the_templates_valve.iter().all(|entity| {
+                matches!(entity, EntityType::Line(_)) && entity.common().layer == LAYER_FRAME
+            }),
+            "loose lines on PID-FRAME, not a reference"
+        );
+        assert_eq!(summary.border_template.as_deref(), Some("VALVE-A2.igr"));
+        assert_eq!(summary.template_not_drawn, None);
+        assert_eq!(
+            (summary.drawn, summary.template_entities),
+            (8, 3),
+            "the sheet's own entities, and the template's beside them"
+        );
+
+        let count = |key: &str| {
+            summary
+                .counts()
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| *value)
+        };
+        assert_eq!(
+            (count("symbol_blocks"), count("symbol_definitions")),
+            (Some(3), Some(2)),
+            "the sheet's three references to its two definitions, and nothing of the template's"
+        );
+    }
+
     /// What a title block's label shows is the sheet's own text record; the
     /// template only places the label, and the body it caches for it is the
     /// hairline cross the label is anchored by, its lettering on a layer
@@ -2082,5 +2364,360 @@ mod tests {
                 "{far:?}"
             );
         }
+    }
+
+    /// A link whose stem no real template file begins with. The environment
+    /// may name real template folders (`PID_TEMPLATE_LIBRARY`), and those
+    /// hold `CPE-SQ...` files; the only files of this name are the ones a
+    /// test writes.
+    const OCSTEST_LINK: &str = "OCSTEST~1.IGR";
+
+    /// A drawing whose `JSite` OLE stream links `names`.
+    fn linking(names: &[&str]) -> pid_parse::PidDocument {
+        let mut parsed = pid_parse::PidDocument::default();
+        parsed.jsites.push(pid_parse::JSite {
+            name: "JSite1".to_string(),
+            ole_links: links(names),
+            ..Default::default()
+        });
+        parsed
+    }
+
+    /// What [`overlay_linked_template`] answers for a drawing at `drawing`
+    /// that links `names` and states the page `page_mm`, and how many
+    /// entities it drew for it.
+    fn linked_on(
+        drawing: &Path,
+        names: &[&str],
+        page_mm: Option<(f64, f64)>,
+    ) -> (LinkedTemplate, usize) {
+        let sheet = NormalizedPidGeometry {
+            page_dimensions_mm: page_mm,
+            ..Default::default()
+        };
+        let mut doc = Document::new();
+        let answer = overlay_linked_template(
+            &linking(names),
+            &sheet,
+            &ImportUnit::AssumedMetre,
+            drawing,
+            &mut doc,
+            1.0,
+            FramePlacement::NONE,
+        );
+        (answer, doc.entities().count())
+    }
+
+    /// A drawing in a scratch tree of its own, as many folders down as the
+    /// search for template folders walks up from a drawing, so the search
+    /// never leaves the tree: the tree, and the drawing's path in it. No
+    /// "template" in the tree's name, for the reason
+    /// `pid_template_files_are_only_the_ones_a_link_names` gives.
+    fn drawing_in_a_tree_of_its_own(tag: &str) -> (PathBuf, PathBuf) {
+        let tree = std::env::temp_dir().join(format!(
+            "ocs-pid-linked-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut folder = tree.clone();
+        for level in 0..SYMBOL_SEARCH_DEPTH {
+            folder.push(format!("level-{level}"));
+        }
+        std::fs::create_dir_all(&folder).expect("temp dirs");
+        (tree, folder.join("sheet.pid"))
+    }
+
+    fn not_drawn_of(named: &str, why: TemplateGap) -> TemplateNotDrawn {
+        TemplateNotDrawn {
+            named: named.to_string(),
+            why,
+        }
+    }
+
+    /// A template file that parsed, as [`NamedTemplates`] holds it: named
+    /// `file`, its strokes spanning `stroked_mm`.
+    fn read_as(file: &str, stroked_mm: Option<(f64, f64)>) -> ReadTemplate {
+        ReadTemplate {
+            stroked_mm,
+            ..template_of(file, NormalizedPidGeometry::default())
+        }
+    }
+
+    /// What [`NamedTemplates::choose`] answers on a page of `page_mm` for a
+    /// sheet that links [`SHORT_CPE_SQ`]: the name of the file picked, or
+    /// why there is none.
+    fn chosen(found: NamedTemplates, page_mm: (f64, f64)) -> Result<String, TemplateGap> {
+        found
+            .choose(&links(&[SHORT_CPE_SQ]), page_mm)
+            .map(|template| file_name_of(&template.file))
+    }
+
+    /// [`overlay_picked`] for `template` on an A2 sheet that links it as
+    /// `CPE-SQ~2.IGR`.
+    fn picked_on_a2(template: &ReadTemplate, doc: &mut Document) -> LinkedTemplate {
+        let sheet = NormalizedPidGeometry {
+            page_dimensions_mm: Some(A2),
+            ..Default::default()
+        };
+        overlay_picked(
+            template,
+            "CPE-SQ~2.IGR".to_string(),
+            &sheet,
+            Path::new("sheet.pid"),
+            doc,
+            1.0,
+            FramePlacement::NONE,
+        )
+    }
+
+    /// A drawing that links no template has none to miss: nothing is drawn
+    /// and nothing is handed back to say.
+    #[test]
+    fn pid_template_not_linked_is_nothing_to_say() {
+        let sheet = Path::new("sheet.pid");
+        let no_links = linked_on(sheet, &[], Some(A1));
+        let other_links = linked_on(sheet, &["Sheet1", "Ball Valve.sym"], Some(A1));
+        for (answer, drawn) in [no_links, other_links] {
+            assert!(matches!(answer, LinkedTemplate::Unnamed), "{answer:?}");
+            assert_eq!(drawn, 0);
+        }
+    }
+
+    /// A sheet that states no page and strokes nothing a standard sheet
+    /// fits has no size to choose a template by. None is looked for, and
+    /// the answer says so, naming each file the links end in once.
+    #[test]
+    fn pid_template_linked_on_a_sheet_of_no_page_is_handed_back_with_its_names() {
+        let (answer, drawn) = linked_on(
+            Path::new("sheet.pid"),
+            &[SHORT_CPE_SQ, "CPE-SQ~2.IGR", "CPE-SQ~3.PID"],
+            None,
+        );
+        assert_eq!(
+            answer.not_drawn(),
+            Some(&not_drawn_of(
+                "CPE-SQ~2.IGR, CPE-SQ~3.PID",
+                TemplateGap::NoPage
+            )),
+            "{answer:?}"
+        );
+        assert_eq!(drawn, 0);
+    }
+
+    /// A template no file on this machine answers is handed back by the
+    /// name the links spell, as not found.
+    #[test]
+    fn pid_template_linked_and_not_found_is_handed_back_with_its_name() {
+        let (tree, drawing) = drawing_in_a_tree_of_its_own("none");
+        let (answer, drawn) = linked_on(&drawing, &[OCSTEST_LINK], Some(A1));
+        // Before anything is asserted, so that a failure leaves no file behind.
+        let _ = std::fs::remove_dir_all(&tree);
+        assert_eq!(
+            answer.not_drawn(),
+            Some(&not_drawn_of(OCSTEST_LINK, TemplateGap::NoFile)),
+            "{answer:?}"
+        );
+        assert_eq!(drawn, 0);
+    }
+
+    /// A file of the name that cannot be read is not "no file": the answer
+    /// names it, so the reader looks at the file instead of for it.
+    #[test]
+    fn pid_template_linked_and_unreadable_is_handed_back_with_the_files_found() {
+        let (tree, drawing) = drawing_in_a_tree_of_its_own("stub");
+        let shelf = drawing
+            .parent()
+            .and_then(Path::parent)
+            .expect("the drawing lies folders down its tree")
+            .join("Ref")
+            .join("Template Files");
+        std::fs::create_dir_all(&shelf).expect("temp dirs");
+        std::fs::write(shelf.join("OCSTEST-A1.igr"), b"stub").expect("write");
+        let (answer, drawn) = linked_on(&drawing, &[OCSTEST_LINK], Some(A1));
+        // Before anything is asserted, so that a failure leaves no file behind.
+        let _ = std::fs::remove_dir_all(&tree);
+        assert_eq!(
+            answer.not_drawn(),
+            Some(&not_drawn_of(
+                OCSTEST_LINK,
+                TemplateGap::Undrawable {
+                    files: "OCSTEST-A1.igr".to_string(),
+                },
+            )),
+            "{answer:?}"
+        );
+        assert_eq!(drawn, 0);
+    }
+
+    /// Among the files the links name, the one that fits the page is the
+    /// one worn; where no file was found at all, that is the answer.
+    #[test]
+    fn pid_template_choice_is_the_named_file_that_fits_the_page() {
+        let found = NamedTemplates {
+            read: vec![
+                read_as("CPE-SQ-A0.igr", Some(A0)),
+                read_as("CPE-SQ-A1.igr", Some(A1)),
+                read_as("CPE-SQ-A2.igr", Some(A2)),
+            ],
+            unread: vec!["CPE-SQ-A3.igr".to_string()],
+        };
+        assert_eq!(chosen(found, A1), Ok("CPE-SQ-A1.igr".to_string()));
+        let nothing = NamedTemplates {
+            read: Vec::new(),
+            unread: Vec::new(),
+        };
+        assert_eq!(chosen(nothing, A1), Err(TemplateGap::NoFile));
+    }
+
+    /// Files of the name that did not read are not "no file": the answer
+    /// names each of them once.
+    #[test]
+    fn pid_template_choice_names_the_files_that_did_not_read() {
+        let found = NamedTemplates {
+            read: Vec::new(),
+            unread: vec![
+                "CPE-SQ-A1.igr".to_string(),
+                "CPE-SQ-A0.igr".to_string(),
+                "CPE-SQ-A1.igr".to_string(),
+            ],
+        };
+        assert_eq!(
+            chosen(found, A1),
+            Err(TemplateGap::Undrawable {
+                files: "CPE-SQ-A1.igr, CPE-SQ-A0.igr".to_string(),
+            })
+        );
+    }
+
+    /// Files that read and fit no page of this size are listed with what
+    /// each measures -- the page beside them is what the reader compares
+    /// them with -- and a file that did not read is listed as that.
+    #[test]
+    fn pid_template_choice_lists_what_the_files_measure_when_none_fits() {
+        let found = NamedTemplates {
+            read: vec![
+                read_as("CPE-SQ-A0.igr", Some(A0)),
+                read_as("CPE-SQ-A2.igr", Some(A2)),
+                read_as("CPE-SQ-blank.igr", None),
+            ],
+            unread: vec!["CPE-SQ-A1.igr".to_string()],
+        };
+        let listed = [
+            "CPE-SQ-A0.igr (1189.00 x 841.00 mm)",
+            "CPE-SQ-A2.igr (594.00 x 420.00 mm)",
+            "CPE-SQ-blank.igr (no strokes)",
+            "CPE-SQ-A1.igr (could not be read)",
+        ]
+        .join(", ");
+        assert_eq!(found.measured(), listed);
+        assert_eq!(
+            chosen(found, A1),
+            Err(TemplateGap::NoneFits {
+                page: "841.00 x 594.00 mm".to_string(),
+                found: listed,
+            })
+        );
+    }
+
+    /// The file picked can still leave nothing on the sheet -- here a
+    /// template without a record. That is a template the drawing links and
+    /// does not wear, and the answer names the file.
+    #[test]
+    fn pid_template_picked_that_draws_nothing_is_handed_back_with_its_file() {
+        let empty = template_of("CPE-SQ-A2.igr", NormalizedPidGeometry::default());
+        let mut doc = Document::new();
+        let answer = picked_on_a2(&empty, &mut doc);
+        assert_eq!(
+            answer.not_drawn(),
+            Some(&not_drawn_of(
+                "CPE-SQ~2.IGR",
+                TemplateGap::Undrawable {
+                    files: "CPE-SQ-A2.igr".to_string(),
+                },
+            )),
+            "{answer:?}"
+        );
+        assert_eq!(doc.entities().count(), 0);
+    }
+
+    /// The file picked that draws is the overlay, with nothing to say of a
+    /// template not drawn.
+    #[test]
+    fn pid_template_picked_that_draws_is_the_overlay() {
+        let framed = template_of(
+            "CPE-SQ-A2.igr",
+            NormalizedPidGeometry {
+                entities: vec![entity(line((0.0, 0.0), (0.594, 0.0)), None)],
+                ..Default::default()
+            },
+        );
+        let mut doc = Document::new();
+        let answer = picked_on_a2(&framed, &mut doc);
+        assert_eq!(answer.overlay().map(|overlay| overlay.drawn), Some(1));
+        assert_eq!(answer.not_drawn(), None);
+        assert_eq!(doc.entities().count(), 1);
+    }
+
+    /// What stood in the way of the template reaches the summary, and the
+    /// sheet keeps the one thing the importer draws of the page itself: its
+    /// rectangle.
+    #[test]
+    fn pid_template_not_drawn_reaches_the_summary_and_the_page_keeps_its_rectangle() {
+        let sheet = NormalizedPidGeometry {
+            page_dimensions_mm: Some(A2),
+            ..Default::default()
+        };
+        let not_drawn = not_drawn_of(
+            "CPE-SQ~2.IGR",
+            TemplateGap::NoneFits {
+                page: "594.00 x 420.00 mm".to_string(),
+                found: "CPE-SQ-A0.igr (1189.00 x 841.00 mm)".to_string(),
+            },
+        );
+        // The steps `load_pid_with` takes once the file is parsed.
+        let parsed = pid_parse::PidDocument::default();
+        let file = Path::new("sheet.pid");
+        let mut doc = prepare_document(&parsed);
+        let tables = resolve_styles(&parsed, &sheet, file, &mut doc, 1.0);
+        let built = build_document_entities(
+            &sheet,
+            &tables,
+            Stated {
+                items: &SheetItems::default(),
+                labels: &SheetLabels::default(),
+            },
+            &mut None,
+            &ImportUnit::AssumedMetre,
+            &mut doc,
+            1.0,
+        );
+        let summary = finish(
+            file,
+            &sheet,
+            None,
+            &tables,
+            ImportUnit::AssumedMetre,
+            built,
+            &LinkedTemplate::NotDrawn(not_drawn.clone()),
+            FramePlacement::NONE,
+            &mut doc,
+        );
+        assert_eq!(summary.template_not_drawn, Some(not_drawn));
+        assert_eq!(summary.border_template, None);
+        assert_eq!(
+            (summary.template_entities, summary.template_missing),
+            (0, 0)
+        );
+        let on_the_frame_layer: Vec<&EntityType> = doc
+            .model_space_entities()
+            .filter(|entity| entity.common().layer == LAYER_FRAME)
+            .collect();
+        assert!(
+            matches!(on_the_frame_layer[..], [EntityType::LwPolyline(_)]),
+            "the page rectangle and nothing else: {on_the_frame_layer:?}"
+        );
     }
 }

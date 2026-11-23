@@ -171,6 +171,8 @@ PIDBACKUPOPEN <目录|zip>
 
 **W9 预览。** 新文件 `pid_backup_browser/symbol_preview.rs`：选中 `.sym` 时在详情区画缩略图。画法照 `pid_palette.rs` 的 canvas 单元格，几何来自 `read_symbol_geometry`。`.igr` 先验证钉版读不读得了；读不了就只列文件，等换钉版。模板里的 `.pid` 可以双击打开。
 
+**W9 里符号的一半做了**（2026-11-21 加的，分支 `pid-symbol-on-main`，任务 SP-1，对应 issue #116 的第一步）。选中 `.sym` 时详情区出缩略图和图元统计，还原目录 `Ref` 下的文件、包内压缩包的成员、单独登记成包内文件的三处都行；做法、读数和没验证的记在 `docs/plans/2026-11-21-pid-sym-preview/todo.md`。和上面这段写的有两处不一样：画法没有照 `pid_palette.rs` 的单元格，画的是导入器摆图例本体的那段代码给出的图元，所以实心填充和文字都在；几何来自 `read_symbol_geometry_from_bytes`，压缩包里的成员不必先解压。§2 表里第 30 行的「没有预览」对 `.sym` 不再成立；同一行的 `CatalogIndex.xml`、第 31 行的 `.igr` 和模板 `.pid` 还没有做。
+
 **W10 数据映射。** `src/io/pid_backup_browse/datamap.rs`：`read_datamap` 读 `SPPIDDataMap.xml`，在该文件的详情里显示枚举映射表（W1 的表格）。
 
 **W11 SQL Server 包。** `src/io/pid_backup_browse/mtf.rs`：`open_mtf_dump_as_sqlite` 把转储变成内存里的 SQLite，再查出图纸和装置组，喂给现有的配对逻辑。两件事要先定：许可（D4），以及「列出全部图纸」的查询放在哪边：钉版只有按 UID 取单张图的函数，OCS 自己写 SQL 就要直接依赖 `rusqlite`，否则请 pid-parse 加一个列表函数。
@@ -380,6 +382,8 @@ D1 按 (a)（仍在现有面板里，表格保持独立部件），D5 按 (a)（
 | 测试不在临时目录里留下文件夹 | `20619d8e4` |
 
 **还剩**：第二批的清单做完了（清点与收尾验证见 §6.7）。留给下一批的是 W9（符号与模板预览）、W7（图元与图形联动）、W13（搜索扩到图号、位号、文件名）；按决定不做的是 D3（换 pid-parse 钉版）、D4 / W11（SQL Server 包）、D7（DX12 视口）、W15（任意表，等 pid-parse 公开读法）。
+
+**后来**（2026-11-21 加的）：W9 里符号的一半做了，见 §3.3 的 W9 下面加的那一段；W9 还剩模板（`.igr`、模板 `.pid`）和 `CatalogIndex.xml` 的目录。
 
 **怎么编译**
 

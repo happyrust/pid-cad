@@ -617,21 +617,26 @@ impl Store {
             )
             .map_err(|err| format!("prepare ops of {drawing_id}: {err}"))?;
         let rows = stmt
-            .query_map(params![drawing_id, after], |row| {
-                let changes: String = row.get(5)?;
-                Ok(StoredOp {
-                    revision: row.get(0)?,
-                    op_id: row.get(1)?,
-                    session_id: row.get(2)?,
-                    user_id: row.get(3)?,
-                    base_revision: row.get(4)?,
-                    changes: serde_json::from_str(&changes).unwrap_or_default(),
-                })
-            })
+            .query_map(params![drawing_id, after], stored_op)
             .map_err(|err| format!("query ops of {drawing_id}: {err}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|err| format!("read ops of {drawing_id}: {err}"))?;
         Ok(rows)
+    }
+
+    /// The row of the op log that op `op_id` went in as on `drawing_id`:
+    /// the op took effect, and this is what came of it (`OFF-4`). `None`
+    /// for one the log does not have — it never came, or was refused.
+    pub fn logged_op(&self, drawing_id: &str, op_id: &str) -> Result<Option<StoredOp>, String> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT revision, op_id, session_id, user_id, base_revision, changes
+             FROM ops WHERE drawing_id = ?1 AND op_id = ?2 ORDER BY revision LIMIT 1",
+            params![drawing_id, op_id],
+            stored_op,
+        )
+        .optional()
+        .map_err(|err| format!("read op {op_id} of {drawing_id}: {err}"))
     }
 
     /// Records that `tags` are in use in a client's own copy of
@@ -834,28 +839,100 @@ impl Store {
     /// Inserts a conflict entry awaiting adjudication.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_conflict(&self, conflict: &ConflictRow) -> Result<(), String> {
+        self.insert_conflict_holding(conflict, &[])
+    }
+
+    /// [`Self::insert_conflict`] for the entry ops `op_ids` went into, kept
+    /// with it in the order they are named (`conflict.op_ids`): one of them
+    /// sent again while the entry waits for its ruling is answered with the
+    /// entry (`OFF-4`).
+    pub fn insert_conflict_holding(
+        &self,
+        conflict: &ConflictRow,
+        op_ids: &[String],
+    ) -> Result<(), String> {
         let conn = self.lock()?;
-        conn.execute(
-            "INSERT INTO conflicts
-               (conflict_id, drawing_id, object_ref, field, value_a, value_b,
-                base_revision, status, resolution, resolved_value, resolved_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                conflict.conflict_id,
-                conflict.drawing_id,
-                conflict.object_ref,
-                conflict.field,
-                conflict.value_a,
-                conflict.value_b,
-                conflict.base_revision,
-                conflict.status,
-                conflict.resolution,
-                conflict.resolved_value,
-                conflict.resolved_by
-            ],
-        )
-        .map_err(|err| format!("insert conflict: {err}"))?;
-        Ok(())
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|err| format!("begin conflict: {err}"))?;
+        // The entry and the ops it holds go in together or not at all. Only
+        // `conn` in here: `lock()` is not reentrant.
+        let written = (|| -> Result<(), String> {
+            conn.execute(
+                "INSERT INTO conflicts
+                   (conflict_id, drawing_id, object_ref, field, value_a, value_b,
+                    base_revision, status, resolution, resolved_value, resolved_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    conflict.conflict_id,
+                    conflict.drawing_id,
+                    conflict.object_ref,
+                    conflict.field,
+                    conflict.value_a,
+                    conflict.value_b,
+                    conflict.base_revision,
+                    conflict.status,
+                    conflict.resolution,
+                    conflict.resolved_value,
+                    conflict.resolved_by
+                ],
+            )
+            .map_err(|err| format!("insert conflict: {err}"))?;
+            for op_id in op_ids {
+                conn.execute(
+                    "INSERT OR IGNORE INTO conflict_ops (conflict_id, op_id) VALUES (?1, ?2)",
+                    params![conflict.conflict_id, op_id],
+                )
+                .map_err(|err| format!("insert op {op_id} of conflict: {err}"))?;
+            }
+            Ok(())
+        })();
+        match written {
+            Ok(()) => conn.execute_batch("COMMIT").map_err(|err| {
+                let _ = conn.execute_batch("ROLLBACK");
+                format!("commit conflict: {err}")
+            }),
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    /// The entries of `drawing_id` still waiting for a ruling that op
+    /// `op_id` went into, each with every op it holds, in the order they
+    /// were named (`OFF-4`).
+    pub fn pending_conflicts_holding(
+        &self,
+        drawing_id: &str,
+        op_id: &str,
+    ) -> Result<Vec<(ConflictRow, Vec<String>)>, String> {
+        let conn = self.lock()?;
+        let mut entries = conn
+            .prepare(
+                "SELECT c.conflict_id, c.drawing_id, c.object_ref, c.field, c.value_a, c.value_b,
+                        c.base_revision, c.status, c.resolution, c.resolved_value, c.resolved_by
+                 FROM conflicts c JOIN conflict_ops o ON o.conflict_id = c.conflict_id
+                 WHERE o.op_id = ?1 AND c.drawing_id = ?2 AND c.status = '待裁决'
+                 ORDER BY c.conflict_id",
+            )
+            .map_err(|err| format!("prepare conflicts holding {op_id}: {err}"))?;
+        let rows = entries
+            .query_map(params![op_id, drawing_id], conflict_row)
+            .map_err(|err| format!("query conflicts holding {op_id}: {err}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("read conflicts holding {op_id}: {err}"))?;
+        let mut held = conn
+            .prepare("SELECT op_id FROM conflict_ops WHERE conflict_id = ?1 ORDER BY rowid")
+            .map_err(|err| format!("prepare ops of conflicts: {err}"))?;
+        rows.into_iter()
+            .map(|row| {
+                let op_ids = held
+                    .query_map(params![row.conflict_id], |op| op.get(0))
+                    .and_then(|ops| ops.collect::<Result<Vec<String>, _>>())
+                    .map_err(|err| format!("read ops of conflict {}: {err}", row.conflict_id))?;
+                Ok((row, op_ids))
+            })
+            .collect()
     }
 
     pub fn list_conflicts(
@@ -884,21 +961,7 @@ impl Store {
             ))
             .map_err(|err| format!("prepare conflicts: {err}"))?;
         let rows = stmt
-            .query_map(args_ref.as_slice(), |row| {
-                Ok(ConflictRow {
-                    conflict_id: row.get(0)?,
-                    drawing_id: row.get(1)?,
-                    object_ref: row.get(2)?,
-                    field: row.get(3)?,
-                    value_a: row.get(4)?,
-                    value_b: row.get(5)?,
-                    base_revision: row.get(6)?,
-                    status: row.get(7)?,
-                    resolution: row.get(8)?,
-                    resolved_value: row.get(9)?,
-                    resolved_by: row.get(10)?,
-                })
-            })
+            .query_map(args_ref.as_slice(), conflict_row)
             .map_err(|err| format!("query conflicts: {err}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|err| format!("read conflicts: {err}"))?;
@@ -1115,9 +1178,10 @@ impl Store {
     }
 
     /// This store's repository id: generated once on the first start that
-    /// needs it, kept in `meta.repo_id` after, and the same forever. A
-    /// drawing file keeps a copy; a `hello` that names another id was
-    /// aligned against another repository (`REQ-COLL-015`).
+    /// needs it, kept in `meta.repo_id` after, and the same from then on
+    /// unless [`Self::renew_repo_id`] gives it another. A drawing file keeps
+    /// a copy; a `hello` that names another id was aligned against another
+    /// repository (`REQ-COLL-015`).
     pub fn repo_id(&self) -> Result<String, String> {
         let conn = self.lock()?;
         conn.execute(
@@ -1129,6 +1193,24 @@ impl Store {
             row.get(0)
         })
         .map_err(|err| format!("repo_id read: {err}"))
+    }
+
+    /// Gives this store a new repository id in place of the one it had, and
+    /// says which. For the first start after a backup was restored
+    /// (`--new-repo-id`): the restored log stops at a revision that copies
+    /// made since have passed, and once the room moves past it again such a
+    /// copy would pass for consistent. Under a new id every copy that names
+    /// the old one is `REPO_MISMATCH` instead (`SPEC-collab-offline-sync.md`
+    /// §6). Nothing else in the store changes.
+    pub fn renew_repo_id(&self) -> Result<String, String> {
+        let repo_id = ocs_collab::ids::new_repo_id();
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('repo_id', ?1)",
+            params![repo_id],
+        )
+        .map_err(|err| format!("repo_id renew: {err}"))?;
+        Ok(repo_id)
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
@@ -1184,6 +1266,37 @@ fn configure(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|err| format!("pragmas: {err}"))?;
     Ok(())
+}
+
+/// A row of `SELECT revision, op_id, session_id, user_id, base_revision,
+/// changes FROM ops`.
+fn stored_op(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredOp> {
+    let changes: String = row.get(5)?;
+    Ok(StoredOp {
+        revision: row.get(0)?,
+        op_id: row.get(1)?,
+        session_id: row.get(2)?,
+        user_id: row.get(3)?,
+        base_revision: row.get(4)?,
+        changes: serde_json::from_str(&changes).unwrap_or_default(),
+    })
+}
+
+/// A row of `conflicts`, its columns in the order the table names them.
+fn conflict_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConflictRow> {
+    Ok(ConflictRow {
+        conflict_id: row.get(0)?,
+        drawing_id: row.get(1)?,
+        object_ref: row.get(2)?,
+        field: row.get(3)?,
+        value_a: row.get(4)?,
+        value_b: row.get(5)?,
+        base_revision: row.get(6)?,
+        status: row.get(7)?,
+        resolution: row.get(8)?,
+        resolved_value: row.get(9)?,
+        resolved_by: row.get(10)?,
+    })
 }
 
 fn create_schema(conn: &Connection) -> Result<(), String> {
@@ -1254,6 +1367,15 @@ CREATE TABLE IF NOT EXISTS conflicts (
   resolved_by   TEXT
 );
 
+-- The ops each conflict entry holds, in the order `conflict.op_ids` names
+-- them (rowid). One of them sent again while its entry waits for a ruling
+-- is answered with the entry.
+CREATE TABLE IF NOT EXISTS conflict_ops (
+  conflict_id TEXT NOT NULL REFERENCES conflicts(conflict_id),
+  op_id       TEXT NOT NULL,
+  PRIMARY KEY (conflict_id, op_id)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   seq         INTEGER PRIMARY KEY AUTOINCREMENT,
   module      TEXT NOT NULL,
@@ -1296,7 +1418,8 @@ CREATE TABLE IF NOT EXISTS reported_tags (
 -- One row per database-level fact. `repo_id` identifies this store as a
 -- whole: a drawing file keeps it so a `hello` can prove that its `since`
 -- was taken of this repository and not another one behind the same URL
--- (`REQ-COLL-015`). Written once, never changed.
+-- (`REQ-COLL-015`). Written once; changed only by `--new-repo-id`, the
+-- start after a backup was restored.
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -1305,6 +1428,10 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE INDEX IF NOT EXISTS audit_by_tag ON audit_log(object_ref, at DESC);
 CREATE INDEX IF NOT EXISTS audit_by_user ON audit_log(user_id, at DESC);
 CREATE INDEX IF NOT EXISTS sessions_by_drawing ON sessions(drawing_id, status);
+-- An op sent again is looked up by its id (`OFF-4`). Made here, like the
+-- table above, when a database from before is opened.
+CREATE INDEX IF NOT EXISTS ops_by_op_id ON ops(drawing_id, op_id);
+CREATE INDEX IF NOT EXISTS conflict_ops_by_op ON conflict_ops(op_id);
 
 -- Append-only audit log, enforced by the database itself so no code path can
 -- mutate history (VAL-SRV-021).
@@ -1378,6 +1505,52 @@ mod tests {
         assert_eq!(first, second, "the same database keeps its id");
         let other = Store::open_in_memory().expect("memory store");
         assert_ne!(first, other.repo_id().expect("other repo id"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    /// `OFF-11`: after a restore from backup the server starts once with
+    /// `--new-repo-id`. The store then has a new id — on every later open
+    /// too — and everything else it had: the op log is as it was.
+    #[test]
+    fn new_repo_id_replaces_the_id_and_keeps_the_log() {
+        let path = temp_db_path("new-repo-id");
+        let old = {
+            let store = Store::open(&path).expect("open");
+            store.ensure_drawing("PID-1101").expect("drawing");
+            let record = OpRecord {
+                op_id: "op-r-1-1".into(),
+                session_id: "s-1".into(),
+                user_id: "u1".into(),
+                base_revision: 0,
+                at: 1_700_000_000,
+                changes: r#"[{"kind":"set_property","object_ref":"P-1001","field":"设计压力","value":"1.6MPa"}]"#.into(),
+            };
+            store
+                .apply_op("PID-1101", 0, &[], Some(&record))
+                .expect("logged");
+            store.repo_id().expect("repo id")
+        };
+
+        let renewed = {
+            let store = Store::open(&path).expect("reopen");
+            let renewed = store.renew_repo_id().expect("renewed");
+            assert_eq!(store.repo_id().expect("repo id"), renewed);
+            renewed
+        };
+        assert_ne!(renewed, old, "a new id, not the one the copies remember");
+
+        let store = Store::open(&path).expect("open after");
+        assert_eq!(store.repo_id().expect("repo id"), renewed, "and it stays");
+        let log = store.load_ops("PID-1101", 0).expect("the log");
+        let logged: Vec<_> = log
+            .iter()
+            .map(|op| (op.revision, op.op_id.as_str()))
+            .collect();
+        assert_eq!(logged, [(1, "op-r-1-1")]);
+        assert_eq!(log[0].changes[0]["value"], "1.6MPa");
+        drop(store);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
@@ -2193,5 +2366,116 @@ mod tests {
         store.clear_ephemeral().expect("clear");
         assert_eq!(listed("PID-1102"), [row("V-1001", 2)]);
         assert!(listed("PID-1103").is_empty());
+    }
+
+    /// `OFF-4`: a database made before ops were looked up by id opens as it
+    /// is and gets what the lookup needs on the way — an index on the op
+    /// id, a place for the ops a conflict entry holds. The ops it already
+    /// has are found by their ids.
+    #[test]
+    fn duplicate_op_a_database_from_before_finds_its_ops_by_id() {
+        let path = temp_db_path("op-ids-from-before");
+        {
+            let store = Store::open(&path).expect("open");
+            store.ensure_drawing("PID-1101").expect("drawing");
+            let record = OpRecord {
+                op_id: "op-r-1-1".into(),
+                session_id: "s-1".into(),
+                user_id: "u1".into(),
+                base_revision: 0,
+                at: 1_700_000_000,
+                changes: r#"[{"kind":"set_property","object_ref":"P-1001","field":"设计压力","value":"1.6MPa"}]"#.into(),
+            };
+            store
+                .apply_op("PID-1101", 0, &[], Some(&record))
+                .expect("logged");
+            store
+                .lock()
+                .expect("lock")
+                .execute_batch(
+                    "DROP INDEX IF EXISTS ops_by_op_id;
+                     DROP INDEX IF EXISTS conflict_ops_by_op;
+                     DROP TABLE IF EXISTS conflict_ops;",
+                )
+                .expect("as the file was before");
+        }
+
+        let store = Store::open(&path).expect("a file from before opens");
+        let made: Vec<String> = {
+            let conn = store.lock().expect("lock");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master
+                     WHERE name IN ('ops_by_op_id', 'conflict_ops', 'conflict_ops_by_op')
+                     ORDER BY name",
+                )
+                .expect("prepare");
+            let names = stmt
+                .query_map([], |row| row.get(0))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("names");
+            names
+        };
+        assert_eq!(made, ["conflict_ops", "conflict_ops_by_op", "ops_by_op_id"]);
+        let found = store
+            .logged_op("PID-1101", "op-r-1-1")
+            .expect("lookup")
+            .expect("found by its id");
+        assert_eq!((found.revision, found.session_id.as_str()), (1, "s-1"));
+        assert_eq!(found.changes[0]["value"], "1.6MPa");
+        assert_eq!(
+            store.logged_op("PID-1101", "op-r-1-2").expect("lookup"),
+            None
+        );
+        assert_eq!(
+            store.logged_op("PID-1102", "op-r-1-1").expect("lookup"),
+            None,
+            "another drawing's log"
+        );
+    }
+
+    /// `OFF-4`: a conflict entry keeps the ops that went into it, in the
+    /// order they were named. While it waits for its ruling each of them
+    /// finds it; once it is ruled on, neither does.
+    #[test]
+    fn duplicate_op_a_conflict_entry_keeps_the_ops_it_holds() {
+        let store = Store::open_in_memory().expect("memory store");
+        let row = ConflictRow {
+            conflict_id: "c-1".into(),
+            drawing_id: "PID-1101".into(),
+            object_ref: "P-1001".into(),
+            field: "设计压力".into(),
+            value_a: "1.6MPa".into(),
+            value_b: "2.5MPa".into(),
+            base_revision: 0,
+            status: "待裁决".into(),
+            resolution: None,
+            resolved_value: None,
+            resolved_by: None,
+        };
+        let held = vec!["op-r-2-1".to_owned(), "op-r-1-1".to_owned()];
+        store.insert_conflict_holding(&row, &held).expect("entry");
+        for op_id in &held {
+            assert_eq!(
+                store
+                    .pending_conflicts_holding("PID-1101", op_id)
+                    .expect("lookup"),
+                [(row.clone(), held.clone())],
+                "{op_id}"
+            );
+        }
+        let elsewhere = store
+            .pending_conflicts_holding("PID-1102", "op-r-1-1")
+            .expect("lookup");
+        assert!(elsewhere.is_empty(), "another drawing: {elsewhere:?}");
+
+        assert!(store
+            .resolve_conflict("c-1", "采用甲方", None, "u-admin")
+            .expect("ruled"));
+        let ruled = store
+            .pending_conflicts_holding("PID-1101", "op-r-1-1")
+            .expect("lookup");
+        assert!(ruled.is_empty(), "{ruled:?}");
     }
 }

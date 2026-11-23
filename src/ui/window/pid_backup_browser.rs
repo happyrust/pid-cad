@@ -10,9 +10,10 @@
 //!
 //! Every click is a message, and [`update`] is the pure function that applies
 //! it and says what the application should do next ([`Effect`]): read a
-//! drawing's items off the UI thread, open a drawing in a tab, ask for a
-//! source, rebuild the index. The panel therefore has no IO of its own and is
-//! testable without a window, which is what `visible_rows`/`update` are for.
+//! drawing's items off the UI thread, open a drawing or a symbol file in a
+//! tab, ask for a source, rebuild the index. The panel therefore has no IO of
+//! its own and is testable without a window, which is what
+//! `visible_rows`/`update` are for.
 //!
 //! The state lives on the application, not on a tab, so switching documents
 //! leaves the tree where the user left it.
@@ -33,6 +34,7 @@ pub mod grid;
 mod manifest;
 mod section;
 pub mod split;
+mod symbol_preview;
 mod text_preview;
 
 pub use cache::{
@@ -42,12 +44,16 @@ pub use cache::{
 pub use goto::take_outcome as take_goto_outcome;
 pub use section::{SectionData, SectionLoad};
 pub use split::reveal_selected;
+pub(crate) use symbol_preview::notes as symbol_notes;
+#[cfg(test)]
+pub(crate) use symbol_preview::opens as symbol_opens;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::app::Message;
+use crate::io::pid_backup_browse::symbol_file::{SymbolDrawing, SymbolSource};
 use crate::io::pid_backup_browse::{BackupIndex, DrawingItems, GroupNode, RefNode};
 use crate::t;
 use crate::ui::dock::{Chrome, PanelId};
@@ -143,13 +149,15 @@ pub enum PidBackupMsg {
     Toggle(NodeId),
     /// A click on a row: select it.
     Select(NodeId),
-    /// A double click on a row: open the drawing it names.
+    /// A double click on a row: open the drawing or the symbol file it
+    /// names.
     Activate(NodeId),
     /// The "refresh" button: rebuild the index from the current source.
     Refresh,
     /// The "close backup" button: forget the index and go back to idle.
     Close,
-    /// The search box: narrow the tree to the drawings whose name matches.
+    /// The search box: narrow the tree to the drawings and the reference
+    /// files whose name matches.
     Filter(String),
     /// Go to the node at this path of labels (`a > b > c`), unfolding the
     /// levels on the way and selecting it: `PIDBACKUPOPEN Select`.
@@ -166,6 +174,22 @@ pub enum PidBackupMsg {
     Progress,
     /// The restore cache: measured, cleared, moved to another folder.
     Cache(cache::CacheMsg),
+    /// The tags the backup's database gives its plant items were read, or
+    /// were not: for the drawings opened from the panel, whose symbols take
+    /// them. `generation` is the panel's when the read began.
+    TagsRead {
+        generation: u64,
+        result: Result<Arc<HashMap<String, String>>, String>,
+    },
+    /// The symbol file at `source` was read to be opened as a drawing
+    /// ([`Effect::OpenSymbol`]), or was not; `name` is what the symbol is
+    /// called. It carries no generation: what was asked for is shown
+    /// whatever the panel did since, as a drawing opened from it is.
+    SymbolRead {
+        source: SymbolSource,
+        name: String,
+        result: Result<Box<SymbolDrawing>, String>,
+    },
 }
 
 /// What the application should do after [`update`] applied a message.
@@ -178,6 +202,10 @@ pub enum Effect {
     LoadItems(usize, PathBuf),
     /// Open the `.pid` at the path in a tab.
     OpenDrawing(PathBuf),
+    /// Open the symbol file at `source` as a drawing of its own, in a tab
+    /// called `name`: read it off the UI thread and come back with
+    /// [`PidBackupMsg::SymbolRead`].
+    OpenSymbol { source: SymbolSource, name: String },
     /// Build the index of this source.
     Load(PathBuf),
     /// Rebuild the index from the current source.
@@ -505,9 +533,12 @@ pub fn load_section_in_background(
 ///
 /// Only the nodes [`PidBackupBrowser::expanded`] holds are walked, so a
 /// collapsed `Ref` tree of 645 files costs one row. A non-empty filter keeps
-/// only the drawings whose name contains it (case-insensitively) and the
-/// groups above them, which are shown open; the backup files and the `Ref`
-/// tree carry no drawings and drop out.
+/// what it names and what stands above that, shown open whatever the user
+/// folded: the drawings whose name contains it (case-insensitively) under
+/// their groups, and the files of the `Ref` tree whose name does under their
+/// directories ([`push_ref_matches`]). The backup files drop out: their
+/// names are not searched, and the members of the reference archives would
+/// show every file found a second time.
 pub fn visible_rows(state: &PidBackupBrowser) -> Vec<Row> {
     let Some(index) = state.index() else {
         return Vec::new();
@@ -529,7 +560,9 @@ pub fn visible_rows(state: &PidBackupBrowser) -> Vec<Row> {
         push_files(state, index, &mut rows);
     }
     push_groups(state, index, &filter, filtering, &mut rows);
-    if !filtering {
+    if filtering {
+        push_ref_matches(index, &filter, &mut rows);
+    } else {
         push_ref(state, index, &mut rows);
     }
     section::splice(state, index, &filter, rows)
@@ -647,6 +680,11 @@ pub fn update(state: &mut PidBackupBrowser, msg: PidBackupMsg) -> Effect {
             Effect::None
         }
         PidBackupMsg::Cache(msg) => cache::update(state, msg),
+        // Nothing of the panel's: the application puts the tags on the
+        // drawings it opened from here.
+        PidBackupMsg::TagsRead { .. } => Effect::None,
+        // Nor this: the application shows the symbol in a tab.
+        PidBackupMsg::SymbolRead { .. } => Effect::None,
         // The message itself is what draws the panel anew; the clock goes
         // on for as long as something counts.
         PidBackupMsg::Progress => {
@@ -946,6 +984,80 @@ fn push_ref_children(
     }
 }
 
+/// The `Ref` tree under a search: the files whose name contains `filter`
+/// (lower case already, as [`section::filter_of`] gives it), each under the
+/// directories above it, and the "reference data" row above them all. What
+/// stays is shown open whatever the user folded, and
+/// [`PidBackupBrowser::expanded`] is not touched, so the tree is the user's
+/// again once the search is cleared. With no such file nothing is added, not
+/// the "reference data" row either: a search for a drawing shows drawings
+/// alone.
+///
+/// Only a file's own name is compared, as only a drawing's is: a directory
+/// called after the search does not bring its files along.
+fn push_ref_matches(index: &BackupIndex, filter: &str, rows: &mut Vec<Row>) {
+    let at = rows.len();
+    rows.push(Row {
+        id: NodeId::Ref,
+        depth: 1,
+        label: t!("Reference data").into_owned(),
+        expandable: true,
+        expanded: true,
+        disabled: false,
+    });
+    if !push_ref_matches_under(&index.ref_tree, &mut Vec::new(), 2, filter, rows) {
+        rows.truncate(at);
+    }
+}
+
+/// The rows of [`push_ref_matches`] under `node`, `path` being the way to
+/// it; whether there are any.
+///
+/// One walk of the tree: a directory's row goes in before its subtree is
+/// looked at and comes out again when the subtree added nothing, so a name
+/// is compared once however deep it lies.
+fn push_ref_matches_under(
+    node: &RefNode,
+    path: &mut Vec<usize>,
+    depth: usize,
+    filter: &str,
+    rows: &mut Vec<Row>,
+) -> bool {
+    let mut any = false;
+    for (at, dir) in node.dirs.iter().enumerate() {
+        let row = rows.len();
+        path.push(at);
+        rows.push(Row {
+            id: NodeId::RefDir(path.clone()),
+            depth,
+            label: dir.name.clone(),
+            expandable: true,
+            expanded: true,
+            disabled: false,
+        });
+        if push_ref_matches_under(dir, path, depth + 1, filter, rows) {
+            any = true;
+        } else {
+            rows.truncate(row);
+        }
+        path.pop();
+    }
+    for (at, file) in node.files.iter().enumerate() {
+        if file.name.to_lowercase().contains(filter) {
+            rows.push(Row {
+                id: NodeId::RefFile(path.clone(), at),
+                depth,
+                label: file.name.clone(),
+                expandable: false,
+                expanded: false,
+                disabled: false,
+            });
+            any = true;
+        }
+    }
+    any
+}
+
 /// Fold or unfold a node; a drawing's first unfold reads its items.
 fn toggle(state: &mut PidBackupBrowser, id: NodeId) -> Effect {
     if id == NodeId::Root {
@@ -978,16 +1090,26 @@ fn flip(state: &mut PidBackupBrowser, id: NodeId) {
     }
 }
 
-/// Open a drawing; anything else, and a drawing without a file, does nothing.
+/// Open a drawing, or a symbol file as a drawing of its own; anything else,
+/// and a drawing without a file, does nothing.
+///
+/// A symbol file is asked for whether or not it was read for its details:
+/// a double click does not wait for the thumbnail, and one that draws
+/// nothing says so when it has been read to be opened.
 fn activate(state: &PidBackupBrowser, id: NodeId) -> Effect {
-    let NodeId::Drawing(drawing) = id else {
+    let Some(index) = state.index() else {
         return Effect::None;
     };
-    state
-        .index()
-        .and_then(|index| index.drawings.get(drawing))
-        .and_then(|entry| entry.pid_path.clone())
-        .map_or(Effect::None, Effect::OpenDrawing)
+    match id {
+        NodeId::Drawing(drawing) => index
+            .drawings
+            .get(drawing)
+            .and_then(|entry| entry.pid_path.clone())
+            .map_or(Effect::None, Effect::OpenDrawing),
+        id => symbol_preview::opens(index, &id).map_or(Effect::None, |(source, name)| {
+            Effect::OpenSymbol { source, name }
+        }),
+    }
 }
 
 impl PidBackupMsg {
@@ -1194,16 +1316,20 @@ enum DetailLine {
     /// A table, drawn as a [`grid`] below the other lines. A node's details
     /// hold at most one: it takes what is left of the detail half.
     Table(std::sync::Arc<grid::Table>),
+    /// What a symbol file draws, as a thumbnail among the lines.
+    Sketch(std::sync::Arc<crate::io::pid_backup_browse::symbol_file::Sketch>),
 }
 
 impl DetailLine {
     /// The `(key, value)` pairs this line shows: one for every kind but a
     /// table, which gives its titles (with its row count) and then a pair
     /// per row, the first cell as the key and the others joined with ` | `.
+    /// A thumbnail is a key of its own with how much it draws.
     #[cfg(test)]
     fn into_pairs(self) -> Vec<(String, String)> {
         match self {
             DetailLine::Field(key, value) => vec![(key, value)],
+            DetailLine::Sketch(sketch) => vec![symbol_preview::sketch_pair(&sketch)],
             DetailLine::Marker(key)
             | DetailLine::Heading(key)
             | DetailLine::OpenDrawing(key)
@@ -1339,6 +1465,7 @@ fn details<'a>(state: &'a PidBackupBrowser, width: f32) -> Element<'a, Message> 
                 .on_press(msg.message())
                 .padding([3, 10])
                 .into(),
+            DetailLine::Sketch(sketch) => symbol_preview::thumbnail(sketch),
             DetailLine::Table(found) => {
                 table = Some(found);
                 continue;
@@ -1773,10 +1900,13 @@ pub fn view<'a>(state: &'a PidBackupBrowser, width: f32, chrome: Chrome) -> Elem
     .spacing(4)
     .align_y(iced::Center);
 
-    let search = text_input(t!("Search drawings…").as_ref(), &state.filter)
-        .on_input(|text| PidBackupMsg::Filter(text).message())
-        .size(11)
-        .padding([3, 6]);
+    let search = text_input(
+        t!("Search drawings and reference files…").as_ref(),
+        &state.filter,
+    )
+    .on_input(|text| PidBackupMsg::Filter(text).message())
+    .size(11)
+    .padding([3, 6]);
 
     // The upper half is the tree, built only from the rows the user opened;
     // the lower half is what the selected node is. The bar between them is
@@ -2178,6 +2308,149 @@ mod tests {
             ids(&visible_rows(&state)),
             vec![NodeId::Root, NodeId::Groups]
         );
+    }
+
+    #[test]
+    fn a_filter_keeps_the_reference_files_it_names_under_their_directories() {
+        let mut state = ready();
+        let unfolded = state.expanded.clone();
+        update(&mut state, PidBackupMsg::Filter("valve".to_string()));
+        let rows = visible_rows(&state);
+        assert_eq!(
+            ids(&rows),
+            vec![
+                NodeId::Root,
+                NodeId::Groups,
+                NodeId::Ref,
+                NodeId::RefDir(vec![0]),
+                NodeId::RefFile(vec![0], 0),
+            ],
+            "valve.svg stays, under Symbols and the reference data"
+        );
+        assert_eq!(
+            rows[2..].iter().map(|row| row.depth).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(rows[3].label, "Symbols");
+        assert_eq!(rows[4].label, "valve.svg");
+        // What stands above the file is shown open without the user having
+        // unfolded it.
+        assert!(rows[2].expandable && rows[2].expanded);
+        assert!(rows[3].expandable && rows[3].expanded);
+        assert!(!rows[4].expandable);
+        assert_eq!(state.expanded, unfolded);
+
+        // Neither the case nor the spaces around the text count; a file
+        // whose name does not hold the text goes, `readme.txt` here.
+        update(&mut state, PidBackupMsg::Filter(" SVG ".to_string()));
+        assert_eq!(
+            ids(&visible_rows(&state)),
+            vec![
+                NodeId::Root,
+                NodeId::Groups,
+                NodeId::Ref,
+                NodeId::RefDir(vec![0]),
+                NodeId::RefFile(vec![0], 0),
+                NodeId::RefFile(vec![0], 1),
+            ]
+        );
+
+        // A directory none of whose files is named is not shown.
+        update(&mut state, PidBackupMsg::Filter("readme".to_string()));
+        let rows = visible_rows(&state);
+        assert_eq!(
+            ids(&rows),
+            vec![
+                NodeId::Root,
+                NodeId::Groups,
+                NodeId::Ref,
+                NodeId::RefFile(vec![], 0),
+            ]
+        );
+        assert_eq!(rows[3].depth, 2);
+
+        // A text both a drawing and reference files hold keeps both, the
+        // drawings first; the file beside the directories comes after them.
+        update(&mut state, PidBackupMsg::Filter("a".to_string()));
+        assert_eq!(
+            ids(&visible_rows(&state)),
+            vec![
+                NodeId::Root,
+                NodeId::Groups,
+                NodeId::Group(vec![0]),
+                NodeId::Group(vec![0, 0]),
+                NodeId::Drawing(0),
+                NodeId::Ref,
+                NodeId::RefDir(vec![0]),
+                NodeId::RefFile(vec![0], 0),
+                NodeId::RefFile(vec![], 0),
+            ]
+        );
+        assert_eq!(state.expanded, unfolded);
+    }
+
+    #[test]
+    fn a_filter_compares_the_names_of_files_and_not_of_directories() {
+        let mut state = ready();
+        // `Symbols` is a directory: its name keeps neither itself nor the
+        // files in it, and with no file named the reference data is not
+        // shown at all.
+        update(&mut state, PidBackupMsg::Filter("symbols".to_string()));
+        assert_eq!(
+            ids(&visible_rows(&state)),
+            vec![NodeId::Root, NodeId::Groups]
+        );
+    }
+
+    #[test]
+    fn clearing_a_filter_gives_the_tree_back_as_the_user_left_it() {
+        let mut state = ready();
+        // The reference data is unfolded, `Symbols` under it is not.
+        update(&mut state, PidBackupMsg::Toggle(NodeId::Ref));
+        update(&mut state, PidBackupMsg::Toggle(NodeId::Groups));
+        let rows = visible_rows(&state);
+        let unfolded = state.expanded.clone();
+        assert!(!unfolded.contains(&NodeId::RefDir(vec![0])));
+
+        update(&mut state, PidBackupMsg::Filter("pump".to_string()));
+        assert_eq!(
+            ids(&visible_rows(&state)),
+            vec![
+                NodeId::Root,
+                NodeId::Groups,
+                NodeId::Ref,
+                NodeId::RefDir(vec![0]),
+                NodeId::RefFile(vec![0], 1),
+            ],
+            "the folded directory is shown open for the file in it"
+        );
+        assert_eq!(state.expanded, unfolded);
+
+        update(&mut state, PidBackupMsg::Filter(String::new()));
+        assert_eq!(visible_rows(&state), rows);
+        assert_eq!(state.expanded, unfolded);
+    }
+
+    #[test]
+    fn a_reference_file_a_filter_keeps_is_the_node_it_was() {
+        let node = NodeId::RefFile(vec![0], 0);
+        let mut plain = ready();
+        let asked_plain = update(&mut plain, PidBackupMsg::Select(node.clone()));
+
+        let mut searched = ready();
+        update(&mut searched, PidBackupMsg::Filter("valve".to_string()));
+        assert!(visible_rows(&searched).iter().any(|row| row.id == node));
+        let asked = update(&mut searched, PidBackupMsg::Select(node.clone()));
+        // The same read is asked for and the same details are shown.
+        assert_eq!(asked, asked_plain);
+        let details = detail_rows(&searched, &node);
+        assert!(!details.is_empty());
+        assert_eq!(details, detail_rows(&plain, &node));
+        assert_eq!(searched.selected, Some(node.clone()));
+        // Typing on leaves the selection where it is, shown or not.
+        update(&mut searched, PidBackupMsg::Filter("pump".to_string()));
+        assert!(visible_rows(&searched).iter().all(|row| row.id != node));
+        assert_eq!(searched.selected, Some(node));
     }
 
     #[test]

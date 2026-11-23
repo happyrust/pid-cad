@@ -30,6 +30,7 @@ pub mod export_log;
 pub mod labels;
 pub mod loose_files;
 pub mod manifest;
+pub mod symbol_file;
 pub mod text_file;
 
 use std::collections::BTreeMap;
@@ -2493,7 +2494,7 @@ mod tests {
     }
 
     /// The plant test backup, indexed and read: 53 drawings, an Oracle dump,
-    /// 11 RefData files, 645 Ref files, and the first drawing's items.
+    /// 11 RefData files, 695 Ref files, and the first drawing's items.
     /// Soft-skips when the backup is not on this machine.
     #[test]
     #[ignore = "reads the 74 MB plant dump; run with --ignored"]
@@ -2548,9 +2549,16 @@ mod tests {
                 .map(|file| (&file.name, file.missing))
                 .collect::<Vec<_>>()
         );
-        assert_eq!(index.ref_tree.file_count(), 645);
+        // The restore's own `Ref`: the reference data volumes unpacked, with
+        // what the `Ref` folder beside the backup adds. That folder alone
+        // holds 645 files.
+        assert_eq!(index.ref_tree.file_count(), 695);
         assert_eq!(index.warnings.len(), 1, "{:?}", index.warnings);
-        assert!(index.warnings[0].contains("RefData~4~824"), "{:?}", index.warnings);
+        assert!(
+            index.warnings[0].contains("RefData~4~824"),
+            "{:?}",
+            index.warnings
+        );
 
         assert_eq!(index.drawings.len(), 53);
         for drawing in &index.drawings {

@@ -33,12 +33,13 @@ use std::time::{Duration, Instant};
 
 use pid_parse::publish::oracle_exp::{
     backup_uid_key, composition_relations, connectivity_ends_for_drawing, nominal_spelling,
-    opc_points_for_drawing, ports_for_parents, read_port_tables, ExpTables, PortTables,
+    opc_points_for_drawing, ports_for_parents, read_port_tables, ExpTables, PortTables, StoredCell,
 };
 use pid_parse::publish::pid_load::{
     PidPublishDrawing, PidPublishItem, PidPublishStats, PipelineSynthesis,
 };
 use pid_parse::publish::pipeline::{attach_pipelines, pipeline_name};
+use pid_parse::publish::placement::DumpColumn;
 
 use super::{BackupIndex, DrawingItems, FileKind};
 
@@ -101,6 +102,9 @@ impl BackupIndex {
                     .iter()
                     .find(|file| file.kind == FileKind::ExportDump && !file.missing)
                     .expect("a readable dump is a file of the backup");
+                // A test tells by this count which thread a dump is read on.
+                #[cfg(test)]
+                tests::DUMPS_READ_HERE.with(|read| read.set(read.get() + 1));
                 Dump::read(&self.backup_root.join(&file.name)).map(Arc::new)
             })
             .clone()
@@ -110,6 +114,61 @@ impl BackupIndex {
     pub fn dump_if_read(&self) -> Option<Arc<Dump>> {
         self.dump.0.get().and_then(|read| read.clone().ok())
     }
+}
+
+/// The thread the item tags of a backup are read on.
+const TAGS_THREAD: &str = "ocs-pid-backup-tags";
+
+/// [`Dump::item_tags`] of a backup's dump, on a worker thread: the first to
+/// ask for the dump reads it, and that is seconds the UI thread must not
+/// wait out.
+pub async fn item_tags_in_background(
+    index: Arc<BackupIndex>,
+) -> Result<Arc<HashMap<String, String>>, String> {
+    on_tags_thread(move || index.dump().and_then(|dump| dump.item_tags())).await
+}
+
+/// `work` on a thread of its own, under the name of [`TAGS_THREAD`]. A
+/// thread that is gone before it answers is a read that failed.
+async fn on_tags_thread<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let (sender, receiver) = iced::futures::channel::oneshot::channel();
+    std::thread::Builder::new()
+        .name(TAGS_THREAD.into())
+        .spawn(move || {
+            let _ = sender.send(work());
+        })
+        .map_err(|error| {
+            crate::tf!("cannot start reading the backup data: {}", error).into_owned()
+        })?;
+    receiver.await.unwrap_or_else(|_| {
+        Err(crate::t!("the backup data read stopped before it finished").into_owned())
+    })
+}
+
+/// The column of the dump the tags of the plant items are stored in.
+fn item_tag_column() -> DumpColumn {
+    DumpColumn {
+        table: "T_PlantItem".to_string(),
+        column: "ItemTag".to_string(),
+    }
+}
+
+/// The tags of that column's cells, by the ids the cells come under: the
+/// text of a cell without the blanks around it. A cell that is all blanks
+/// is no tag, nor is one that is no text.
+fn tags_of_cells(cells: HashMap<String, StoredCell>) -> HashMap<String, String> {
+    cells
+        .into_iter()
+        .filter_map(|(id, cell)| match cell {
+            StoredCell::Text(tag) => {
+                let tag = tag.trim();
+                (!tag.is_empty()).then(|| (id, tag.to_string()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// What was read of a dump.
@@ -133,6 +192,7 @@ pub struct Dump {
     ports: OnceLock<Result<PortTables, String>>,
     relations: OnceLock<Result<Vec<Relation>, String>>,
     fluids: OnceLock<Result<HashMap<i64, String>, String>>,
+    item_tags: OnceLock<Result<Arc<HashMap<String, String>>, String>>,
 }
 
 /// One `T_PIPERUN` row as a pipeline is named from it.
@@ -322,6 +382,7 @@ impl Dump {
             ports: OnceLock::new(),
             relations: OnceLock::new(),
             fluids: OnceLock::new(),
+            item_tags: OnceLock::new(),
         })
     }
 
@@ -357,6 +418,29 @@ impl Dump {
             .get_or_init(|| self.whole()?.codelist_short_text(FLUID_CODES).map_err(text))
             .as_ref()
             .map_err(Clone::clone)
+    }
+
+    /// The tag the database gives each plant item that has one
+    /// (`T_PlantItem.ItemTag`), by the item's id as [`backup_uid_key`]
+    /// spells it. Worked out when first asked for, and kept.
+    ///
+    /// From the tables read whole only: a dump the reader could not follow
+    /// answers with why it could not, not with the tags of the rows it did
+    /// follow, and so does a dump that holds no such column.
+    pub fn item_tags(&self) -> Result<Arc<HashMap<String, String>>, String> {
+        self.item_tags
+            .get_or_init(|| {
+                let column = item_tag_column();
+                let cells = self
+                    .whole()?
+                    .stored_column(&column)
+                    .map_err(text)?
+                    .ok_or_else(|| {
+                        crate::tf!("the dump holds no {} column", column).into_owned()
+                    })?;
+                Ok(Arc::new(tags_of_cells(cells)))
+            })
+            .clone()
     }
 
     /// The pipe runs, each with the name its pipeline goes by.
@@ -662,6 +746,13 @@ mod tests {
     use super::*;
     use crate::io::pid_backup_browse::{build_index, load_items, BackupFile};
 
+    thread_local! {
+        /// How many dumps this thread has set out to read
+        /// ([`BackupIndex::dump`] counts them).
+        pub(super) static DUMPS_READ_HERE: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
+
     #[test]
     fn a_code_is_its_spelling_or_its_number() {
         assert_eq!(code_text(None, nominal_spelling), "");
@@ -721,6 +812,157 @@ mod tests {
         // The failure is the answer from then on, and a copy has it too.
         assert_eq!(oracle.clone().dump().err(), Some(failed));
         assert_eq!(format!("{:?}", oracle.dump), "DumpCell(unreadable)");
+    }
+
+    /// A tag is the text of its cell without the blanks around it; a cell
+    /// that is all blanks is no tag, nor is a cell that is no text.
+    #[test]
+    fn a_tag_is_the_text_of_its_cell() {
+        let cells: HashMap<String, StoredCell> = [
+            ("A", StoredCell::Text("GV-101".to_string())),
+            ("B", StoredCell::Text("  PIA-0112101B \t".to_string())),
+            ("C", StoredCell::Text("   ".to_string())),
+            ("D", StoredCell::Integer(7)),
+            ("E", StoredCell::Text("P 101 A".to_string())),
+        ]
+        .into_iter()
+        .map(|(id, cell)| (id.to_string(), cell))
+        .collect();
+        let mut tags: Vec<(String, String)> = tags_of_cells(cells).into_iter().collect();
+        tags.sort();
+        assert_eq!(
+            tags,
+            [
+                ("A".to_string(), "GV-101".to_string()),
+                ("B".to_string(), "PIA-0112101B".to_string()),
+                ("E".to_string(), "P 101 A".to_string()),
+            ]
+        );
+    }
+
+    /// A dump the reader could not follow gives no tags: it says why it was
+    /// not followed, and does not give the tags of the tables that were
+    /// read (plan 2026-11-20-pid-symbol-identity, SPEC section 4.4).
+    #[test]
+    fn a_dump_not_read_whole_gives_no_item_tags() {
+        let why = "the reader could not follow T_REPRESENTATION".to_string();
+        let dump = Dump {
+            tables: Tables::Partial {
+                dump: Vec::new(),
+                why: why.clone(),
+            },
+            bytes: 0,
+            read_in: Duration::ZERO,
+            ports: OnceLock::new(),
+            relations: OnceLock::new(),
+            fluids: OnceLock::new(),
+            item_tags: OnceLock::new(),
+        };
+        assert_eq!(dump.partial(), Some(why.as_str()));
+        assert_eq!(dump.item_tags(), Err(why.clone()));
+        // The answer is kept: asked again, it is the same.
+        assert_eq!(dump.item_tags(), Err(why));
+    }
+
+    /// The tags are read on a thread of their own, under its own name, not
+    /// on the thread that asks (SPEC section 4.4: the UI's). A thread that
+    /// is gone before it answers is a read that failed. A dump that cannot
+    /// be opened answers with why, and it is that thread it was read on:
+    /// the thread that asked for the tags read no dump.
+    #[test]
+    fn the_item_tags_are_read_on_a_thread_of_their_own() {
+        use iced::futures::executor::block_on;
+
+        let named = || {
+            let thread = std::thread::current();
+            thread.name().unwrap_or_default().to_string()
+        };
+        let on = block_on(on_tags_thread(move || Ok(named())));
+        assert_eq!(on, Ok("ocs-pid-backup-tags".to_string()));
+        assert_ne!(named(), "ocs-pid-backup-tags");
+
+        let gone: Result<(), String> =
+            block_on(on_tags_thread(|| panic!("the reading thread died")));
+        assert_eq!(
+            gone,
+            Err(crate::t!("the backup data read stopped before it finished").into_owned())
+        );
+
+        let read_here = || DUMPS_READ_HERE.with(std::cell::Cell::get);
+        let unread = || {
+            Arc::new(BackupIndex {
+                files: vec![dump_file(Some("EXPORT:V12.01.00"))],
+                backup_root: std::env::temp_dir().join("ocs-no-such-backup"),
+                ..BackupIndex::default()
+            })
+        };
+        let before = read_here();
+        let index = unread();
+        assert_eq!(format!("{:?}", index.dump), "DumpCell(not read)");
+        let failed = block_on(item_tags_in_background(Arc::clone(&index)))
+            .expect_err("there is no such file");
+        assert!(failed.contains("Export.dmp"), "{failed}");
+        assert_eq!(format!("{:?}", index.dump), "DumpCell(unreadable)");
+        assert_eq!(read_here(), before, "read, and not on this thread");
+        // A dump this thread reads is counted here.
+        assert!(unread().dump().is_err());
+        assert_eq!(read_here(), before + 1);
+    }
+
+    /// The plant database of the test backup gives 8,145 of its items a tag
+    /// (plan 2026-11-20-pid-symbol-identity, SPEC section 2.2). Prints what
+    /// the column holds and how long the tags take. Soft-skips when the
+    /// backup is not on this machine.
+    #[test]
+    #[ignore = "reads the 74 MB plant dump; run with --ignored"]
+    fn the_plant_database_gives_its_items_their_tags() {
+        let backup = Path::new(r"D:\work\plant-code\cad\pid-test-data");
+        if !backup.join("Export.dmp").is_file() {
+            eprintln!("skipped: no plant backup at {}", backup.display());
+            return;
+        }
+        let index = build_index(backup, None).expect("the backup indexes");
+        let dump = index.dump().expect("an Oracle dump reads");
+        assert_eq!(dump.partial(), None, "the tables are read whole");
+        let started = Instant::now();
+        let tags = dump.item_tags().expect("the item tags");
+        let took = started.elapsed();
+        // A second ask is the same table, at once.
+        assert!(Arc::ptr_eq(&tags, &dump.item_tags().unwrap()));
+
+        // What the column itself holds.
+        let cells = dump
+            .whole()
+            .unwrap()
+            .stored_column(&item_tag_column())
+            .expect("the column reads")
+            .expect("the dump holds the column");
+        let texts: Vec<&str> = cells
+            .values()
+            .filter_map(|cell| match cell {
+                StoredCell::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let blank = texts.iter().filter(|text| text.trim().is_empty()).count();
+        let padded = texts
+            .iter()
+            .filter(|text| !text.trim().is_empty() && text.trim() != **text)
+            .count();
+        eprintln!(
+            "T_PlantItem.ItemTag: {} cell(s) stored, {} of them text, {} blank, {} with blanks around the tag; {} tag(s) worked out in {:.1} ms",
+            cells.len(),
+            texts.len(),
+            blank,
+            padded,
+            tags.len(),
+            took.as_secs_f64() * 1000.0
+        );
+        assert_eq!(tags.len(), 8145);
+        assert_eq!(tags.len(), texts.len() - blank);
+        assert!(tags.iter().all(|(id, tag)| {
+            *id == backup_uid_key(id) && !tag.is_empty() && tag.trim() == tag.as_str()
+        }));
     }
 
     /// The private bytes of this process, in MiB.

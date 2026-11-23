@@ -45,7 +45,9 @@
 use document::types::Vector3;
 use document::{Document, DxfVersion, EntityType, Handle};
 
-use crate::pid::collab_state::{PID_AUTHOR_COLLAB, PID_AUTHOR_COLLAB_QUEUE};
+use crate::pid::collab_state::{
+    PID_AUTHOR_COLLAB, PID_AUTHOR_COLLAB_QUEUE, PID_AUTHOR_COLLAB_UNSYNCED,
+};
 use crate::pid::graph_data::{
     PID_AUTHOR_CONNECTORS, PID_AUTHOR_TAG_RULES, PID_AUTHOR_TOPOLOGY, PID_AUTHOR_TYPE_LIB,
 };
@@ -66,14 +68,16 @@ const TARGETS: [(DxfVersion, &str); 7] = [
     (DxfVersion::AC1014, "R14"),
 ];
 
-/// 六个图级 key，按契约顺序（`REQ-COLL-015` 的两条协同记录随图保存）。
-const GRAPH_KEYS: [&str; 6] = [
+/// 七个图级 key，按契约顺序（`REQ-COLL-015` 的三条协同记录随图保存：
+/// 记录、队列、未同步清单；离线规格 §5.1）。
+const GRAPH_KEYS: [&str; 7] = [
     PID_AUTHOR_TYPE_LIB,
     PID_AUTHOR_TAG_RULES,
     PID_AUTHOR_TOPOLOGY,
     PID_AUTHOR_CONNECTORS,
     PID_AUTHOR_COLLAB,
     PID_AUTHOR_COLLAB_QUEUE,
+    PID_AUTHOR_COLLAB_UNSYNCED,
 ];
 
 /// 五种会随实体变换被改写、进而让调用方丢弃 verbatim `raw_record` 的变体。
@@ -178,7 +182,7 @@ struct EntitySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Snapshot {
     entities: Vec<EntitySnapshot>,
-    /// 四个图级 key 的条目（code + 值的规范化文本），`None` = 记录不存在。
+    /// [`GRAPH_KEYS`] 各 key 的条目（code + 值的规范化文本），`None` = 记录不存在。
     graph: Vec<(String, Option<Vec<String>>)>,
 }
 
@@ -231,7 +235,7 @@ fn nine_keys(doc: &Document, handle: Handle) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
-/// 四个图级 key 的条目快照。记录不存在时为 `None`。
+/// [`GRAPH_KEYS`] 各 key 的条目快照。记录不存在时为 `None`。
 fn graph_entries(doc: &Document, key: &str) -> Option<Vec<String>> {
     let record = doc.xrecord(doc.header.model_space_block_handle, key)?;
     Some(record.entries.iter().map(entry_repr).collect())
@@ -265,7 +269,7 @@ fn snapshot(doc: &Document, handles: &[Handle]) -> Snapshot {
 /// 1. 实体缺失 → `entity` 一条；
 /// 2. `block_name` 变了 → `block_name` 一条；
 /// 3. 九键逐键比（顺序敏感）：键消失记「<缺失>」，值变了记原值与读回值；
-/// 4. 四个图级 key 逐条比：记录消失记 `key_missing`，条目不同记
+/// 4. [`GRAPH_KEYS`] 逐条比：记录消失记 `key_missing`，条目不同记
 ///    `key_changed`，原值与读回值都是整条 entries 的规范化文本。
 fn diff(before: &Snapshot, after: &Snapshot) -> Vec<LossItem> {
     let mut losses = Vec::new();
@@ -501,14 +505,26 @@ fn fixture() -> (Document, Vec<Handle>) {
         ],
     );
 
-    // `REQ-COLL-015`：这份图对齐过的协同位置，与它重开时要重发的队列。
-    crate::pid::collab_state::store_state(
+    // `REQ-COLL-015`：这份图对齐过的协同位置（带它已知与房间对不上的标记）、
+    // 它重开时要重发的队列，和不会再自动提交的未同步清单（离线规格 §5.1）。
+    crate::pid::collab_state::store_state_diverged(
         &mut doc,
         Some(&crate::pid::FileCollabState {
             drawing_id: "PID-1101".into(),
             repo_id: "r-fixture".into(),
             revision: 42,
         }),
+        Some(&crate::pid::collab_state::Diverged {
+            code: crate::pid::collab_state::UNQUEUED_EDITS.into(),
+            message: "做了没有排上队的修改".into(),
+            at: 1_794_900_000,
+        }),
+    );
+    crate::pid::collab_state::store_unsynced(
+        &mut doc,
+        &[serde_json::json!({"state": "unqueued", "label": "改属性",
+            "payload": {"changes": []}, "at": 1_794_900_000,
+            "message": "不是本次会话的图"})],
     );
     crate::pid::collab_state::store_queue(
         &mut doc,
@@ -519,6 +535,10 @@ fn fixture() -> (Document, Vec<Handle>) {
             base_revision: 42,
             on: true,
             label: "改属性".into(),
+            user_id: None,
+            queued_at: None,
+            inverse: Some(vec![serde_json::json!({"kind": "set_property",
+                "object_ref": "V-1001", "field": "设计压力", "value": "1.0MPa"})]),
         }],
     );
 
@@ -563,7 +583,7 @@ fn assert_fixture_shape(doc: &Document, handles: &[Handle]) {
     }
 }
 
-/// 读回后四个 key 是否都在、且都挂在模型空间的扩展字典上。
+/// 读回后 [`GRAPH_KEYS`] 的每个 key 是否都在、且都挂在模型空间的扩展字典上。
 fn assert_graph_keys_present(doc: &Document) -> Vec<LossItem> {
     let mut losses = Vec::new();
     let dictionary = doc.extension_dictionary_handle(doc.header.model_space_block_handle);
@@ -653,6 +673,35 @@ mod tests {
         assert_eq!(queue[0].op_id, "op-s-1-7");
         assert_eq!(queue[0].base_revision, 42);
         assert_eq!(queue[0].payload["object_ref"], "V-1001");
+        let inverse = queue[0].inverse.as_deref().expect("反向修改读回");
+        assert_eq!(inverse.len(), 1);
+        assert_eq!(inverse[0]["value"], "1.0MPa");
+    }
+
+    /// `OFF-6`：三条协同记录（记录、队列、未同步清单）DWG 与 DXF 各存一次
+    /// 再读回，逐项与存之前相等（离线规格 §5.1）。
+    #[test]
+    fn the_three_collab_records_read_back_alike_from_dwg_and_dxf() {
+        let (doc, handles) = fixture();
+        assert_fixture_shape(&doc, &handles);
+        let keys = [
+            PID_AUTHOR_COLLAB,
+            PID_AUTHOR_COLLAB_QUEUE,
+            PID_AUTHOR_COLLAB_UNSYNCED,
+        ];
+        for format in ["dwg", "dxf"] {
+            let bytes = crate::io::save_to_bytes(&doc, format, DxfVersion::AC1032)
+                .unwrap_or_else(|error| panic!("save {format}: {error:?}"));
+            let back = crate::io::load_bytes(&format!("rt-collab.{format}"), bytes)
+                .unwrap_or_else(|error| panic!("load {format}: {error:?}"));
+            for key in keys {
+                assert_eq!(
+                    crate::pid::graph_data::load(&back, key),
+                    crate::pid::graph_data::load(&doc, key),
+                    "{format} 读回的 {key}"
+                );
+            }
+        }
     }
 
     /// 把 fixture 存成一份 DWG 2018 文件，路径由 `OCS_M3_BASELINE_OUT` 给出：
@@ -661,7 +710,7 @@ mod tests {
     /// 这是生成器，不是检查：平时忽略，要用时带着环境变量、加 `--ignored` 跑。
     ///
     /// 基线图是一份还没有进过任何协同房间的图，所以写出去之前去掉 fixture 里
-    /// 那两条协同记录（`REQ-COLL-015`）：带着它们，这份图一连上服务器就会因
+    /// 那三条协同记录（`REQ-COLL-015`）：带着它们，这份图一连上服务器就会因
     /// 库标识不符被拒（`REPO_MISMATCH`），用它起步的场景就不是从干净的图开始。
     #[test]
     #[ignore = "生成器：把 OCS_M3_BASELINE_OUT 设为要写出的文件路径"]
@@ -673,11 +722,12 @@ mod tests {
         assert_fixture_shape(&doc, &handles);
         crate::pid::collab_state::store_state(&mut doc, None);
         crate::pid::collab_state::store_queue(&mut doc, &[]);
+        crate::pid::collab_state::store_unsynced(&mut doc, &[]);
         let bytes =
             crate::io::save_to_bytes(&doc, "dwg", DxfVersion::AC1032).expect("save dwg 2018");
         std::fs::write(&path, &bytes).expect("写出基线文件");
 
-        // 写出去的这份读回来是完整的：四个 P&ID 图级记录都在，两条协同记录都不在。
+        // 写出去的这份读回来是完整的：四个 P&ID 图级记录都在，三条协同记录都不在。
         let back = crate::io::load_bytes("baseline.dwg", bytes).expect("load dwg 2018");
         let losses = diff(&snapshot(&doc, &handles), &snapshot(&back, &handles));
         assert!(
@@ -694,8 +744,9 @@ mod tests {
             [
                 format!("{PID_AUTHOR_COLLAB}:key_missing"),
                 format!("{PID_AUTHOR_COLLAB_QUEUE}:key_missing"),
+                format!("{PID_AUTHOR_COLLAB_UNSYNCED}:key_missing"),
             ],
-            "读回的基线文件：四个 P&ID 图级记录都该在，两条协同记录都不该在"
+            "读回的基线文件：四个 P&ID 图级记录都该在，三条协同记录都不该在"
         );
     }
 
@@ -703,7 +754,7 @@ mod tests {
     ///
     /// 每个版本各做一次「保存 → 读回」（DWG 与 DXF 各一遍，`round_trip`
     /// 模板本来就是双格式），每个版本独立断言：位号丢失 0、属性键值对丢失
-    /// 0、四个 XRecord key 齐全。失败时报告版本号与首个丢失项。
+    /// 0、[`GRAPH_KEYS`] 的 XRecord 齐全。失败时报告版本号与首个丢失项。
     #[test]
     fn pid_author_dwg_all_versions_zero_loss() {
         let (doc, handles) = fixture();

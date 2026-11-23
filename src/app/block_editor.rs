@@ -960,7 +960,7 @@ impl OpenCADStudio {
             self.pending_close = Some(super::PendingClose::Quit);
             self.open_unsaved_dialog_window()
         } else {
-            self.exit_app()
+            self.quit_unless_unsynced()
         }
     }
 }

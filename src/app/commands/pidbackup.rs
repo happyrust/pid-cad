@@ -10,6 +10,10 @@
 //! PIDBACKUPOPEN Select <a > b > c>   go to a node of the open backup by the
 //!                                    labels on the way to it, unfolding the
 //!                                    levels above it and selecting it
+//! PIDBACKUPOPEN Search [<text>]      put <text> into the search box: the
+//!                                    tree keeps the drawings and the
+//!                                    reference files whose name holds it;
+//!                                    without a text the box is cleared
 //! PIDBACKUPOPEN Split <percent>      give the tree that much of the panel's
 //!                                    height and the details the rest
 //! PIDBACKUPOPEN Press [<n>|<label>]  press a button in the details of the
@@ -29,6 +33,11 @@
 //! and its matching rules are `pid_backup_browser::goto`) and presses its
 //! buttons with the other. A label is the stable way to name a button: the
 //! numbers shift when a button comes or goes above it.
+//!
+//! `Search` is the search box without a keyboard: the text goes into the box
+//! as typing it does, spaces and all, and the command line says how many
+//! drawings and how many reference files the tree keeps. `Select` then finds
+//! what is kept and nothing else, as a click would.
 //!
 //! `Cache` is written with `=` so that it is one word: with no backup in
 //! the panel the command line takes the words after the verb one at a time.
@@ -75,6 +84,8 @@ enum Request {
     Restore(PathBuf, Option<PathBuf>),
     /// Go to the node at this path of labels.
     Select(String),
+    /// Put this text into the search box; an empty one clears the box.
+    Search(String),
     /// Give the tree this percentage of the panel's height; `None` when what
     /// follows the word is no percentage.
     Split(Option<f32>),
@@ -182,6 +193,19 @@ fn select_path(rest: &str) -> Option<&str> {
         .then_some(path)
 }
 
+/// What follows `Search` when `rest` starts with that word: the text for the
+/// search box, without the quotes around it when it has a pair, so that a
+/// text may begin or end with a space. The word has no short form: `S` is
+/// `Select`.
+#[cfg(not(target_arch = "wasm32"))]
+fn search_text(rest: &str) -> Option<&str> {
+    let (word, text) = match rest.split_once(char::is_whitespace) {
+        Some((word, text)) => (word, text.trim()),
+        None => (rest, ""),
+    };
+    word.eq_ignore_ascii_case("SEARCH").then(|| unquoted(text))
+}
+
 /// Split `<source> [<folder>]`. A line that names an existing path whole is
 /// the source alone, so an unquoted path with spaces still works; otherwise
 /// the words split at whitespace outside quotes.
@@ -207,9 +231,13 @@ fn parse_request(rest: &str, exists: impl Fn(&Path) -> bool) -> Option<Request> 
     if exists(Path::new(whole)) {
         return Some(Request::Restore(PathBuf::from(whole), None));
     }
-    // After the path check: a backup that is really called `Select` wins.
+    // After the path check: a backup that is really called `Select` or
+    // `Search` wins.
     if let Some(path) = select_path(rest) {
         return Some(Request::Select(path.to_string()));
+    }
+    if let Some(text) = search_text(rest) {
+        return Some(Request::Search(text.to_string()));
     }
     if let Some(percent) = split_percent(rest) {
         return Some(Request::Split(percent));
@@ -312,6 +340,7 @@ impl OpenCADStudio {
         match parse_request(rest, Path::exists) {
             Some(Request::Restore(source, target)) => self.load_pid_backup(source, target),
             Some(Request::Select(path)) => self.on_pid_backup(PidBackupMsg::Goto(path)),
+            Some(Request::Search(text)) => self.search_pid_backup(text),
             Some(Request::Split(Some(percent))) => {
                 let task = self.on_pid_backup(PidBackupMsg::SetSplit(percent / 100.0));
                 let share = self.pid_backup_browser.split().tree_share();
@@ -421,6 +450,46 @@ impl OpenCADStudio {
         }
     }
 
+    /// `Search`: put `text` into the search box, as typing it does, and say
+    /// what the tree keeps -- the drawings and the reference files among its
+    /// rows. With no backup in the panel there is nothing to search.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn search_pid_backup(&mut self, text: String) -> Task<Message> {
+        if self.pid_backup_browser.index().is_none() {
+            let why = crate::t!("No backup is open.");
+            self.command_line
+                .push_error(crate::tf!("PIDBACKUPOPEN: {}", why).as_ref());
+            return Task::none();
+        }
+        let searched = text.trim().to_string();
+        let task = self.on_pid_backup(PidBackupMsg::Filter(text));
+        if searched.is_empty() {
+            self.command_line
+                .push_output(crate::t!("PIDBACKUPOPEN: the search is cleared").as_ref());
+            return task;
+        }
+        let (mut drawings, mut files) = (0usize, 0usize);
+        for row in pid_backup_browser::visible_rows(&self.pid_backup_browser) {
+            match row.id {
+                pid_backup_browser::NodeId::Drawing(_) => drawings += 1,
+                pid_backup_browser::NodeId::RefFile(..) => files += 1,
+                _ => {}
+            }
+        }
+        // The text comes last: it is the user's, and what stands last is
+        // taken whole when the sentence is put into another language.
+        self.command_line.push_output(
+            crate::tf!(
+                "PIDBACKUPOPEN: {} drawing(s) and {} reference file(s) match: {}",
+                drawings,
+                files,
+                searched
+            )
+            .as_ref(),
+        );
+        task
+    }
+
     /// `Press` found its button: say which, and do what a click on it does.
     /// The one exception is the button that opens a folder dialog -- on the
     /// command line the folder is named in words.
@@ -466,6 +535,22 @@ impl OpenCADStudio {
     /// carry out the effect it asks for.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn on_pid_backup(&mut self, msg: PidBackupMsg) -> Task<Message> {
+        // The tags the database gives are not the panel's news: they go on
+        // the drawings that were opened from it.
+        if let PidBackupMsg::TagsRead { generation, result } = msg {
+            self.backup_tags_read(generation, result);
+            return Task::none();
+        }
+        // Nor is a symbol file that was read to be shown as a drawing: the
+        // tab is made of it here, whatever the panel shows by now.
+        if let PidBackupMsg::SymbolRead {
+            source,
+            name,
+            result,
+        } = msg
+        {
+            return self.show_the_symbol_read(source, name, result);
+        }
         // An export, to PDF or to publish files, reads the restores while it
         // runs: none is removed from under it, whoever asks -- `Cache=Clear`,
         // `Press`, or the panel's own button.
@@ -610,10 +695,15 @@ impl OpenCADStudio {
             // A drawing a tab shows already is brought to the front, as OPEN
             // and the sheet set's sheets do: the open itself takes no notice
             // of the tabs on the desktop, and would load the file once more.
+            // One that is opened takes the tags the backup's database
+            // gives the items of its symbols.
             Effect::OpenDrawing(path) => match self.tab_showing(&path) {
                 Some(index) => Task::done(Message::TabSwitch(index)),
-                None => Task::done(Message::OpenRecent(path)),
+                None => self.open_from_the_backup(path),
             },
+            // A symbol file is shown as a drawing in a tab of its own, and
+            // one a tab shows already is brought to the front.
+            Effect::OpenSymbol { source, name } => self.open_symbol_from_the_backup(source, name),
             // A picked source, a refresh: both rebuild the index from a path.
             // The panel remembers the source it was given, so a refresh keeps
             // the backup it was showing.
@@ -856,6 +946,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn search_takes_the_rest_of_the_line_as_the_text_of_the_search_box() {
+        assert_eq!(
+            parse_request("Search ball valve", none),
+            Some(Request::Search("ball valve".to_string()))
+        );
+        assert_eq!(
+            parse_request("search   .sym ", none),
+            Some(Request::Search(".sym".to_string()))
+        );
+        // The word alone clears the box.
+        assert_eq!(
+            parse_request("SEARCH", none),
+            Some(Request::Search(String::new()))
+        );
+        // A pair of quotes around the text is taken off, and what stands
+        // between them is the text as it is, spaces at its ends and all.
+        assert_eq!(
+            parse_request(r#"Search " Gate Valve ""#, none),
+            Some(Request::Search(" Gate Valve ".to_string()))
+        );
+        assert_eq!(
+            parse_request(r#"Search """#, none),
+            Some(Request::Search(String::new()))
+        );
+        // The word has no short form: `S` is `Select`.
+        assert_eq!(
+            parse_request("s valve", none),
+            Some(Request::Select("valve".to_string()))
+        );
+        // A word that only starts like the keyword is a source, as before.
+        assert_eq!(
+            parse_request("searches.zip", none),
+            Some(Request::Restore(PathBuf::from("searches.zip"), None))
+        );
+        // And a backup that is really called `Search` is opened.
+        let exists = |path: &Path| path == Path::new("Search");
+        assert_eq!(
+            parse_request("Search", exists),
+            Some(Request::Restore(PathBuf::from("Search"), None))
+        );
+    }
+
     // ── Application-level wiring ─────────────────────────────────────────
     //
     // The panel's pure functions are tested in its own module; these run the
@@ -865,7 +998,8 @@ mod tests {
     use std::sync::Arc;
 
     use crate::io::pid_backup_browse::{
-        BackupFile, BackupIndex, DrawingEntry, FileKind, GroupNode, ManifestSummary, RefNode,
+        BackupFile, BackupIndex, DrawingEntry, FileKind, GroupNode, ManifestSummary, RefFile,
+        RefNode,
     };
 
     /// An app with a drawing open, so the dock has a window to appear in.
@@ -1477,6 +1611,128 @@ mod tests {
         assert_eq!(last.kind, EntryKind::Error);
     }
 
+    /// [`index`] with reference data: `Symbols` holding two valves, and a
+    /// rules file beside it.
+    fn index_with_reference_files() -> Arc<BackupIndex> {
+        let file = |name: &str| RefFile {
+            name: name.to_string(),
+            size: 1,
+        };
+        let mut index = (*index()).clone();
+        index.ref_tree = RefNode {
+            name: "Ref".to_string(),
+            dirs: vec![RefNode {
+                name: "Symbols".to_string(),
+                dirs: Vec::new(),
+                files: vec![file("Gate Valve.sym"), file("Globe Valve.sym")],
+            }],
+            files: vec![file("Rules.xml")],
+        };
+        Arc::new(index)
+    }
+
+    /// What the command line says a search keeps.
+    fn search_report(drawings: usize, files: usize, text: &str) -> String {
+        crate::tf!(
+            "PIDBACKUPOPEN: {} drawing(s) and {} reference file(s) match: {}",
+            drawings,
+            files,
+            text
+        )
+        .into_owned()
+    }
+
+    #[test]
+    fn a_search_line_fills_the_search_box_and_says_what_the_tree_keeps() {
+        let mut app = app();
+        let _ = app.on_pid_backup(PidBackupMsg::Loaded(Ok(index_with_reference_files())));
+        let unsearched = row_labels(&app);
+        // As the command line and the automation channel send it: one line,
+        // and the text holds a space.
+        let task = app.run_command_line("PIDBACKUPOPEN Search gate valve");
+        app.drive_headless_task(task)
+            .expect("a search needs no window");
+        assert_eq!(app.pid_backup_browser.filter, "gate valve");
+        let last = app.command_line.history.last().expect("一条历史");
+        assert_eq!(last.kind, EntryKind::Output);
+        assert_eq!(last.text, search_report(0, 1, "gate valve"));
+        let labels: Vec<String> = row_labels(&app)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Plant backup".to_string(),
+                crate::t!("Plant groups").into_owned(),
+                crate::t!("Reference data").into_owned(),
+                "Symbols".to_string(),
+                "Gate Valve.sym".to_string(),
+            ]
+        );
+        // The text typed into the box leaves the panel the same.
+        let mut typed = self::app();
+        let _ = typed.on_pid_backup(PidBackupMsg::Loaded(Ok(index_with_reference_files())));
+        let _ = typed.on_pid_backup(PidBackupMsg::Filter("gate valve".to_string()));
+        assert_eq!(row_labels(&typed), row_labels(&app));
+        assert_eq!(
+            typed.pid_backup_browser.filter,
+            app.pid_backup_browser.filter
+        );
+
+        // What the search keeps is there for `Select` to go to.
+        let reference = crate::t!("Reference data").into_owned();
+        let _ = app.run_command_line(&format!(
+            "PIDBACKUPOPEN Select {reference} > Symbols > Gate Valve.sym"
+        ));
+        assert_eq!(
+            app.pid_backup_browser.selected,
+            Some(NodeId::RefFile(vec![0], 0))
+        );
+
+        // A text drawings and reference files both hold: each is counted.
+        let _ = app.dispatch_command("PIDBACKUPOPEN Search a");
+        let last = app.command_line.history.last().expect("一条历史");
+        assert_eq!(last.text, search_report(1, 2, "a"));
+        // Quotes keep the spaces at the ends of the text for the box; the
+        // report names the text without them, and no case counts.
+        let _ = app.dispatch_command("PIDBACKUPOPEN Search \" VALVE \"");
+        assert_eq!(app.pid_backup_browser.filter, " VALVE ");
+        let last = app.command_line.history.last().expect("一条历史");
+        assert_eq!(last.text, search_report(0, 2, "VALVE"));
+        // A text nothing is called by keeps nothing, and says so.
+        let _ = app.dispatch_command("PIDBACKUPOPEN Search zzz");
+        let last = app.command_line.history.last().expect("一条历史");
+        assert_eq!(last.kind, EntryKind::Output);
+        assert_eq!(last.text, search_report(0, 0, "zzz"));
+
+        // The word alone clears the box, and the tree is as it was.
+        let _ = app.dispatch_command("PIDBACKUPOPEN Search");
+        assert_eq!(app.pid_backup_browser.filter, "");
+        let last = app.command_line.history.last().expect("一条历史");
+        assert_eq!(last.kind, EntryKind::Output);
+        assert_eq!(
+            last.text,
+            crate::t!("PIDBACKUPOPEN: the search is cleared").as_ref()
+        );
+        assert_eq!(row_labels(&app), unsearched);
+    }
+
+    #[test]
+    fn a_search_line_with_no_backup_open_is_reported_as_an_error() {
+        let mut idle = app();
+        let _ = idle.dispatch_command("PIDBACKUPOPEN Search valve");
+        let last = idle.command_line.history.last().expect("一条历史");
+        assert_eq!(last.kind, EntryKind::Error);
+        assert!(
+            last.text.contains(crate::t!("No backup is open.").as_ref()),
+            "{}",
+            last.text
+        );
+        // Nothing went into the box.
+        assert_eq!(idle.pid_backup_browser.filter, "");
+    }
+
     /// An app whose panel browses [`index`] with the test section, which
     /// hangs two nodes under every backup file: one whose read succeeds and
     /// one whose read fails.
@@ -1757,3 +2013,12 @@ mod tests {
 /// A walk over a real backup through the application; run with `--ignored`.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod audit;
+
+/// The tags the database of a backup gives its items, on the drawings
+/// opened from the panel.
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::app) mod tags;
+
+/// A symbol file of a backup, shown as a drawing in a tab of its own.
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::app) mod symbol_tab;

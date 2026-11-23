@@ -3,9 +3,12 @@
 //! The native `.pid` importer and legend recognition deliberately share the
 //! `PID_SEMANTICS` application. Records whose `resolved` value starts with
 //! `legend:` belong to this module; authored `.pid` records are left intact.
+//! A block reference whose record says `role=symbol` is a symbol the importer
+//! placed, and recognition does not read it at all ([`is_imported_symbol`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use document::entities::Insert;
 use document::xdata::{ExtendedDataRecord, XDataValue};
 use document::{Document, Handle};
 
@@ -97,6 +100,28 @@ fn is_legend_record(record: &ExtendedDataRecord) -> bool {
                     .is_some_and(|resolved| resolved.starts_with("legend:"))
         )
     })
+}
+
+/// Whether `insert` is a symbol the native `.pid` importer placed.
+///
+/// The importer makes one block reference of every symbol placement and says
+/// `role=symbol` in the reference's record, with or without the published
+/// identity (`class=`, `label=`, ...) beside it. The reference already says
+/// what it is, so recognition's block pass leaves it out: it is neither a
+/// legend symbol nor a block the rules lack. The record decides, not the
+/// block's name: a reference to the same block that says nothing, or says
+/// something else, is read like any other.
+pub(super) fn is_imported_symbol(insert: &Insert) -> bool {
+    insert
+        .common
+        .extended_data
+        .get_record(PID_SEMANTICS_XDATA_APP)
+        .is_some_and(|record| {
+            record
+                .values
+                .iter()
+                .any(|value| matches!(value, XDataValue::String(pair) if pair == "role=symbol"))
+        })
 }
 
 fn desired_records(recognition: &Recognition) -> BTreeMap<Handle, ExtendedDataRecord> {

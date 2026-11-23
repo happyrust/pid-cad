@@ -17,8 +17,8 @@ pub use conflict::{collides, Change, Deleted, DrawingModel, FieldState, ObjectSt
 pub use ids::{new_claim_id, new_conflict_id, new_session_id, now_unix};
 pub use occupancy::{ClaimOutcome, Occupancy, OccupancyTable, ReleaseOutcome};
 pub use permission::{
-    decide, AclEntry, AclNode, AclPermission, DenialLevel, DrawingState, Operation,
-    PermissionDecision, PermissionRequest, Role,
+    decide, decide_without_state, AclEntry, AclNode, AclPermission, DenialLevel, DrawingState,
+    Operation, PermissionDecision, PermissionRequest, Role,
 };
 pub use protocol::{ClientMessage, ServerMessage};
 pub use session::{OpenOutcome, OpenRequest, Session, SessionConfig, SessionRegistry, SessionStatus};

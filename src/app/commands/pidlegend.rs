@@ -56,6 +56,13 @@
 //! debugging view of the group's extent), and zoomed to. The highlight goes
 //! with the selection: pick anything else, or Esc, and it is gone.
 //!
+//! A symbol a `.pid` import placed is no recognised symbol -- its block
+//! reference says what it is, and recognition leaves it out -- but PIDTAG
+//! finds it all the same, by the tag its record states
+//! (`io::pid_identity`): its group is its block reference with the
+//! lettering of its labels (`imported_groups`). Its tag is the plant's, and
+//! `PIDTAG <old> <new>` does not rename it.
+//!
 //! PIDLINE answers "what else is this pipe?": from a picked pipe stroke (or
 //! a typed code) it resolves the line's *family* by the sheets' coding rule
 //! — the service and sequence number name one physical line however its
@@ -1111,6 +1118,17 @@ impl OpenCADStudio {
     /// symbols may carry one tag (a motorised valve and its `XV` bubble) and
     /// are then both selected, each in its own frame. With nothing named, the
     /// picked entities say which symbols: a stroke of the valve, or its tag.
+    ///
+    /// A symbol a `.pid` import placed is found by the tag its record
+    /// states, or picked by its block reference or by the lettering of one
+    /// of its labels; its group is the reference with the lettering of all
+    /// its labels, and the receipt then counts symbols and labels.
+    ///
+    /// A tag the plant's data gives may hold spaces. Named whole after the
+    /// verb -- `PIDTAG LG-Magnetic Float Gauge-0203`, in quotes or not --
+    /// the tag of such a symbol is found however many words it is, case
+    /// and the white space between its words aside. A line of two words
+    /// that is no such tag renames, as it did.
     pub(super) fn dispatch_pidtag(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         let rest = cmd.strip_prefix("PIDTAG")?;
         if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
@@ -1130,13 +1148,20 @@ impl OpenCADStudio {
         // change as exactly this line (`VAL-CLI-009`), and it is the only
         // command-line spelling of "set this symbol's tag" that exists. Two
         // words make it a write; one word stays the jump-to-tag it always was.
+        //
+        // A tag the plant's data gives may hold spaces (`LG-Magnetic Float
+        // Gauge-0203`). Where all that follows the verb is the tag of a
+        // symbol a `.pid` import placed on this sheet, the line names that
+        // tag, however many words it is: of the two readings a line of two
+        // words then has, the one that writes nothing is taken.
         let words: Vec<&str> = arg.split_whitespace().collect();
-        if words.len() == 2 {
+        let names_a_tag = words.len() > 1 && self.pidtag_names_an_imported_tag(i, arg);
+        if words.len() == 2 && !names_a_tag {
             return Some(self.retag_by_tag(i, words[0], words[1]));
         }
-        if words.len() > 2 {
+        if words.len() > 2 && !names_a_tag {
             self.command_line.push_error(&format!(
-                "PIDTAG: 改位号只接受两个参数（旧位号 新位号），实得 \"{arg}\"。"
+                "PIDTAG: 本图上没有位号 \"{arg}\" 的导入图例；改位号只接受两个参数（旧位号 新位号）。"
             ));
             return Some(Task::none());
         }
@@ -1153,12 +1178,18 @@ impl OpenCADStudio {
                 );
                 return Some(Task::none());
             }
-            self.pid_group_select(i, |s| symbol_has_any(s, &picked))
+            self.pid_groups_select(
+                i,
+                |s| symbol_has_any(s, &picked),
+                Some(Asked::Picked(&picked)),
+            )
         } else {
-            let wanted = arg.to_uppercase();
-            let found = self.pid_group_select(i, |s| {
-                s.tag.as_deref().is_some_and(|t| t.to_uppercase() == wanted)
-            });
+            let wanted = asked_tag(arg);
+            let found = self.pid_groups_select(
+                i,
+                |s| s.tag.as_deref().is_some_and(|t| t.to_uppercase() == wanted),
+                Some(Asked::Tag(&wanted)),
+            );
             if found.is_none() {
                 self.command_line.push_error(&format!(
                     "PIDTAG: no symbol tagged \"{arg}\" on this sheet -- PIDLEGEND LIST shows the tags."
@@ -1176,6 +1207,19 @@ impl OpenCADStudio {
         Some(Task::none())
     }
 
+    /// Whether `arg` -- all that follows the verb on a PIDTAG line -- is,
+    /// whole, the tag of a symbol a `.pid` import placed on the sheet of
+    /// tab `i`. It tells a tag that holds spaces from a rename, for the
+    /// command and for the gate of a read-only session alike
+    /// (`readonly_refuses_command`): the two read one line one way.
+    pub(in crate::app) fn pidtag_names_an_imported_tag(&self, i: usize, arg: &str) -> bool {
+        let wanted = asked_tag(arg);
+        !wanted.is_empty()
+            && self.tabs.get(i).is_some_and(|tab| {
+                !imported_groups(&tab.scene.document, &Asked::Tag(&wanted)).is_empty()
+            })
+    }
+
     /// `PIDTAG <old> <new>`: rename every symbol carrying `old` to `new`.
     ///
     /// The rename is the same write the properties panel's `pid_tag` row makes
@@ -1183,6 +1227,12 @@ impl OpenCADStudio {
     /// the label refresh), so the two entry points cannot drift. It is one undo
     /// step, which is also what makes it one broadcast op
     /// (`push_undo_entry` → `broadcast_history_delta`).
+    ///
+    /// A symbol a `.pid` import placed carries the tag the plant's data
+    /// gives it and is not renamed here (SPEC-pid-symbol-identity §4.7 and
+    /// §8). Where such symbols alone carry `old` the rename is refused,
+    /// coded `tag_imported`; where objects drawn here carry it too, those
+    /// are renamed and the receipt says the imported ones were not.
     fn retag_by_tag(&mut self, i: usize, old: &str, new: &str) -> Task<Message> {
         use crate::pid::persist::PidAuthor;
         let old_upper = old.to_uppercase();
@@ -1196,7 +1246,17 @@ impl OpenCADStudio {
                 (author.tag.to_uppercase() == old_upper).then_some(handle)
             })
             .collect();
+        let imported = imported_groups(&self.tabs[i].scene.document, &Asked::Tag(&old_upper)).len();
         if targets.is_empty() {
+            if imported > 0 {
+                self.command_line.push_error_coded(
+                    "tag_imported",
+                    &format!(
+                        "PIDTAG: 本图上带位号 \"{old}\" 的是 {imported} 个导入的图例，导入的图例不能在这里改位号，未做改动。"
+                    ),
+                );
+                return Task::none();
+            }
             self.command_line.push_error_coded(
                 "tag_absent",
                 &format!("PIDTAG: 本图上没有位号 \"{old}\" 的符号，未做改动。"),
@@ -1217,8 +1277,13 @@ impl OpenCADStudio {
         }
         self.refresh_pid_tags(i, &targets);
         self.tabs[i].dirty = true;
+        let kept = if imported > 0 {
+            format!("；另有 {imported} 个导入的图例带这个位号，导入的图例不能在这里改位号，没有改")
+        } else {
+            String::new()
+        };
         self.command_line.push_output(&format!(
-            "PIDTAG: 位号 {old} → {new}，{} 个符号已改。",
+            "PIDTAG: 位号 {old} → {new}，{} 个符号已改{kept}。",
             targets.len()
         ));
         Task::none()
@@ -1238,11 +1303,29 @@ impl OpenCADStudio {
         i: usize,
         pick: impl Fn(&pid_legend::Recognized) -> bool,
     ) -> Option<String> {
+        self.pid_groups_select(i, pick, None)
+    }
+
+    /// What [`Self::pid_group_select`] does, and where `asked` is given, of
+    /// the symbols a `.pid` import placed that it admits as well
+    /// ([`imported_groups`]): the group of such a symbol is its block
+    /// reference with the lettering of its labels. With one of those among
+    /// the groups the receipt counts symbols and labels -- the labels being
+    /// every group's lettering, a recognised symbol's tag included --
+    /// instead of groups and entities; without one it reads as it did.
+    fn pid_groups_select(
+        &mut self,
+        i: usize,
+        pick: impl Fn(&pid_legend::Recognized) -> bool,
+        asked: Option<Asked<'_>>,
+    ) -> Option<String> {
         self.refresh_pid_legend(i);
-        let (groups, names, upm) = {
+        let (groups, names, upm, labels) = {
             let rec = self.tabs[i].pid_legend()?;
             let mut groups: Vec<Vec<document::Handle>> = Vec::new();
             let mut names: Vec<String> = Vec::new();
+            let mut lettering: rustc_hash::FxHashSet<document::Handle> =
+                rustc_hash::FxHashSet::default();
             for symbol in rec.symbols.iter().filter(|s| pick(s)) {
                 let handles: Vec<document::Handle> = symbol
                     .handles
@@ -1254,13 +1337,31 @@ impl OpenCADStudio {
                 if handles.is_empty() {
                     continue;
                 }
+                lettering.extend(symbol.tag_handles.iter().filter(|h| !h.is_null()));
                 groups.push(handles);
                 names.push(match &symbol.tag {
                     Some(tag) => format!("{} {tag}", symbol.label),
                     None => format!("{} (无位号)", symbol.label),
                 });
             }
-            (groups, names, rec.units_per_mm)
+            let imported = match &asked {
+                Some(asked) => imported_groups(&self.tabs[i].scene.document, asked),
+                None => Vec::new(),
+            };
+            let counted = !imported.is_empty();
+            for group in imported {
+                lettering.extend(&group.labels);
+                let mut handles = vec![group.reference];
+                handles.extend(group.labels);
+                groups.push(handles);
+                names.push(group.name);
+            }
+            (
+                groups,
+                names,
+                rec.units_per_mm,
+                counted.then_some(lettering.len()),
+            )
         };
         if groups.is_empty() {
             return None;
@@ -1285,10 +1386,16 @@ impl OpenCADStudio {
             glam::Vec3::new(min.0 as f32, min.1 as f32, 0.0),
             glam::Vec3::new(max.0 as f32, max.1 as f32, 0.0),
         );
-        Some(format!(
-            "PIDTAG: {what} -- {} group(s), {count} entities selected and framed in red.",
-            groups.len()
-        ))
+        Some(match labels {
+            Some(labels) => format!(
+                "PIDTAG: {what} -- {} symbol(s), {labels} label(s) selected and framed in red.",
+                groups.len()
+            ),
+            None => format!(
+                "PIDTAG: {what} -- {} group(s), {count} entities selected and framed in red.",
+                groups.len()
+            ),
+        })
     }
 }
 
@@ -1302,9 +1409,148 @@ fn symbol_has_any(symbol: &pid_legend::Recognized, handles: &[u64]) -> bool {
         .any(|h| handles.contains(&h.value()))
 }
 
+/// A tag the way PIDTAG compares the tags of imported symbols: upper-cased,
+/// and each run of white space in it one space. The command line hands on
+/// the words of a tag that holds spaces, not what stood between them.
+fn tag_key(tag: &str) -> String {
+    tag.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_uppercase()
+}
+
+/// The tag a PIDTAG line asks for, as [`tag_key`] gives it: `arg` is what
+/// follows the verb, and the quotes the command line keeps a name with
+/// spaces whole in are no part of the tag.
+fn asked_tag(arg: &str) -> String {
+    let arg = arg.trim();
+    let named = arg
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(arg);
+    tag_key(named)
+}
+
+/// What PIDTAG asks for among the symbols a `.pid` import placed.
+enum Asked<'a> {
+    /// Those that carry this tag, given as [`tag_key`] gives one: the way
+    /// the tags of these symbols are compared.
+    Tag(&'a str),
+    /// Those the picked entities are of, by handle value: a symbol's block
+    /// reference, or the lettering of one of its labels.
+    Picked(&'a [u64]),
+}
+
+/// A symbol a `.pid` import placed, as PIDTAG selects it.
+struct ImportedGroup {
+    /// The symbol's block reference.
+    reference: document::Handle,
+    /// The lettering of its labels, in the order the sheet files it.
+    labels: Vec<document::Handle>,
+    /// What the receipt calls the symbol: the name of its symbol -- what
+    /// kind of thing it is, where it states no name -- and its tag.
+    name: String,
+}
+
+/// The symbols a `.pid` import placed in model space that `asked` admits,
+/// in the order the sheet files them, each with the lettering of its
+/// labels.
+///
+/// A symbol is a block reference whose `PID_SEMANTICS` record says it is
+/// one, and its labels are the texts that name the number of its graphic
+/// as a symbol's (`crate::io::pid_identity`): what the P&ID editor's
+/// inspector shows of the two. An object drawn in this program
+/// (`PID_AUTHOR`) is none of these symbols whatever else its record
+/// states, as it is none to the inspector. A copy of a symbol states its
+/// original's number, so the two share their labels, and the lettering of
+/// one of those picks the first of the two the sheet files -- the symbol
+/// the Properties panel names as the label's
+/// (`pid_identity::label_owner`), and no symbol where that one was drawn
+/// here.
+///
+/// The sheet is gone through once, however much is asked for: the picked
+/// entities may be the whole drawing.
+fn imported_groups(document: &document::Document, asked: &Asked<'_>) -> Vec<ImportedGroup> {
+    use crate::io::pid_identity::{self, LabelOn};
+    use crate::pid::persist::PidAuthor;
+    use rustc_hash::{FxHashMap, FxHashSet};
+
+    let picked: FxHashSet<u64> = match asked {
+        Asked::Picked(handles) => handles.iter().copied().collect(),
+        Asked::Tag(_) => FxHashSet::default(),
+    };
+    let mut symbols = Vec::new();
+    // The lettering of the labels, under the number of the graphic each
+    // label hangs on; and the numbers the picked lettering names.
+    let mut lettering: FxHashMap<&str, Vec<document::Handle>> = FxHashMap::default();
+    let mut named: FxHashSet<&str> = FxHashSet::default();
+    for entity in document.model_space_entities() {
+        let handle = entity.common().handle;
+        if let Some(symbol) = pid_identity::symbol_identity(entity) {
+            symbols.push((handle, symbol, PidAuthor::from_entity(entity).is_some()));
+            continue;
+        }
+        if pid_identity::lettering(entity).is_none() {
+            continue;
+        }
+        let Some(pairing) = pid_identity::label_pairing(entity) else {
+            continue;
+        };
+        if pairing.on != LabelOn::Symbol {
+            continue;
+        }
+        lettering.entry(pairing.graphic).or_default().push(handle);
+        if picked.contains(&handle.value()) {
+            named.insert(pairing.graphic);
+        }
+    }
+
+    let mut numbered: FxHashSet<&str> = FxHashSet::default();
+    symbols
+        .into_iter()
+        .filter(|(handle, symbol, authored)| {
+            // Whether this is the first symbol the sheet files under the
+            // number of its graphic, drawn here or not: the one a label of
+            // that number is a label of.
+            let first = symbol
+                .graphic
+                .is_some_and(|graphic| numbered.insert(graphic));
+            if *authored {
+                return false;
+            }
+            match asked {
+                Asked::Tag(wanted) => symbol.tag.is_some_and(|tag| tag_key(tag) == *wanted),
+                Asked::Picked(_) => {
+                    picked.contains(&handle.value())
+                        || (first
+                            && symbol
+                                .graphic
+                                .is_some_and(|graphic| named.contains(graphic)))
+                }
+            }
+        })
+        .map(|(reference, symbol, _)| {
+            let what = symbol.symbol.or_else(|| symbol.kind()).unwrap_or("图例");
+            ImportedGroup {
+                reference,
+                labels: symbol
+                    .graphic
+                    .and_then(|graphic| lettering.get(graphic))
+                    .cloned()
+                    .unwrap_or_default(),
+                name: match symbol.tag {
+                    Some(tag) => format!("{what} {tag}"),
+                    None => format!("{what} (无位号)"),
+                },
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::pid_symbol_block_tests::{lettered, opened_with, reference, restate, VALVE};
     use crate::io::pid_legend;
 
     /// A real CPECC sheet beside the checkout, when it is there and not
@@ -2266,6 +2512,1282 @@ mod tests {
         assert_eq!(selected(&app), expected, "the selection is left as it was");
         let last = last_line(&app);
         assert!(last.contains("no longer on the sheet"), "{last}");
+    }
+
+    // ── PIDTAG, of the symbols a `.pid` import placed ──────────────────────
+
+    /// The program with the sheet of a tagged valve and its labels open, as
+    /// a `.pid` import leaves it
+    /// (`io::pid::sheet_of_a_tagged_valve_and_its_labels`). In millimetres:
+    /// a valve the file names `GV-101` at (100, 100), with four labels; the
+    /// same valve at (170, 100), with no name and one label; a run of line
+    /// and its label; the label of what is no graphic of the sheet; and a
+    /// text that is no label's.
+    fn imported_sheet() -> OpenCADStudio {
+        opened_with(crate::io::pid::sheet_of_a_tagged_valve_and_its_labels())
+    }
+
+    /// The drawing in front.
+    fn sheet(app: &OpenCADStudio) -> &document::Document {
+        &app.tabs[app.active_tab].scene.document
+    }
+
+    /// The valve of that sheet the file names `GV-101`, and the lettering
+    /// of its four labels in the order the sheet files it.
+    fn tagged_valve(app: &OpenCADStudio) -> (document::Handle, [document::Handle; 4]) {
+        (
+            reference(app, VALVE, (100.0, 100.0)),
+            ["GV-101", "DN50", "PN16", "CS"].map(|lettering| lettered(app, lettering)),
+        )
+    }
+
+    /// The valve of that sheet the file gives no name, and the lettering of
+    /// its one label.
+    fn untagged_valve(app: &OpenCADStudio) -> (document::Handle, document::Handle) {
+        (reference(app, VALVE, (170.0, 100.0)), lettered(app, "DN80"))
+    }
+
+    /// The run of line of that sheet: the one entity of it that is neither
+    /// a block reference nor a text.
+    fn run_of_line(app: &OpenCADStudio) -> document::Handle {
+        let found: Vec<document::Handle> = sheet(app)
+            .model_space_entities()
+            .filter(|entity| {
+                !matches!(
+                    entity,
+                    document::EntityType::Insert(_) | document::EntityType::Text(_)
+                )
+            })
+            .map(|entity| entity.common().handle)
+            .collect();
+        assert_eq!(found.len(), 1, "one run of line");
+        found[0]
+    }
+
+    /// Handles in the order `selected` gives them.
+    fn in_order(handles: impl IntoIterator<Item = document::Handle>) -> Vec<document::Handle> {
+        let mut handles: Vec<document::Handle> = handles.into_iter().collect();
+        handles.sort_by_key(|h| h.value());
+        handles
+    }
+
+    /// The red frames PIDTAG drew, each by its extent -- left, bottom,
+    /// right, top -- from left to right.
+    fn frames(app: &OpenCADStudio) -> Vec<[f32; 4]> {
+        let mut frames: Vec<[f32; 4]> = app.tabs[app.active_tab]
+            .scene
+            .pid_group_highlight_wires()
+            .iter()
+            .filter(|wire| wire.name == crate::scene::PID_GROUP_FRAME)
+            .map(|wire| {
+                let along = |axis: usize| wire.points.iter().map(move |point| point[axis]);
+                [
+                    along(0).fold(f32::MAX, f32::min),
+                    along(1).fold(f32::MAX, f32::min),
+                    along(0).fold(f32::MIN, f32::max),
+                    along(1).fold(f32::MIN, f32::max),
+                ]
+            })
+            .collect();
+        frames.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        frames
+    }
+
+    /// What the command line last refused, in the words it was refused in.
+    fn refused(app: &OpenCADStudio) -> &str {
+        app.command_line.last_error.as_deref().unwrap_or_default()
+    }
+
+    /// An object drawn in this program that carries `tag`: a block
+    /// reference with a `PID_AUTHOR` record, as PIDINSERT leaves one.
+    fn authored(app: &mut OpenCADStudio, tag: &str) -> document::Handle {
+        use crate::pid::persist::PidAuthor;
+
+        let i = app.active_tab;
+        let document = &mut app.tabs[i].scene.document;
+        let handle = document
+            .add_entity(document::EntityType::Insert(
+                document::entities::Insert::new(
+                    "PID_SYM_equipment_vessel",
+                    document::types::Vector3::ZERO,
+                ),
+            ))
+            .expect("entity");
+        PidAuthor {
+            type_code: "EQUIPMENT".to_owned(),
+            tag: tag.to_owned(),
+            tag_source: "auto".to_owned(),
+            tag_status: "ok".to_owned(),
+            ..PidAuthor::default()
+        }
+        .store(document, handle);
+        handle
+    }
+
+    /// PIDTAG <tag> finds a symbol a `.pid` import placed by the tag its
+    /// record states (plan 2026-11-20-pid-symbol-identity, SI-5; SPEC
+    /// §4.7): the symbol's block reference and the lettering of all its
+    /// labels are selected, framed in red and zoomed to, and the receipt
+    /// counts the symbols and the labels. The other valve and its label,
+    /// the run of line and its label are none of it.
+    #[test]
+    fn pidtag_finds_an_imported_symbol_by_its_tag_with_all_its_labels() {
+        let mut app = imported_sheet();
+        let i = app.active_tab;
+        let (valve, labels) = tagged_valve(&app);
+        let camera_before = app.tabs[i].scene.camera_generation;
+
+        let _ = app.run_command_line("PIDTAG gv-101");
+        assert_eq!(
+            selected(&app),
+            in_order(labels.into_iter().chain([valve])),
+            "the valve and its four labels, case aside"
+        );
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: Ball Valve GV-101 -- 1 symbol(s), 4 label(s) selected and framed in red."
+        );
+        assert!(
+            app.tabs[i].scene.camera_generation > camera_before,
+            "the view moved to the group"
+        );
+        // One frame, a millimetre outside the valve (80..120 x 90..110) and
+        // its labels: lettered from x = 85, the topmost standing on y = 150
+        // and 2.5 mm high (the glyph quads carry a little padding past the
+        // ink).
+        let frames = frames(&app);
+        assert_eq!(frames.len(), 1, "one frame for one symbol: {frames:?}");
+        let [left, bottom, right, top] = frames[0];
+        assert!((left - 79.0).abs() < 0.05, "left {left}");
+        assert!((right - 121.0).abs() < 0.05, "right {right}");
+        assert!(bottom > 88.9 && bottom < 89.3, "bottom {bottom}");
+        assert!(top > 153.4 && top < 155.5, "top {top}");
+        assert_eq!(
+            app.tabs[i].scene.selection_tint(),
+            crate::scene::PID_GROUP_HIGHLIGHT,
+            "the selection is drawn in the group's red"
+        );
+    }
+
+    /// Several imported symbols that carry one tag are all selected, each
+    /// with its labels and in a frame of its own.
+    #[test]
+    fn pidtag_selects_every_imported_symbol_that_carries_the_tag() {
+        let mut app = imported_sheet();
+        let (valve, labels) = tagged_valve(&app);
+        let (other, its_label) = untagged_valve(&app);
+        restate(
+            &mut app,
+            other,
+            &[("label", "GV-101"), ("tag_source", "file")],
+        );
+
+        let _ = app.run_command_line("PIDTAG GV-101");
+        assert_eq!(
+            selected(&app),
+            in_order(labels.into_iter().chain([valve, other, its_label]))
+        );
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: Ball Valve GV-101 + Ball Valve GV-101 -- 2 symbol(s), 5 label(s) selected and framed in red."
+        );
+        let drawn = frames(&app);
+        assert_eq!(drawn.len(), 2, "a frame for each symbol: {drawn:?}");
+        // The second valve is 150..190 x 90..110, and its label is lettered
+        // from (160, 120).
+        let [left, bottom, right, top] = drawn[1];
+        assert!((left - 149.0).abs() < 0.05, "left {left}");
+        assert!((right - 191.0).abs() < 0.05, "right {right}");
+        assert!(bottom > 88.9 && bottom < 89.3, "bottom {bottom}");
+        assert!(top > 123.4 && top < 125.5, "top {top}");
+
+        // The second valve made a copy of the first, the two have the
+        // first's labels: each of those is selected, and counted, once.
+        restate(&mut app, other, &[("graphic", "612")]);
+        let _ = app.run_command_line("PIDTAG GV-101");
+        assert_eq!(
+            selected(&app),
+            in_order(labels.into_iter().chain([valve, other]))
+        );
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: Ball Valve GV-101 + Ball Valve GV-101 -- 2 symbol(s), 4 label(s) selected and framed in red."
+        );
+        assert_eq!(frames(&app).len(), 2, "a frame for each symbol");
+    }
+
+    /// A tag is compared case aside on both sides, as it was: the tag the
+    /// record of an imported symbol states in small letters is found by its
+    /// capitals, and the receipt spells it as the record does.
+    #[test]
+    fn pidtag_compares_the_tag_of_an_imported_symbol_case_aside() {
+        let mut app = imported_sheet();
+        let i = app.active_tab;
+        let (other, its_label) = untagged_valve(&app);
+        restate(&mut app, other, &[("label", "gv-102a")]);
+
+        for typed in ["GV-102A", "gv-102a", "Gv-102A"] {
+            app.tabs[i].scene.deselect_all();
+            let _ = app.run_command_line(&format!("PIDTAG {typed}"));
+            assert_eq!(selected(&app), in_order([other, its_label]), "{typed}");
+            assert_eq!(
+                last_line(&app),
+                "PIDTAG: Ball Valve gv-102a -- 1 symbol(s), 1 label(s) selected and framed in red.",
+                "{typed}"
+            );
+        }
+    }
+
+    /// A tag no symbol carries is refused in the words it was, on a sheet of
+    /// imported symbols as on any other, and the selection is left alone.
+    /// What a label reads is no tag unless its symbol's record states it,
+    /// the label of a run of line is no symbol's tag, and a tag is matched
+    /// whole.
+    #[test]
+    fn pidtag_refuses_a_tag_no_imported_symbol_carries_as_it_did() {
+        let mut app = imported_sheet();
+        let i = app.active_tab;
+        let note = lettered(&app, "NOTE 4");
+        app.tabs[i].scene.select_entity(note, true);
+
+        for absent in [
+            "XV-9999",
+            "DN50",
+            "DN80",
+            "P-1001-50-CS",
+            "GV-10",
+            "GV-1011",
+        ] {
+            let _ = app.run_command_line(&format!("PIDTAG {absent}"));
+            assert_eq!(
+                refused(&app),
+                format!(
+                    "PIDTAG: no symbol tagged \"{absent}\" on this sheet -- PIDLEGEND LIST shows the tags."
+                )
+            );
+            assert_eq!(selected(&app), vec![note], "{absent}: the pick stays");
+            assert!(
+                app.tabs[i].scene.pid_group_highlight_wires().is_empty(),
+                "{absent}: nothing is framed"
+            );
+        }
+    }
+
+    // ── PIDTAG, of a tag that holds spaces ─────────────────────────────────
+
+    /// A tag the plant's data gives that holds spaces: the one of the 5,024
+    /// the 53 drawings of the plant backup carry, with the database's tags
+    /// put on, that does (on D07).
+    const SPACED: &str = "LG-Magnetic Float Gauge-0203";
+
+    /// The sheet of imported symbols with its first valve given `tag` as the
+    /// plant's database gives one; the valve and the lettering of its four
+    /// labels. Nothing to save, as a sheet just opened.
+    fn sheet_tagged(tag: &str) -> (OpenCADStudio, document::Handle, [document::Handle; 4]) {
+        let mut app = imported_sheet();
+        let (valve, labels) = tagged_valve(&app);
+        restate(
+            &mut app,
+            valve,
+            &[("label", tag), ("tag_source", "database")],
+        );
+        let i = app.active_tab;
+        app.tabs[i].dirty = false;
+        (app, valve, labels)
+    }
+
+    /// PIDTAG finds an imported symbol by a tag that holds spaces (plan
+    /// 2026-11-20-pid-symbol-identity, SI-10): named whole on the line
+    /// after the verb, however many words it is, the symbol and the
+    /// lettering of all its labels are selected, framed and zoomed to, as
+    /// by any tag. Nothing is refused, no prompt is left waiting for the
+    /// rest of the line and no word of it is left over, and nothing is
+    /// written: the record says what it said, no undo step, nothing to
+    /// save.
+    #[test]
+    fn pidtag_finds_an_imported_symbol_by_a_tag_that_holds_spaces() {
+        let (mut app, valve, labels) = sheet_tagged(SPACED);
+        let i = app.active_tab;
+        let said = pid_xdata_strings(&app, valve);
+        let undo_before = app.tabs[i].history.undo_stack.len();
+        let camera_before = app.tabs[i].scene.camera_generation;
+
+        let _ = app.run_command_line("PIDTAG LG-Magnetic Float Gauge-0203");
+        app.finish_all_pending_history();
+        assert_eq!(refused(&app), "", "nothing is refused");
+        assert_eq!(
+            selected(&app),
+            in_order(labels.into_iter().chain([valve])),
+            "the valve and its four labels"
+        );
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: Ball Valve LG-Magnetic Float Gauge-0203 -- 1 symbol(s), 4 label(s) selected and framed in red."
+        );
+        assert_eq!(frames(&app).len(), 1, "one frame for one symbol");
+        assert!(
+            app.tabs[i].scene.camera_generation > camera_before,
+            "the view moved to the group"
+        );
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "no prompt is left waiting"
+        );
+        assert!(
+            app.command_line.unconsumed.is_empty(),
+            "no word of the line is left over: {:?}",
+            app.command_line.unconsumed
+        );
+        assert_eq!(
+            pid_xdata_strings(&app, valve),
+            said,
+            "the record says what it said"
+        );
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            undo_before,
+            "no undo step"
+        );
+        assert!(!app.tabs[i].dirty, "nothing to save");
+    }
+
+    /// A line of two words reads two ways where the two are, together, the
+    /// tag of an imported symbol: a jump to that tag, or the renaming of
+    /// the first word's tag to the second. The reading that writes nothing
+    /// is taken: the symbol is found, and an object drawn here that carries
+    /// the first word keeps its tag. With no imported symbol carrying the
+    /// two words the same line renames, as it did.
+    #[test]
+    fn two_words_that_are_the_tag_of_an_imported_symbol_find_it_and_rename_nothing() {
+        use crate::pid::persist::PidAuthor;
+
+        let (mut app, valve, labels) = sheet_tagged("P-1001 P-1009");
+        let i = app.active_tab;
+        let drawn_here = authored(&mut app, "P-1001");
+        let said = pid_xdata_strings(&app, valve);
+        let undo_before = app.tabs[i].history.undo_stack.len();
+
+        let _ = app.run_command_line("PIDTAG p-1001 P-1009");
+        app.finish_all_pending_history();
+        assert_eq!(refused(&app), "", "nothing is refused");
+        assert_eq!(selected(&app), in_order(labels.into_iter().chain([valve])));
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: Ball Valve P-1001 P-1009 -- 1 symbol(s), 4 label(s) selected and framed in red."
+        );
+        let author = PidAuthor::load(sheet(&app), drawn_here).expect("author");
+        assert_eq!(
+            (author.tag.as_str(), author.tag_source.as_str()),
+            ("P-1001", "auto"),
+            "the object drawn here keeps its tag"
+        );
+        assert_eq!(
+            pid_xdata_strings(&app, valve),
+            said,
+            "the record says what it said"
+        );
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            undo_before,
+            "no undo step"
+        );
+
+        restate(&mut app, valve, &[("label", "GV-101")]);
+        let _ = app.run_command_line("PIDTAG p-1001 P-1009");
+        app.finish_all_pending_history();
+        let author = PidAuthor::load(sheet(&app), drawn_here).expect("author");
+        assert_eq!(
+            (author.tag.as_str(), author.tag_source.as_str()),
+            ("P-1009", "manual"),
+            "the two words are a rename again"
+        );
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: 位号 p-1001 → P-1009，1 个符号已改。"
+        );
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            undo_before + 1,
+            "one undo step"
+        );
+    }
+
+    /// The command line hands on the words of a tag, not what stood between
+    /// them, so a tag that holds spaces is compared with each run of white
+    /// space taken for one space, on both sides, and case aside as any tag
+    /// is. The receipt spells the tag as the record does.
+    #[test]
+    fn pidtag_compares_a_tag_that_holds_spaces_white_space_aside() {
+        // The record states two spaces after the first word.
+        let (mut app, valve, labels) = sheet_tagged("LG-Magnetic  Float Gauge-0203");
+        let i = app.active_tab;
+
+        for typed in [
+            "LG-Magnetic Float Gauge-0203",
+            "LG-Magnetic  Float Gauge-0203",
+            "lg-magnetic   float\tgauge-0203 ",
+        ] {
+            app.tabs[i].scene.deselect_all();
+            let _ = app.run_command_line(&format!("PIDTAG {typed}"));
+            assert_eq!(
+                selected(&app),
+                in_order(labels.into_iter().chain([valve])),
+                "{typed:?}"
+            );
+            assert_eq!(
+                last_line(&app),
+                "PIDTAG: Ball Valve LG-Magnetic  Float Gauge-0203 -- 1 symbol(s), 4 label(s) selected and framed in red.",
+                "{typed:?}"
+            );
+        }
+    }
+
+    /// In quotes the tag is one word to the command line, which hands it
+    /// whole to the prompt the bare verb opens. The quotes are no part of
+    /// the tag there, nor where the line reaches the command as it stands
+    /// (a button, a plugin, the control surface).
+    #[test]
+    fn pidtag_takes_a_tag_that_holds_spaces_in_quotes() {
+        let (mut app, valve, labels) = sheet_tagged(SPACED);
+        let i = app.active_tab;
+        let found = in_order(labels.into_iter().chain([valve]));
+        let receipt = "PIDTAG: Ball Valve LG-Magnetic Float Gauge-0203 -- 1 symbol(s), 4 label(s) selected and framed in red.";
+
+        let _ = app.run_command_line(r#"PIDTAG "LG-Magnetic Float Gauge-0203""#);
+        assert_eq!(selected(&app), found, "by the command line");
+        assert_eq!(last_line(&app), receipt);
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "the prompt took its answer"
+        );
+
+        app.tabs[i].scene.deselect_all();
+        let _ = app.dispatch_command(r#"PIDTAG "lg-magnetic float gauge-0203""#);
+        assert_eq!(selected(&app), found, "handed to the command as it stands");
+        assert_eq!(last_line(&app), receipt);
+    }
+
+    /// Words that are, together, no tag of an imported symbol on the sheet
+    /// are neither a jump nor, being more than two, a rename, and the
+    /// refusal says both. A tag is matched whole: its first words, its last
+    /// words, and the tag with a word more are none of them the tag.
+    /// Nothing is selected, framed or written, and no prompt is left
+    /// waiting. Two words of the tag are a rename, as two words were.
+    #[test]
+    fn words_that_are_no_tag_of_an_imported_symbol_are_refused_and_say_why() {
+        let (mut app, valve, _) = sheet_tagged(SPACED);
+        let i = app.active_tab;
+        let note = lettered(&app, "NOTE 4");
+        app.tabs[i].scene.select_entity(note, true);
+        let said = pid_xdata_strings(&app, valve);
+        let undo_before = app.tabs[i].history.undo_stack.len();
+
+        for absent in [
+            "LG-Magnetic Float Gauge-0204",
+            "LG-Magnetic Float Gauge-0203 A",
+            "Magnetic Float Gauge-0203",
+            "LG-Magnetic Float Gauge",
+        ] {
+            let _ = app.run_command_line(&format!("PIDTAG {absent}"));
+            app.finish_all_pending_history();
+            assert_eq!(
+                refused(&app),
+                format!(
+                    "PIDTAG: 本图上没有位号 \"{absent}\" 的导入图例；改位号只接受两个参数（旧位号 新位号）。"
+                )
+            );
+            assert_eq!(selected(&app), vec![note], "{absent}: the pick stays");
+            assert!(
+                app.tabs[i].scene.pid_group_highlight_wires().is_empty(),
+                "{absent}: nothing is framed"
+            );
+            assert!(
+                app.tabs[i].active_cmd.is_none(),
+                "{absent}: no prompt is left waiting"
+            );
+        }
+        assert_eq!(
+            pid_xdata_strings(&app, valve),
+            said,
+            "the record says what it said"
+        );
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            undo_before,
+            "no undo step"
+        );
+
+        let _ = app.run_command_line("PIDTAG LG-Magnetic Float");
+        assert_eq!(
+            app.command_line.last_error_code.as_deref(),
+            Some("tag_absent")
+        );
+        assert_eq!(
+            refused(&app),
+            "PIDTAG: 本图上没有位号 \"LG-Magnetic\" 的符号，未做改动。"
+        );
+    }
+
+    /// Typed into the window's command line, a space ends the word and the
+    /// step with it, so a line that holds spaces is typed after a `>`,
+    /// which keeps them until Enter (`Message::CommandSpace`); a line
+    /// pasted in arrives with its spaces and needs none. Either way the
+    /// line reaches the command whole and finds the symbol; the `>` is no
+    /// part of it.
+    #[test]
+    fn a_tag_that_holds_spaces_is_typed_on_a_line_that_keeps_its_spaces() {
+        for line in [
+            ">PIDTAG LG-Magnetic Float Gauge-0203",
+            "PIDTAG LG-Magnetic Float Gauge-0203",
+        ] {
+            let (mut app, valve, labels) = sheet_tagged(SPACED);
+            let i = app.active_tab;
+
+            let _ = app.update(crate::app::Message::CommandInput(line.to_string()));
+            let _ = app.update(crate::app::Message::CommandSubmit);
+            app.finish_all_pending_history();
+            assert_eq!(refused(&app), "", "{line}: nothing is refused");
+            assert_eq!(
+                selected(&app),
+                in_order(labels.into_iter().chain([valve])),
+                "{line}: the valve and its four labels"
+            );
+            assert_eq!(
+                last_line(&app),
+                "PIDTAG: Ball Valve LG-Magnetic Float Gauge-0203 -- 1 symbol(s), 4 label(s) selected and framed in red.",
+                "{line}"
+            );
+            assert!(
+                app.tabs[i].active_cmd.is_none(),
+                "{line}: no prompt is left waiting"
+            );
+            assert!(!app.tabs[i].dirty, "{line}: nothing to save");
+        }
+    }
+
+    /// The prompt the bare verb opens takes one word, as it did: words
+    /// typed at it are fed to it one at a time, so of a tag that holds
+    /// spaces it gets the first word, which is no tag here. Such a tag is
+    /// named on the line of the verb.
+    #[test]
+    fn the_prompt_of_the_bare_verb_takes_one_word_as_it_did() {
+        let (mut app, _, _) = sheet_tagged(SPACED);
+        let i = app.active_tab;
+
+        let _ = app.update(crate::app::Message::CommandInput("PIDTAG".to_string()));
+        let _ = app.update(crate::app::Message::CommandSubmit);
+        assert!(app.tabs[i].active_cmd.is_some(), "the prompt is open");
+        let _ = app.update(crate::app::Message::CommandInput(
+            ">LG-Magnetic Float Gauge-0203".to_string(),
+        ));
+        let _ = app.update(crate::app::Message::CommandSubmit);
+        assert_eq!(
+            refused(&app),
+            "PIDTAG: no symbol tagged \"LG-Magnetic\" on this sheet -- PIDLEGEND LIST shows the tags."
+        );
+        assert!(selected(&app).is_empty(), "nothing is found");
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "the prompt took the first word for its answer"
+        );
+    }
+
+    /// PIDTAG with nothing named goes by the picked entities on a sheet of
+    /// imported symbols too: the block reference of a symbol, or the
+    /// lettering of any one of its labels, selects the symbol with all its
+    /// labels -- a symbol that has no tag as well. A label of one symbol
+    /// picked together with the block reference of another selects both.
+    #[test]
+    fn pidtag_reads_a_picked_imported_symbol_or_any_one_of_its_labels() {
+        let mut app = imported_sheet();
+        let i = app.active_tab;
+        let (valve, labels) = tagged_valve(&app);
+        let (other, its_label) = untagged_valve(&app);
+        let tagged = in_order(labels.into_iter().chain([valve]));
+        let untagged = in_order([other, its_label]);
+        let of_the_tagged =
+            "PIDTAG: Ball Valve GV-101 -- 1 symbol(s), 4 label(s) selected and framed in red.";
+        let of_the_untagged =
+            "PIDTAG: Ball Valve (无位号) -- 1 symbol(s), 1 label(s) selected and framed in red.";
+
+        for (picked, group, receipt) in [
+            (valve, &tagged, of_the_tagged),
+            // Filed before its valve.
+            (labels[0], &tagged, of_the_tagged),
+            (labels[2], &tagged, of_the_tagged),
+            (other, &untagged, of_the_untagged),
+            (its_label, &untagged, of_the_untagged),
+        ] {
+            app.tabs[i].scene.select_entity(picked, true);
+            let _ = app.run_command_line("PIDTAG ");
+            assert_eq!(selected(&app), *group, "{picked:?} picked");
+            assert_eq!(last_line(&app), receipt, "{picked:?} picked");
+            assert_eq!(frames(&app).len(), 1, "{picked:?} picked");
+        }
+
+        app.tabs[i].scene.select_entity(labels[3], true);
+        app.tabs[i].scene.select_entity(other, false);
+        let _ = app.run_command_line("PIDTAG ");
+        assert_eq!(
+            selected(&app),
+            in_order(tagged.iter().chain(&untagged).copied())
+        );
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: Ball Valve GV-101 + Ball Valve (无位号) -- 2 symbol(s), 5 label(s) selected and framed in red."
+        );
+        assert_eq!(frames(&app).len(), 2, "a frame for each symbol");
+    }
+
+    /// What is picked and is no imported symbol's makes no group, and PIDTAG
+    /// says so in the words it did and leaves the pick as it was: the label
+    /// of a run of line, the run itself, the label of what is no graphic of
+    /// the sheet, a text that is no label's -- and the label of a symbol
+    /// that has been erased, until an undo gives the symbol back. With
+    /// nothing picked it asks for a pick, as it did.
+    #[test]
+    fn pidtag_makes_no_group_of_a_pick_that_is_no_imported_symbols() {
+        let mut app = imported_sheet();
+        let i = app.active_tab;
+        let no_group = "ⓘ PIDTAG: the picked entities belong to no recognised symbol.";
+
+        for picked in [
+            lettered(&app, "P-1001-50-CS"),
+            run_of_line(&app),
+            lettered(&app, "DWG-0201"),
+            lettered(&app, "NOTE 4"),
+        ] {
+            app.tabs[i].scene.select_entity(picked, true);
+            let _ = app.run_command_line("PIDTAG ");
+            assert_eq!(selected(&app), vec![picked], "the pick stays as it was");
+            assert_eq!(last_line(&app), no_group, "{picked:?} picked");
+            assert!(
+                app.tabs[i].scene.pid_group_highlight_wires().is_empty(),
+                "{picked:?} picked: nothing is framed"
+            );
+        }
+
+        let (other, its_label) = untagged_valve(&app);
+        app.tabs[i].scene.select_entity(other, true);
+        let _ = app.run_command_line("ERASE");
+        assert!(
+            !sheet(&app)
+                .model_space_entities()
+                .any(|entity| entity.common().handle == other),
+            "the valve is erased"
+        );
+        app.tabs[i].scene.select_entity(its_label, true);
+        let _ = app.run_command_line("PIDTAG ");
+        assert_eq!(selected(&app), vec![its_label], "the pick stays as it was");
+        assert_eq!(last_line(&app), no_group, "the label of an erased symbol");
+
+        let _ = app.automation_op(r#"{"op":"undo"}"#);
+        app.tabs[i].scene.select_entity(its_label, true);
+        let _ = app.run_command_line("PIDTAG ");
+        assert_eq!(
+            selected(&app),
+            in_order([other, its_label]),
+            "the valve is back"
+        );
+
+        app.tabs[i].scene.deselect_all();
+        let _ = app.run_command_line("PIDTAG ");
+        assert_eq!(
+            last_line(&app),
+            "ⓘ PIDTAG: pick a symbol (or its tag lettering) first, or name the tag -- PIDTAG BUV-3201."
+        );
+        assert!(selected(&app).is_empty(), "nothing is selected");
+    }
+
+    /// A row of the legend list is a recognised symbol, and a click on one
+    /// goes by the recognised symbols alone, as it did: handed the handle of
+    /// an imported symbol it selects nothing and says what it said.
+    #[test]
+    fn a_legend_list_row_goes_by_the_recognised_symbols_alone() {
+        let mut app = imported_sheet();
+        let i = app.active_tab;
+        let (valve, _) = tagged_valve(&app);
+        let note = lettered(&app, "NOTE 4");
+        app.tabs[i].scene.select_entity(note, true);
+
+        let _ = app.update(Message::PidLegendPickSymbol(vec![valve.value()]));
+        assert_eq!(selected(&app), vec![note], "the pick stays as it was");
+        assert_eq!(
+            last_line(&app),
+            "ⓘ PIDTAG: that symbol is no longer on the sheet -- PIDLEGEND LIST re-reads it."
+        );
+    }
+
+    /// `PIDTAG <old> <new>` does not rename a symbol a `.pid` import placed
+    /// (SPEC §4.7, §8): its tag is the plant's. Where imported symbols
+    /// alone carry the old tag the rename is refused, by code and in words
+    /// that say how many they are, and nothing is written: no record, no
+    /// undo step, nothing to save. A tag nobody carries is absent, as it
+    /// was.
+    #[test]
+    fn a_rename_is_refused_where_imported_symbols_alone_carry_the_tag() {
+        use crate::pid::persist::PidAuthor;
+
+        let mut app = imported_sheet();
+        let i = app.active_tab;
+        let (valve, _) = tagged_valve(&app);
+        let said = pid_xdata_strings(&app, valve);
+        assert!(said.contains(&"label=GV-101".to_owned()), "{said:?}");
+        app.tabs[i].dirty = false;
+        let undo_before = app.tabs[i].history.undo_stack.len();
+
+        let _ = app.run_command_line("PIDTAG gv-101 GV-109");
+        app.finish_all_pending_history();
+        assert_eq!(
+            app.command_line.last_error_code.as_deref(),
+            Some("tag_imported")
+        );
+        assert_eq!(
+            refused(&app),
+            "PIDTAG: 本图上带位号 \"gv-101\" 的是 1 个导入的图例，导入的图例不能在这里改位号，未做改动。"
+        );
+        assert_eq!(
+            pid_xdata_strings(&app, valve),
+            said,
+            "the record says what it said"
+        );
+        assert!(
+            PidAuthor::load(sheet(&app), valve).is_none(),
+            "and the valve was not made an object drawn here"
+        );
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            undo_before,
+            "no undo step"
+        );
+        assert!(!app.tabs[i].dirty, "nothing to save");
+
+        let (other, _) = untagged_valve(&app);
+        restate(&mut app, other, &[("label", "GV-101")]);
+        let _ = app.run_command_line("PIDTAG GV-101 GV-109");
+        assert_eq!(
+            refused(&app),
+            "PIDTAG: 本图上带位号 \"GV-101\" 的是 2 个导入的图例，导入的图例不能在这里改位号，未做改动。"
+        );
+
+        let _ = app.run_command_line("PIDTAG GV-109 GV-110");
+        assert_eq!(
+            app.command_line.last_error_code.as_deref(),
+            Some("tag_absent")
+        );
+        assert_eq!(
+            refused(&app),
+            "PIDTAG: 本图上没有位号 \"GV-109\" 的符号，未做改动。"
+        );
+    }
+
+    /// Where objects drawn here carry the tag as well, those are renamed as
+    /// they were, in one undo step, and the receipt says the imported
+    /// symbols were left: their records say what they said. With no
+    /// imported symbol carrying the tag the receipt reads as it did.
+    #[test]
+    fn a_rename_takes_the_objects_drawn_here_and_leaves_the_imported_symbols() {
+        use crate::pid::persist::PidAuthor;
+
+        let mut app = imported_sheet();
+        let i = app.active_tab;
+        let (valve, _) = tagged_valve(&app);
+        let said = pid_xdata_strings(&app, valve);
+        let drawn_here = authored(&mut app, "GV-101");
+        let another = authored(&mut app, "P-1001");
+        let undo_before = app.tabs[i].history.undo_stack.len();
+
+        let _ = app.run_command_line("PIDTAG GV-101 GV-109");
+        app.finish_all_pending_history();
+        let author = PidAuthor::load(sheet(&app), drawn_here).expect("author");
+        assert_eq!(
+            (author.tag.as_str(), author.tag_source.as_str()),
+            ("GV-109", "manual")
+        );
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: 位号 GV-101 → GV-109，1 个符号已改；另有 1 个导入的图例带这个位号，导入的图例不能在这里改位号，没有改。"
+        );
+        assert_eq!(
+            pid_xdata_strings(&app, valve),
+            said,
+            "the imported valve says what it said"
+        );
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            undo_before + 1,
+            "one undo step"
+        );
+
+        let _ = app.run_command_line("PIDTAG P-1001 P-1009");
+        app.finish_all_pending_history();
+        let author = PidAuthor::load(sheet(&app), another).expect("author");
+        assert_eq!(author.tag, "P-1009");
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: 位号 P-1001 → P-1009，1 个符号已改。"
+        );
+    }
+
+    /// What a pick of one entity makes PIDTAG select of the symbols a
+    /// `.pid` import placed, said the long way: by the functions the
+    /// Properties panel and the inspector go by (`io::pid_identity`), one
+    /// reading of the sheet after another. It is the picked symbol, or the
+    /// symbol the label of the picked lettering hangs on, with the texts
+    /// that are the lettering of its labels -- unless that symbol was drawn
+    /// here.
+    fn the_long_way(
+        document: &document::Document,
+        picked: document::Handle,
+    ) -> Vec<(document::Handle, Vec<document::Handle>)> {
+        use crate::io::pid_identity::{self, LabelOwner};
+        use crate::pid::persist::PidAuthor;
+
+        let entity = document
+            .model_space_entities()
+            .find(|entity| entity.common().handle == picked)
+            .expect("what is picked is in model space");
+        let symbol = if pid_identity::symbol_identity(entity).is_some() {
+            Some(entity)
+        } else if pid_identity::lettering(entity).is_some() {
+            match pid_identity::label_owner(document, entity) {
+                Some(LabelOwner::Symbol(owner)) => Some(owner),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Some(symbol) = symbol.filter(|symbol| PidAuthor::from_entity(symbol).is_none()) else {
+            return Vec::new();
+        };
+        let labels = pid_identity::symbol_identity(symbol)
+            .and_then(|said| said.graphic)
+            .map(|graphic| {
+                pid_identity::labels_of(document, graphic)
+                    .into_iter()
+                    .filter(|label| pid_identity::lettering(label).is_some())
+                    .map(|label| label.common().handle)
+                    .collect()
+            })
+            .unwrap_or_default();
+        vec![(symbol.common().handle, labels)]
+    }
+
+    /// What `imported_groups` makes of what is asked: the block reference
+    /// and the labels of each group.
+    fn made_of(
+        document: &document::Document,
+        asked: &Asked<'_>,
+    ) -> Vec<(document::Handle, Vec<document::Handle>)> {
+        imported_groups(document, asked)
+            .into_iter()
+            .map(|group| (group.reference, group.labels))
+            .collect()
+    }
+
+    /// Every entity of the sheet in front, picked alone, makes the group
+    /// the long way makes of it; the number of those that make one.
+    fn picks_that_make_a_group(app: &OpenCADStudio) -> usize {
+        let document = sheet(app);
+        document
+            .model_space_entities()
+            .map(|entity| entity.common().handle)
+            .filter(|picked| {
+                let made = made_of(document, &Asked::Picked(&[picked.value()]));
+                assert_eq!(made, the_long_way(document, *picked), "{picked:?} picked");
+                !made.is_empty()
+            })
+            .count()
+    }
+
+    /// The groups PIDTAG makes of the symbols a `.pid` import placed are the
+    /// ones the Properties panel and the inspector lead to, entity by
+    /// entity: on the built sheets as imported, and with what an import
+    /// does not leave but a drawing can come to hold -- an entity that is
+    /// no text and states what a label states, which is no label; a text
+    /// of several lines that does, which is one; a copy of a symbol, which
+    /// has its original's labels while their lettering picks the original;
+    /// and an object drawn here that states what an imported symbol states,
+    /// which is none and, filed first under a number, leaves the labels of
+    /// that number with no imported symbol to pick.
+    #[test]
+    fn imported_groups_are_what_the_identity_functions_make_of_each_pick() {
+        use crate::pid::persist::PidAuthor;
+        use document::entities::{EntityType, MText};
+
+        let none: Vec<(document::Handle, Vec<document::Handle>)> = Vec::new();
+        let of = |app: &OpenCADStudio, picked: document::Handle| {
+            made_of(sheet(app), &Asked::Picked(&[picked.value()]))
+        };
+
+        // Three valves, and a label on each of two of them.
+        let less = opened_with(crate::io::pid::sheet_of_symbols_the_file_says_less_of());
+        assert_eq!(picks_that_make_a_group(&less), 5, "symbols said less of");
+
+        let mut app = imported_sheet();
+        let i = app.active_tab;
+        let (valve, labels) = tagged_valve(&app);
+        let (other, its_label) = untagged_valve(&app);
+        let pipe = run_of_line(&app);
+        // The two valves, the four labels of the one and the label of the
+        // other.
+        assert_eq!(picks_that_make_a_group(&app), 7, "as imported");
+        assert_eq!(of(&app, valve), [(valve, labels.to_vec())]);
+        assert_eq!(of(&app, labels[2]), [(valve, labels.to_vec())]);
+        assert_eq!(of(&app, its_label), [(other, vec![its_label])]);
+
+        // The label of the run of line states the first valve's number: it
+        // hangs on a run of line all the same.
+        let on_the_line = lettered(&app, "P-1001-50-CS");
+        restate(&mut app, on_the_line, &[("label_of", "612")]);
+        assert_eq!(picks_that_make_a_group(&app), 7, "a line's label");
+        assert_eq!(of(&app, valve), [(valve, labels.to_vec())]);
+        assert_eq!(of(&app, on_the_line), none);
+
+        // The run of line itself states what a label of that valve states.
+        restate(
+            &mut app,
+            pipe,
+            &[("label_of", "612"), ("label_on", "symbol")],
+        );
+        assert_eq!(picks_that_make_a_group(&app), 7, "a run of line as a label");
+        assert_eq!(of(&app, valve), [(valve, labels.to_vec())]);
+        assert_eq!(of(&app, pipe), none);
+
+        // A text of several lines made a label of the second valve.
+        let several = app.tabs[i]
+            .scene
+            .add_entity(EntityType::MText(Box::new(MText {
+                value: "DN80\\PPN16".to_owned(),
+                ..MText::default()
+            })));
+        restate(
+            &mut app,
+            several,
+            &[("label_of", "613"), ("label_on", "symbol")],
+        );
+        assert_eq!(picks_that_make_a_group(&app), 8, "a text of several lines");
+        assert_eq!(of(&app, several), [(other, vec![its_label, several])]);
+
+        // The second valve as a copy of the first: the labels of its own
+        // number are left with no symbol.
+        restate(&mut app, other, &[("graphic", "612")]);
+        assert_eq!(picks_that_make_a_group(&app), 6, "a copy");
+        assert_eq!(of(&app, other), [(other, labels.to_vec())]);
+        assert_eq!(of(&app, labels[1]), [(valve, labels.to_vec())]);
+        assert_eq!(of(&app, its_label), none);
+        assert_eq!(
+            made_of(sheet(&app), &Asked::Picked(&[valve.value(), other.value()])),
+            [(valve, labels.to_vec()), (other, labels.to_vec())],
+            "picked together, each has the labels"
+        );
+
+        // The first valve as an object drawn here: the copy is picked by
+        // itself alone.
+        PidAuthor::new("VALVE", "GV-101").store(&mut app.tabs[i].scene.document, valve);
+        assert_eq!(picks_that_make_a_group(&app), 1, "an object drawn here");
+        assert_eq!(of(&app, valve), none);
+        assert_eq!(of(&app, labels[1]), none);
+        assert_eq!(of(&app, other), [(other, labels.to_vec())]);
+        assert_eq!(made_of(sheet(&app), &Asked::Tag("GV-101")), none);
+    }
+
+    /// What the receipt calls an imported symbol: the name of its symbol
+    /// and its tag; what kind of thing it is where it states no symbol's
+    /// name -- the class its item is published as, or else the kind
+    /// SmartPlant holds the item as --; and a word for a symbol where it
+    /// states neither. A symbol with no tag says so.
+    #[test]
+    fn the_receipt_names_an_imported_symbol_by_its_symbol_and_its_tag() {
+        let mut app = opened_with(crate::io::pid::sheet_of_symbols_the_file_says_less_of());
+        let named = |app: &OpenCADStudio| -> Vec<String> {
+            let every: Vec<u64> = sheet(app)
+                .model_space_entities()
+                .map(|entity| entity.common().handle.value())
+                .collect();
+            imported_groups(sheet(app), &Asked::Picked(&every))
+                .into_iter()
+                .map(|group| group.name)
+                .collect()
+        };
+        assert_eq!(
+            named(&app),
+            [
+                "Ball Valve (无位号)",
+                "Ball Valve (无位号)",
+                "Ball Valve ZZ-9"
+            ]
+        );
+
+        for at in [(100.0, 100.0), (170.0, 100.0), (100.0, 160.0)] {
+            let valve = reference(&app, VALVE, at);
+            restate(&mut app, valve, &[("symbol", "")]);
+        }
+        assert_eq!(
+            named(&app),
+            ["OPC (无位号)", "图例 (无位号)", "PIDBranchPoint ZZ-9"]
+        );
+    }
+
+    /// The sample drawing of the plant test data beside this repository --
+    /// the sheet of the well sites L and M, 592 symbols among some six
+    /// thousand entities -- as a `.pid` import leaves it with nothing
+    /// published beside it; or `None`, and a line saying so, where the
+    /// drawing is not there.
+    fn sample_sheet() -> Option<document::Document> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()?
+            .join("pid-test-data")
+            .join("backup-plant-data")
+            .join("00")
+            .join("00")
+            .join("L M井场 注采阀组工艺及自控流程图.pid");
+        if !path.is_file() {
+            eprintln!("skipped: no sample drawing at {}", path.display());
+            return None;
+        }
+        let import = crate::io::pid::load_pid(&path).expect("the sample imports");
+        Some(import.document)
+    }
+
+    /// On the sample drawing, what PIDTAG makes of the symbols is what the
+    /// functions the Properties panel goes by make of them, one reading of
+    /// the sheet after another: everything picked at once is every symbol
+    /// with the texts that are its labels; every tag finds the symbols that
+    /// carry it; and the lettering of every label picks the symbol the
+    /// label hangs on, or nothing where it hangs on a run of line or on
+    /// anything else. How many there are of each is pinned beside it, and
+    /// legend recognition takes none of those symbols for its own. Skipped,
+    /// with a line saying so, where the plant test data is not beside the
+    /// repository.
+    #[test]
+    fn on_the_sample_drawing_every_tag_and_every_label_finds_its_symbol() {
+        use crate::io::pid_identity::{self, LabelOwner};
+        use std::collections::BTreeMap;
+        use std::time::Instant;
+
+        let Some(document) = sample_sheet() else {
+            return;
+        };
+        let every: Vec<u64> = document
+            .model_space_entities()
+            .map(|entity| entity.common().handle.value())
+            .collect();
+        let started = Instant::now();
+        let all = made_of(&document, &Asked::Picked(&every));
+        let at_once = started.elapsed();
+
+        let symbols: Vec<&document::EntityType> = document
+            .model_space_entities()
+            .filter(|entity| pid_identity::symbol_identity(entity).is_some())
+            .collect();
+        let long_way: Vec<(document::Handle, Vec<document::Handle>)> = symbols
+            .iter()
+            .flat_map(|symbol| the_long_way(&document, symbol.common().handle))
+            .collect();
+        assert_eq!(all.len(), symbols.len(), "a group of every symbol");
+        assert_eq!(all, long_way, "everything picked at once");
+
+        // The symbols that carry each tag, by their place among the symbols.
+        let mut carrying: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (place, symbol) in symbols.iter().enumerate() {
+            if let Some(tag) = pid_identity::symbol_identity(symbol).and_then(|said| said.tag) {
+                carrying.entry(tag.to_uppercase()).or_default().push(place);
+            }
+        }
+        let started = Instant::now();
+        for (tag, places) in &carrying {
+            let carried_by: Vec<_> = places.iter().map(|place| all[*place].clone()).collect();
+            assert_eq!(made_of(&document, &Asked::Tag(tag)), carried_by, "{tag}");
+        }
+        let by_tag = started.elapsed();
+
+        let place: rustc_hash::FxHashMap<document::Handle, usize> = all
+            .iter()
+            .enumerate()
+            .map(|(place, (reference, _))| (*reference, place))
+            .collect();
+        let (mut of_symbols, mut of_none, mut of_lines, mut of_others) = (0, 0, 0, 0);
+        let started = Instant::now();
+        for entity in document.model_space_entities() {
+            if pid_identity::lettering(entity).is_none() {
+                continue;
+            }
+            let hangs_on = match pid_identity::label_owner(&document, entity) {
+                Some(LabelOwner::Symbol(symbol)) => {
+                    of_symbols += 1;
+                    vec![all[place[&symbol.common().handle]].clone()]
+                }
+                Some(LabelOwner::Missing) => {
+                    of_none += 1;
+                    Vec::new()
+                }
+                Some(LabelOwner::Line) => {
+                    of_lines += 1;
+                    Vec::new()
+                }
+                Some(LabelOwner::Other) => {
+                    of_others += 1;
+                    Vec::new()
+                }
+                None => continue,
+            };
+            let picked = entity.common().handle;
+            assert_eq!(
+                made_of(&document, &Asked::Picked(&[picked.value()])),
+                hangs_on,
+                "{picked:?} picked"
+            );
+        }
+        let one_by_one = started.elapsed();
+
+        let started = Instant::now();
+        let recognition = pid_legend::recognise(&document, &Rules::load());
+        let recognised = started.elapsed();
+        assert!(
+            recognition
+                .symbols
+                .iter()
+                .flat_map(|symbol| &symbol.handles)
+                .all(|handle| !place.contains_key(handle)),
+            "legend recognition takes no imported symbol for its own"
+        );
+        eprintln!(
+            "sample: {} entities in model space; everything picked at once {at_once:?}; \
+             {} tags asked for one by one {by_tag:?}; {} labels picked one by one \
+             {one_by_one:?}; legend recognition {recognised:?}, {} symbols recognised",
+            every.len(),
+            carrying.len(),
+            of_symbols + of_none + of_lines + of_others,
+            recognition.symbols.len()
+        );
+
+        assert_eq!(
+            [
+                ("symbols", all.len()),
+                (
+                    "symbols that carry a tag",
+                    carrying.values().map(Vec::len).sum()
+                ),
+                ("tags", carrying.len()),
+                (
+                    "the most symbols of one tag",
+                    carrying.values().map(Vec::len).max().unwrap_or(0)
+                ),
+                ("labels of symbols", of_symbols),
+                (
+                    "labels in the groups",
+                    all.iter().map(|(_, labels)| labels.len()).sum()
+                ),
+                ("labels of a symbol that is not on the sheet", of_none),
+                ("labels of runs of line", of_lines),
+                ("labels of anything else", of_others),
+                (
+                    "symbols with no label",
+                    all.iter().filter(|(_, labels)| labels.is_empty()).count()
+                ),
+                (
+                    "the most labels of one symbol",
+                    all.iter()
+                        .map(|(_, labels)| labels.len())
+                        .max()
+                        .unwrap_or(0)
+                ),
+            ],
+            [
+                ("symbols", 592),
+                ("symbols that carry a tag", 231),
+                ("tags", 229),
+                ("the most symbols of one tag", 2),
+                ("labels of symbols", 803),
+                ("labels in the groups", 803),
+                ("labels of a symbol that is not on the sheet", 0),
+                ("labels of runs of line", 151),
+                ("labels of anything else", 4),
+                ("symbols with no label", 209),
+                ("the most labels of one symbol", 4),
+            ]
+        );
+    }
+
+    /// On a sheet that has both, PIDTAG selects the recognised symbols and
+    /// the imported ones that carry the tag, and the receipt counts symbols
+    /// and labels -- the tag lettering of a recognised symbol among the
+    /// labels. Picked alone, the recognised one reads as it did, in groups
+    /// and entities, and the imported one counts itself and its label.
+    #[test]
+    fn pidtag_selects_recognised_and_imported_symbols_side_by_side() {
+        use document::entities::{EntityType, Line, Text};
+        use document::types::{Transform, Vector3};
+
+        let mut app = OpenCADStudio::new_for_test();
+        let (insert, tag, _pipe) = valve_with_tag(&mut app);
+        let i = app.active_tab;
+        // A block of four lines, 6 x 3 mm at (20, 5), made to state what a
+        // symbol a `.pid` import placed states -- the tag of the recognised
+        // valve with it -- and a text made the lettering of a label of it.
+        let strokes: Vec<document::Handle> = [
+            ((20.0, 5.0), (26.0, 5.0)),
+            ((26.0, 5.0), (26.0, 8.0)),
+            ((26.0, 8.0), (20.0, 8.0)),
+            ((20.0, 8.0), (20.0, 5.0)),
+        ]
+        .into_iter()
+        .map(|((x0, y0), (x1, y1))| {
+            let mut line = Line::new();
+            line.start = Vector3::new(x0, y0, 0.0);
+            line.end = Vector3::new(x1, y1, 0.0);
+            app.tabs[i].scene.add_entity(EntityType::Line(line))
+        })
+        .collect();
+        let identity = Transform::identity();
+        let imported = app.tabs[i]
+            .scene
+            .create_block_from_entities(&strokes, "IMPORTED-900", &identity, &identity)
+            .unwrap();
+        restate(
+            &mut app,
+            imported,
+            &[
+                ("role", "symbol"),
+                ("graphic", "900"),
+                ("symbol", "Gate Valve"),
+                ("label", "BUV-3101"),
+                ("tag_source", "file"),
+            ],
+        );
+        let label = app.tabs[i].scene.add_entity(EntityType::Text(
+            Text::with_value("DN80", Vector3::new(20.0, 9.0, 0.0)).with_height(2.5),
+        ));
+        restate(
+            &mut app,
+            label,
+            &[("label_of", "900"), ("label_on", "symbol")],
+        );
+
+        let _ = app.run_command_line("PIDTAG BUV-3101");
+        assert_eq!(selected(&app), in_order([insert, tag, imported, label]));
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: 蝶阀 BUV-3101 + Gate Valve BUV-3101 -- 2 symbol(s), 2 label(s) selected and framed in red."
+        );
+        assert_eq!(frames(&app).len(), 2, "a frame for each");
+
+        app.tabs[i].scene.select_entity(tag, true);
+        let _ = app.run_command_line("PIDTAG ");
+        assert_eq!(selected(&app), in_order([insert, tag]));
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: 蝶阀 BUV-3101 -- 1 group(s), 2 entities selected and framed in red."
+        );
+
+        app.tabs[i].scene.select_entity(label, true);
+        let _ = app.run_command_line("PIDTAG ");
+        assert_eq!(selected(&app), in_order([imported, label]));
+        assert_eq!(
+            last_line(&app),
+            "PIDTAG: Gate Valve BUV-3101 -- 1 symbol(s), 1 label(s) selected and framed in red."
+        );
     }
 
     #[test]

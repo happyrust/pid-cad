@@ -365,6 +365,21 @@ fn find(
     })
 }
 
+/// Whether the drawing is still as statement `change` left it: the
+/// connector it made is there, the one it took away is not
+/// (`SPEC-collab-offline-sync.md` §5.4).
+pub(super) fn as_said(doc: &Document, change: &Change, said: &ConnectorSaid) -> bool {
+    let Some(kind) = ConnectorKind::parse(&said.connector) else {
+        return false;
+    };
+    let there = find(doc, kind, &change.object_ref, said.at).is_some();
+    match change.kind.as_str() {
+        KIND_CREATE_CONNECTOR => there,
+        KIND_DELETE_CONNECTOR => !there,
+        _ => false,
+    }
+}
+
 /// The table's record of connector `handle`, entered if it is not there.
 fn record_of<'a>(
     table: &'a mut TopologyTable,

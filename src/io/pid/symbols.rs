@@ -275,6 +275,72 @@ pub(super) fn place_primitive(
     entities
 }
 
+/// What the import draws of one primitive of a symbol file, for a reader
+/// that shows the file by itself: the backup browser's preview of a `.sym`
+/// (issue #116).
+///
+/// The primitive goes the way a placement's body goes ([`place_primitive`]),
+/// at a placement that changes nothing: the symbol's own origin, no turn,
+/// full size, a metre a thousand millimetres. So the entities are in
+/// millimetres about the symbol's origin, in the colours the file states
+/// for them. Two things only a drawing has are left out: the dash linetypes
+/// it pooled, so a dashed stroke comes out continuous, as it does on a
+/// drawing that did not pool its pattern; and its text styles, so lettering
+/// keeps the default one.
+///
+/// No entity is a primitive the import draws nothing for: lettering that is
+/// nothing but the `NULL` of a field left unfilled ([`carries_a_label`]), a
+/// boundary none of whose members is a circle or a line
+/// ([`shape_boundary`]), a circle or an arc with no radius, a run of fewer
+/// than two points.
+pub(crate) fn symbol_file_primitive_entities(
+    styled: &pid_parse::symbol_library::StyledPrimitive,
+) -> Vec<EntityType> {
+    let origin = PidPoint { x: 0.0, y: 0.0 };
+    let at = Placement {
+        insertion: &origin,
+        rotation: 0.0,
+        scale: [1.0, 1.0],
+        projection: Projection {
+            mm_per_unit: MM_PER_METRE,
+            band: SheetBand::for_page(None),
+        },
+    };
+    place_primitive(
+        &styled.primitive,
+        styled.style.as_ref(),
+        styled.lettering.as_ref(),
+        &at,
+        &HashMap::new(),
+        1.0,
+        &HashMap::new(),
+    )
+}
+
+/// A document that holds `entities` -- what [`symbol_file_primitive_entities`]
+/// draws of a symbol file -- as a drawing of their own, and how many of them
+/// it holds: a symbol opened from the backup browser (issue #116).
+///
+/// It is made the way a drawing's is ([`prepare_document`]): a fresh
+/// document, the standard linetypes, lineweights shown -- every stroke comes
+/// in at the width the file states for it. The entities go into model space
+/// as they are, millimetres about the symbol's origin, and a layer one of
+/// them is on is declared as the import declares it for a drawing
+/// ([`ensure_taxonomy_layer`]).
+pub(crate) fn symbol_file_document(entities: Vec<EntityType>) -> (Document, usize) {
+    let mut doc = Document::new();
+    crate::io::linetypes::populate_document(&mut doc);
+    doc.header.lineweight_display = true;
+    let mut held = 0;
+    for entity in entities {
+        ensure_taxonomy_layer(&mut doc, &entity.common().layer);
+        if doc.add_entity(entity).is_ok() {
+            held += 1;
+        }
+    }
+    (doc, held)
+}
+
 /// The entities one primitive of a symbol body draws at its placement —
 /// usually one; a boundary draws a solid hatch per member shape (see
 /// [`shape_boundary`]).

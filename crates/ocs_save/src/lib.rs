@@ -18,9 +18,11 @@ use document::{
     ReadStage, ReadStats,
 };
 
+mod dwg_line_weights;
 mod dxf_reference_integrity;
 mod ifccad;
 
+pub use dwg_line_weights::{has_unstorable_dwg_line_weights, snap_dwg_line_weights};
 pub use dxf_reference_integrity::{has_omitted_dxf_records, prune_omitted_dxf_records};
 
 /// Worker protocol version. Bumped whenever a request/response payload shape
@@ -38,11 +40,16 @@ pub const PROTOCOL_VERSION: u16 = 5;
 pub fn serialize_document(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
     let ext = ext.to_lowercase();
     if ext == "dxf" {
-        let mut pruned;
-        let doc = if has_omitted_dxf_records(doc) {
-            pruned = doc.clone();
-            prune_omitted_dxf_records(&mut pruned);
-            &pruned
+        // A DXF states a line weight as the number itself, yet a reader may
+        // hold it to the list a DWG states one from. The copy written here
+        // states the nearest width on the list for one that is off it, and
+        // names no record the export omits; the caller's document stays as is.
+        let mut copy;
+        let doc = if has_omitted_dxf_records(doc) || has_unstorable_dwg_line_weights(doc) {
+            copy = doc.clone();
+            prune_omitted_dxf_records(&mut copy);
+            snap_dwg_line_weights(&mut copy);
+            &copy
         } else {
             doc
         };
@@ -53,6 +60,17 @@ pub fn serialize_document(doc: &Document, ext: &str) -> Result<Vec<u8>, String> 
     if let Some(format) = external_format(&ext) {
         return write_external(doc, format, false);
     }
+    // A DWG states a line weight as one of a fixed list of widths. The copy
+    // written here states the nearest width on the list for one that is off
+    // it; the caller's document keeps the width as drawn.
+    let mut restated;
+    let doc = if has_unstorable_dwg_line_weights(doc) {
+        restated = doc.clone();
+        snap_dwg_line_weights(&mut restated);
+        &restated
+    } else {
+        doc
+    };
     let mut buf = std::io::Cursor::new(Vec::new());
     DwgWriter::write_to_writer(&mut buf, doc).map_err(|e| e.to_string())?;
     Ok(buf.into_inner())

@@ -91,6 +91,44 @@ pub struct ImportSummary {
     /// placements no body answered for, which the border leaves out rather
     /// than mark with a dot. Kept beside `missing`, never folded into it.
     pub template_missing: usize,
+    /// Why no border template was drawn although the drawing links one:
+    /// the names its links end in, and what stood in the way. `None` when
+    /// the drawing links none, and when one was drawn (`border_template`).
+    /// Such a sheet shows no frame of the template's and no title block,
+    /// and nothing on it says why, so the open-completion handler puts
+    /// this on the command line ([`TemplateNotDrawn::headline`]).
+    pub template_not_drawn: Option<TemplateNotDrawn>,
+    /// Symbol placements filed as block references: every placement of the
+    /// sheet that drew something is one (plan 2026-11-19-pid-symbol-block).
+    /// The placements of the border template are not among them: what a
+    /// template draws stays loose on `PID-FRAME`. Logged, not shown.
+    pub symbol_blocks: usize,
+    /// Block definitions those references refer to. Placements that draw
+    /// the same thing share one, so this counts the different drawings
+    /// among the sheet's symbols: fewer than `symbol_blocks` wherever a
+    /// symbol is placed twice alike, more than the symbols placed wherever
+    /// one is drawn more than one way -- turned, scaled, resized. Logged,
+    /// not shown.
+    pub symbol_definitions: usize,
+    /// Block references the drawing file states a plant item for: the
+    /// symbols that say what they are -- `item`, `item_type` and, where the
+    /// file decides one, `class` (plan 2026-11-20-pid-symbol-identity). A
+    /// file whose items could not be read counts none. Logged, not shown.
+    pub symbol_items: usize,
+    /// Block references that carry a tag (`label`), wherever it came from:
+    /// the published `_Data.xml` or the name the drawing file gives the
+    /// item. Logged, not shown.
+    pub symbol_tags: usize,
+    /// Loose text entities whose label hangs on a symbol of the sheet
+    /// (`label_on=symbol`): each names, under `label_of`, the `graphic` of
+    /// one block reference. Text entities are counted, not text records: a
+    /// label's text that is blank draws nothing and is not among them.
+    /// Logged, not shown.
+    pub symbol_labels: usize,
+    /// Loose text entities whose label hangs on something that is not a
+    /// symbol of the sheet: a line (`label_on=line`) or anything else
+    /// (`label_on=other`). Logged, not shown.
+    pub other_labels: usize,
     /// The symbol library roots the import found -- `PID_SYMBOL_LIBRARY` or
     /// the `.sym` tree above the drawing -- and drew its library bodies
     /// from. Empty when no library was found. Where a placement's body came
@@ -169,6 +207,127 @@ impl ImportUnit {
     }
 }
 
+/// A border template the drawing links and the import did not draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateNotDrawn {
+    /// The file names the drawing's links end in, each once, as the links
+    /// spell them (`CPE-SQ~2.IGR`), separated by `, `.
+    pub named: String,
+    /// What stood in the way.
+    pub why: TemplateGap,
+}
+
+/// Why a border template the drawing links was not drawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateGap {
+    /// No `.igr` file the links name was found: not at the path a link
+    /// states, and not under the template folders.
+    NoFile,
+    /// Files the links name were found and nothing could be drawn from
+    /// them: none of them parsed, or the one picked drew nothing.
+    Undrawable {
+        /// The names of those files, separated by `, `.
+        files: String,
+    },
+    /// Files the links name were read, and none of them fits the page.
+    NoneFits {
+        /// The page they were measured against: `841.00 x 594.00 mm`.
+        page: String,
+        /// The files found, each with the extent its strokes span:
+        /// `CPE-SQ-A0.igr (1189.00 x 841.00 mm), ...`.
+        found: String,
+    },
+    /// The drawing states no page and its strokes fit no standard sheet,
+    /// so there was no size to choose a file by, and none was looked for.
+    NoPage,
+}
+
+impl TemplateGap {
+    /// The word the reason is stored under.
+    fn code(&self) -> &'static str {
+        match self {
+            Self::NoFile => "no-file",
+            Self::Undrawable { .. } => "undrawable",
+            Self::NoneFits { .. } => "none-fits",
+            Self::NoPage => "no-page",
+        }
+    }
+}
+
+impl TemplateNotDrawn {
+    /// The line the open-completion handler puts on the command line, in
+    /// the language of the interface: which template the drawing links,
+    /// and why it is not on the sheet. Where no file was found it also
+    /// names the variable that says where the templates are.
+    pub fn headline(&self) -> String {
+        let named = self.named.as_str();
+        let line = match &self.why {
+            TemplateGap::NoFile => {
+                let variable = TEMPLATE_LIBRARY_ENV;
+                crate::tf!(
+                    "P&ID import: the drawing links the border template(s) {named}, but no .igr file of that name was found; the template's frame and title block are not drawn. Set {variable} to the folder that holds the templates."
+                )
+            }
+            TemplateGap::Undrawable { files } => {
+                crate::tf!(
+                    "P&ID import: the drawing links the border template(s) {named}, but nothing could be drawn from the file(s) found for it: {files}; the template's frame and title block are not drawn."
+                )
+            }
+            TemplateGap::NoneFits { page, found } => {
+                crate::tf!(
+                    "P&ID import: the drawing links the border template(s) {named}, but none of the files of that name fits its {page} page: {found}; the template's frame and title block are not drawn."
+                )
+            }
+            TemplateGap::NoPage => {
+                crate::tf!(
+                    "P&ID import: the drawing links the border template(s) {named}, but it states no page size and its lines fit no standard sheet, so there is no size to choose a file by; the template's frame and title block are not drawn."
+                )
+            }
+        };
+        line.into_owned()
+    }
+
+    /// The properties this is stored under, beside the summary's counts:
+    /// the names, the reason by its word, and what the reason found.
+    fn properties(&self) -> Vec<(&'static str, String)> {
+        let mut properties = vec![
+            ("template_named", self.named.clone()),
+            ("template_gap", self.why.code().to_string()),
+        ];
+        match &self.why {
+            TemplateGap::NoFile | TemplateGap::NoPage => {}
+            TemplateGap::Undrawable { files } => {
+                properties.push(("template_gap_files", files.clone()));
+            }
+            TemplateGap::NoneFits { page, found } => {
+                properties.push(("template_gap_page", page.clone()));
+                properties.push(("template_gap_files", found.clone()));
+            }
+        }
+        properties
+    }
+
+    /// What [`Self::properties`] stored, read back through `stored`, which
+    /// answers for one key. A reason this build has no word for reads as
+    /// nothing said: what a later build found is not one of these four.
+    fn from_properties(stored: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        let named = stored("template_named")?;
+        let why = match stored("template_gap")?.as_str() {
+            "no-file" => TemplateGap::NoFile,
+            "no-page" => TemplateGap::NoPage,
+            "undrawable" => TemplateGap::Undrawable {
+                files: stored("template_gap_files")?,
+            },
+            "none-fits" => TemplateGap::NoneFits {
+                page: stored("template_gap_page")?,
+                found: stored("template_gap_files")?,
+            },
+            _ => return None,
+        };
+        Some(Self { named, why })
+    }
+}
+
 /// The tag prefix the summary rides under while a document crosses the open
 /// pipeline: one custom document property per field
 /// (`PID_IMPORT_SUMMARY.drawn`, …) in the document's `summary_info`. Taken
@@ -200,6 +359,11 @@ impl ImportSummary {
         push("style_tables_failed", self.style_tables_failed.to_string());
         if let Some(template) = &self.border_template {
             push("border_template", template.clone());
+        }
+        if let Some(not_drawn) = &self.template_not_drawn {
+            for (key, value) in not_drawn.properties() {
+                push(key, value);
+            }
         }
         for root in &self.symbol_library {
             push("symbol_library", root.to_string_lossy().into_owned());
@@ -242,6 +406,14 @@ impl ImportSummary {
         if !carried {
             return None;
         }
+        summary.template_not_drawn = TemplateNotDrawn::from_properties(|key| {
+            let tag = format!("{SUMMARY_PROPERTY_PREFIX}{key}");
+            doc.summary_info
+                .custom_properties
+                .iter()
+                .find(|(stored, _)| *stored == tag)
+                .map(|(_, value)| value.clone())
+        });
         summary.unit = match (unit.as_deref(), mm_per_unit) {
             (Some("assumed-metre"), _) | (None, _) => ImportUnit::AssumedMetre,
             (Some(label), Some(mm_per_unit)) => ImportUnit::Stated {
@@ -312,7 +484,7 @@ impl ImportSummary {
     }
 
     /// The counted fields, by the keys they are stored under.
-    pub(super) fn counts(&self) -> [(&'static str, usize); 18] {
+    pub(super) fn counts(&self) -> [(&'static str, usize); 24] {
         [
             ("drawn", self.drawn),
             ("decoded", self.decoded),
@@ -332,6 +504,12 @@ impl ImportSummary {
             ("lettering_flattened", self.lettering_flattened),
             ("template_entities", self.template_entities),
             ("template_missing", self.template_missing),
+            ("symbol_blocks", self.symbol_blocks),
+            ("symbol_definitions", self.symbol_definitions),
+            ("symbol_items", self.symbol_items),
+            ("symbol_tags", self.symbol_tags),
+            ("symbol_labels", self.symbol_labels),
+            ("other_labels", self.other_labels),
         ]
     }
 
@@ -356,6 +534,12 @@ impl ImportSummary {
             "lettering_flattened" => &mut self.lettering_flattened,
             "template_entities" => &mut self.template_entities,
             "template_missing" => &mut self.template_missing,
+            "symbol_blocks" => &mut self.symbol_blocks,
+            "symbol_definitions" => &mut self.symbol_definitions,
+            "symbol_items" => &mut self.symbol_items,
+            "symbol_tags" => &mut self.symbol_tags,
+            "symbol_labels" => &mut self.symbol_labels,
+            "other_labels" => &mut self.other_labels,
             _ => return None,
         })
     }
@@ -384,6 +568,13 @@ impl ImportSummary {
             border_template: None,
             template_entities: 0,
             template_missing: 0,
+            template_not_drawn: None,
+            symbol_blocks: 0,
+            symbol_definitions: 0,
+            symbol_items: 0,
+            symbol_tags: 0,
+            symbol_labels: 0,
+            other_labels: 0,
             symbol_library: Vec::new(),
             unit: ImportUnit::AssumedMetre,
         }

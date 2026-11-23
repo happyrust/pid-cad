@@ -6,13 +6,16 @@
 //! which it had fixed to this machine's loopback. Any other address lets
 //! other machines in, and the server neither authenticates nor encrypts, so
 //! that is for a trusted network only; the usage line and a warning at
-//! startup say so.
+//! startup say so. `--new-repo-id` gives the database a new repository id
+//! before it is served: the one start after a backup was restored.
 //!
 //! Two startup behaviours matter beyond "it binds a port":
 //! * a port already in use must fail with a non-zero exit code and say so on
 //!   stderr, never silently pick another port (VAL-SRV-026);
 //! * a database that cannot be opened does not abort the process — the server
-//!   still listens so `GET /health` can report 503 (VAL-SRV-002).
+//!   still listens so `GET /health` can report 503 (VAL-SRV-002) — but it
+//!   takes no session: every `hello` is answered `STORE_UNAVAILABLE`
+//!   (`SPEC-collab-offline-sync.md` §6).
 //!
 //! The order of those two steps is load-bearing: the port is bound *before* the
 //! database is opened. `build_state` clears the ephemeral session and claim
@@ -48,6 +51,9 @@ struct Cli {
     /// another made against the same revision can tie with it. 0 holds
     /// nothing.
     tie_window_ms: u64,
+    /// Give the database a new repository id before serving it: the start
+    /// after a backup has been restored.
+    new_repo_id: bool,
 }
 
 fn default_db_path() -> String {
@@ -64,9 +70,11 @@ fn default_db_path() -> String {
 fn usage() -> &'static str {
     "ocs_collab_server --port <port> --db <path> [--bind <IP 地址>] \
      [--heartbeat-timeout <seconds>] [--claim-ttl <seconds>] [--seed <json>] \
-     [--tie-window-ms <milliseconds>]\n\
+     [--tie-window-ms <milliseconds>] [--new-repo-id]\n\
      --bind 默认 127.0.0.1，只有本机能连。服务器没有登录验证、不加密，\
-     监听别的地址（如 0.0.0.0）只适合可信内网。"
+     监听别的地址（如 0.0.0.0）只适合可信内网。\n\
+     --new-repo-id 给库换一个新的库标识后照常启动。从备份恢复库文件之后用它启动一次，\
+     记着旧库标识的图纸加入时得到 REPO_MISMATCH；每次带它启动都会再换一次。"
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
@@ -78,6 +86,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
         claim_ttl: DEFAULT_CLAIM_TTL,
         seed: None,
         tie_window_ms: 0,
+        new_repo_id: false,
     };
 
     let mut iter = args.into_iter();
@@ -125,6 +134,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
                     .parse()
                     .map_err(|_| format!("--tie-window-ms 需要非负整数毫秒数，收到 {raw}"))?;
             }
+            "--new-repo-id" => cli.new_repo_id = true,
             "--help" | "-h" => return Err(usage().to_owned()),
             other => return Err(format!("未知参数 {other}；用法：{}", usage())),
         }
@@ -141,6 +151,17 @@ fn build_state(cli: &Cli) -> AppState {
 
     match Store::open(&cli.db) {
         Ok(store) => {
+            if cli.new_repo_id {
+                match store.renew_repo_id() {
+                    Ok(repo_id) => println!("[ocs_collab_server] 库标识已换成 {repo_id}"),
+                    Err(err) => {
+                        // Serving the old id after a restore is what the
+                        // flag is there to prevent.
+                        eprintln!("[ocs_collab_server] 换库标识失败：{err}");
+                        return unavailable(cli, err, session_config);
+                    }
+                }
+            }
             // Sessions and claims are ephemeral across restarts (appendix A.2).
             if let Err(err) = store.clear_ephemeral() {
                 eprintln!("[ocs_collab_server] 清理旧会话失败：{err}");
@@ -160,9 +181,18 @@ fn build_state(cli: &Cli) -> AppState {
         }
         Err(err) => {
             eprintln!("[ocs_collab_server] 数据库初始化失败：{err}");
-            AppState::new(None, Some(err), cli.db.clone(), session_config)
+            unavailable(cli, err, session_config)
         }
     }
+}
+
+/// What a start serves when its database cannot be used: it listens and
+/// reports 503 on `GET /health`, and takes no session.
+fn unavailable(cli: &Cli, err: String, session_config: SessionConfig) -> AppState {
+    eprintln!("[ocs_collab_server] 不接受会话：hello 一律答 STORE_UNAVAILABLE，GET /health 报 503");
+    let mut state = AppState::new(None, Some(err), cli.db.clone(), session_config);
+    state.store_unavailable = true;
+    state
 }
 
 /// Where the server listens: the address and the port asked for.
@@ -271,6 +301,14 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::io::{ErrorKind, Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    use ocs_collab::protocol::codes;
+    use ocs_collab::{ClientMessage, ServerMessage};
+    use ocs_collab_server::ws::{handle_message, Connection, Reaction};
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
@@ -462,6 +500,7 @@ mod tests {
             claim_ttl: 300,
             seed: None,
             tie_window_ms: 0,
+            new_repo_id: false,
         };
         let state = build_state(&cli);
         assert!(state.store.is_none());
@@ -481,6 +520,7 @@ mod tests {
             claim_ttl: 5,
             seed: None,
             tie_window_ms: 0,
+            new_repo_id: false,
         };
         let state = build_state(&cli);
         assert!(state.db_healthy());
@@ -491,5 +531,287 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    // `--new-repo-id` takes no value; left out, the id is left alone. The
+    // usage line says what it is for.
+    #[test]
+    fn new_repo_id_is_a_flag_without_a_value() {
+        assert!(!parse_args(args(&[])).expect("no args is legal").new_repo_id);
+        let cli = parse_args(args(&["--new-repo-id", "--port", "3241"])).expect("flags parse");
+        assert!(cli.new_repo_id);
+        assert_eq!(cli.port, 3241, "the flag takes no value");
+        let usage = usage();
+        for said in ["[--new-repo-id]", "恢复", "REPO_MISMATCH"] {
+            assert!(usage.contains(said), "{said} is not in {usage}");
+        }
+    }
+
+    const T0: i64 = 1_700_000_000;
+
+    /// What a start on `db` is given, with `--new-repo-id` or without.
+    fn cli_on(db: &str, new_repo_id: bool) -> Cli {
+        Cli {
+            new_repo_id,
+            ..parse_args(args(&["--db", db])).expect("flags parse")
+        }
+    }
+
+    fn temp_db(name: &str) -> String {
+        let dir = std::env::temp_dir().join("ocs_collab_cli_ok");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        dir.join(format!("{name}-{}.db", uuid::Uuid::new_v4()))
+            .display()
+            .to_string()
+    }
+
+    fn remove_db(db: &str) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db}{suffix}"));
+        }
+    }
+
+    fn hello(user_id: &str, repo_id: Option<&str>, since: Option<i64>) -> ClientMessage {
+        ClientMessage::Hello {
+            user_id: user_id.into(),
+            drawing_id: "PID-1101".into(),
+            mode: "协同编辑".into(),
+            client_version: "test".into(),
+            workspace: String::new(),
+            since,
+            existing_tags: Vec::new(),
+            repo_id: repo_id.map(str::to_owned),
+        }
+    }
+
+    /// The `welcome` among `reactions`, as it goes on the wire.
+    fn welcome_of(reactions: &[Reaction]) -> serde_json::Value {
+        reactions
+            .iter()
+            .find_map(|reaction| match reaction {
+                Reaction::Send(message) => serde_json::to_value(message)
+                    .ok()
+                    .filter(|wire| wire["type"] == "welcome"),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no welcome in {reactions:?}"))
+    }
+
+    /// `OFF-11`: started once with `--new-repo-id`, the server serves its
+    /// database under a new repository id, with the op log it had; started
+    /// again without the flag, it keeps the new id. A drawing that
+    /// remembers the old id is of another repository now.
+    #[tokio::test]
+    async fn new_repo_id_at_startup_changes_the_id_once_and_it_stays() {
+        let db = temp_db("new-repo-id");
+        let before = build_state(&cli_on(&db, false));
+        let old = before.repo_id.clone();
+        let mut editor = Connection::new("127.0.0.1");
+        handle_message(&before, &mut editor, hello("u1", None, None), T0).await;
+        let session_id = editor
+            .session
+            .as_ref()
+            .expect("handshaken")
+            .session_id
+            .clone();
+        let op = ClientMessage::Op {
+            session_id,
+            base_revision: 0,
+            op_id: "op-1".into(),
+            payload: serde_json::json!({"kind": "set_property", "object_ref": "V-1001",
+                "field": "设计压力", "value": "1.6MPa"}),
+        };
+        handle_message(&before, &mut editor, op, T0 + 1).await;
+        drop((editor, before));
+
+        let restarted = build_state(&cli_on(&db, true));
+        let renewed = restarted.repo_id.clone();
+        assert_ne!(renewed, old, "a new id");
+        drop(restarted);
+
+        let after = build_state(&cli_on(&db, false));
+        assert_eq!(after.repo_id, renewed, "and it stays");
+        let (revision, objects) = ops::objects(&after, "PID-1101", Some("V-1001"));
+        assert_eq!(revision, 1, "the room is where it was");
+        assert_eq!(
+            objects[0]["fields"]["设计压力"]["value"], "1.6MPa",
+            "{objects:?}"
+        );
+
+        let mut remembering = Connection::new("127.0.0.1");
+        let hello_from_before = hello("u2", Some(old.as_str()), Some(1));
+        let reactions = handle_message(&after, &mut remembering, hello_from_before, T0 + 2).await;
+        let welcome = welcome_of(&reactions);
+        assert_eq!(
+            welcome["align_refused"]["code"],
+            codes::REPO_MISMATCH,
+            "{welcome}"
+        );
+
+        let mut current = Connection::new("127.0.0.1");
+        let hello_now = hello("u3", Some(renewed.as_str()), Some(0));
+        let reactions = handle_message(&after, &mut current, hello_now, T0 + 3).await;
+        let welcome = welcome_of(&reactions);
+        assert!(welcome.get("align_refused").is_none(), "{welcome}");
+        assert_eq!(welcome["replay_from"], 0, "{welcome}");
+        assert!(
+            reactions.iter().any(|reaction| matches!(
+                reaction,
+                Reaction::Send(ServerMessage::OpApplied { op_id, .. }) if op_id == "op-1"
+            )),
+            "the op log is as it was: {reactions:?}"
+        );
+        drop((remembering, current, after));
+        remove_db(&db);
+    }
+
+    const PATIENCE: Duration = Duration::from_secs(5);
+    const TEXT: u8 = 0x1;
+    const CLOSE: u8 = 0x8;
+
+    fn connect(addr: SocketAddr) -> std::io::Result<TcpStream> {
+        let stream = TcpStream::connect_timeout(&addr, PATIENCE)?;
+        stream.set_read_timeout(Some(PATIENCE))?;
+        Ok(stream)
+    }
+
+    /// `GET path` on `addr`: the whole response.
+    fn http_get(addr: SocketAddr, path: &str) -> std::io::Result<String> {
+        let mut stream = connect(addr)?;
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        )?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    /// A WebSocket on `addr`'s `/ws`, opened by hand: the crate has no
+    /// client, and frames are all a test needs. The response head is read
+    /// a byte at a time so that no frame goes with it.
+    fn ws_connect(addr: SocketAddr) -> std::io::Result<(String, TcpStream)> {
+        let mut stream = connect(addr)?;
+        write!(
+            stream,
+            "GET /ws HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )?;
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte)?;
+            head.push(byte[0]);
+        }
+        Ok((String::from_utf8_lossy(&head).into_owned(), stream))
+    }
+
+    /// A client's text frame; a client masks what it sends.
+    fn send_text(stream: &mut TcpStream, text: &str) -> std::io::Result<()> {
+        let payload = text.as_bytes();
+        let mask = [0x12, 0x34, 0x56, 0x78];
+        let mut frame = vec![0x80 | TEXT];
+        match u8::try_from(payload.len()) {
+            Ok(len) if len < 126 => frame.push(0x80 | len),
+            _ => {
+                let len = u16::try_from(payload.len()).expect("a short frame");
+                frame.push(0x80 | 126);
+                frame.extend_from_slice(&len.to_be_bytes());
+            }
+        }
+        frame.extend_from_slice(&mask);
+        frame.extend(
+            payload
+                .iter()
+                .zip(mask.iter().cycle())
+                .map(|(byte, mask)| byte ^ mask),
+        );
+        stream.write_all(&frame)
+    }
+
+    /// One frame from the server, which masks nothing: opcode and payload.
+    fn read_frame(stream: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
+        let mut head = [0u8; 2];
+        stream.read_exact(&mut head)?;
+        let len = match head[1] & 0x7f {
+            126 => {
+                let mut len = [0u8; 2];
+                stream.read_exact(&mut len)?;
+                usize::from(u16::from_be_bytes(len))
+            }
+            127 => {
+                let mut len = [0u8; 8];
+                stream.read_exact(&mut len)?;
+                usize::try_from(u64::from_be_bytes(len)).expect("a frame that fits")
+            }
+            len => usize::from(len),
+        };
+        let mut payload = vec![0; len];
+        stream.read_exact(&mut payload)?;
+        Ok((head[0] & 0x0f, payload))
+    }
+
+    /// The opcodes of the frames that come next, up to the end of the
+    /// stream; `None` if it has not ended within [`PATIENCE`].
+    fn frames_until_closed(stream: &mut TcpStream) -> Option<Vec<u8>> {
+        let mut opcodes = Vec::new();
+        loop {
+            match read_frame(stream) {
+                Ok((opcode, _)) => opcodes.push(opcode),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        ErrorKind::UnexpectedEof
+                            | ErrorKind::ConnectionReset
+                            | ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    return Some(opcodes)
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// `OFF-11`, over a real socket: started on a database it cannot open,
+    /// the server listens and says so on `/health` (503). A `hello` is
+    /// answered `STORE_UNAVAILABLE`, and then the connection is closed.
+    #[tokio::test]
+    async fn store_unavailable_a_database_that_cannot_be_opened_takes_no_session() {
+        let dir = std::env::temp_dir().join("ocs_collab_cli_dir");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let state = build_state(&cli_on(&dir.display().to_string(), false));
+        let (listener, bound) = bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("binds");
+        let service =
+            http::router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>();
+        let server = tokio::spawn(async move { axum::serve(listener, service).await });
+
+        let hello = serde_json::to_string(&hello("u1", None, None)).expect("hello");
+        let client = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+            let health = http_get(bound, "/health")?;
+            let (upgraded, mut socket) = ws_connect(bound)?;
+            send_text(&mut socket, &hello)?;
+            let answer = read_frame(&mut socket)?;
+            Ok((health, upgraded, answer, frames_until_closed(&mut socket)))
+        });
+        let (health, upgraded, (opcode, payload), rest) = client
+            .await
+            .expect("the client ran")
+            .expect("the server answered");
+        server.abort();
+
+        assert!(health.starts_with("HTTP/1.1 503"), "{health}");
+        assert!(upgraded.starts_with("HTTP/1.1 101"), "{upgraded}");
+        assert_eq!(opcode, TEXT);
+        let answer: serde_json::Value = serde_json::from_slice(&payload).expect("JSON");
+        assert_eq!(answer["type"], "error", "{answer}");
+        assert_eq!(answer["code"], codes::STORE_UNAVAILABLE, "{answer}");
+        assert_eq!(
+            rest,
+            Some(vec![CLOSE]),
+            "a close, then the end of the stream"
+        );
     }
 }

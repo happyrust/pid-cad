@@ -25,7 +25,7 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::response::Response;
-use ocs_collab::protocol::{codes, release_reasons, ClaimInfo, Peer};
+use ocs_collab::protocol::{codes, release_reasons, AlignRefusal, ClaimInfo, Peer};
 use ocs_collab::{
     new_session_id, now_unix, ClaimOutcome, ClientMessage, Occupancy, OpenOutcome, OpenRequest,
     ReleaseOutcome, ServerMessage, Session, SessionStatus,
@@ -71,6 +71,9 @@ pub struct Connection {
     /// read the drawing's revision, for the socket loop to take over. See
     /// [`hello`] for why it cannot wait for the reactions to be applied.
     pub joined: Option<Subscription>,
+    /// Set when the `welcome` refused this connection's alignment: every
+    /// `op` it sends is answered `NOT_ALIGNED` and goes no further.
+    pub not_aligned: bool,
 }
 
 impl Connection {
@@ -79,6 +82,7 @@ impl Connection {
             session: None,
             peer_addr: peer_addr.into(),
             joined: None,
+            not_aligned: false,
         }
     }
 }
@@ -237,7 +241,23 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, peer_addr: S
             } => {
                 match direct {
                     Some(message) => {
-                        if !send_message(&mut socket, &message).await {
+                        let own = conn
+                            .session
+                            .as_ref()
+                            .map(|session| session.session_id.as_str())
+                            .unwrap_or_default();
+                        let earlier = match subscription.as_mut() {
+                            Some(subscription) => earlier_in_the_room(subscription, own),
+                            None => Vec::new(),
+                        };
+                        let mut sent = true;
+                        for message in earlier.iter().chain([&message]) {
+                            if !send_message(&mut socket, message).await {
+                                sent = false;
+                                break;
+                            }
+                        }
+                        if !sent {
                             break;
                         }
                     }
@@ -493,6 +513,20 @@ pub fn should_forward(own_session_id: &str, message: &ServerMessage) -> bool {
     }
 }
 
+/// What `own_session_id`'s room was told and its socket has not been sent
+/// yet, as [`should_forward`] lets it through. Sent ahead of what is said to
+/// that session alone (`OFF-4`): an answer to an op sent again names the
+/// revision it took effect at, and a copy that heard it before the
+/// revisions in front of it would take them for a gap.
+pub fn earlier_in_the_room(
+    subscription: &mut Subscription,
+    own_session_id: &str,
+) -> Vec<ServerMessage> {
+    std::iter::from_fn(|| subscription.try_recv())
+        .filter(|message| should_forward(own_session_id, message))
+        .collect()
+}
+
 /// Applies one client message to the shared state and returns what the socket
 /// layer must do next. `now` is unix seconds; callers pass [`now_unix`] so the
 /// function itself stays deterministic.
@@ -513,6 +547,18 @@ pub async fn handle_message(
         ..
     } = &message
     {
+        if state.store_unavailable {
+            println!(
+                "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：库打不开，不接受会话"
+            );
+            return vec![
+                Reaction::Send(error_message(
+                    codes::STORE_UNAVAILABLE,
+                    "服务器的库打不开，不接受会话：请管理员检查服务器的库文件后重启服务器",
+                )),
+                Reaction::Close,
+            ];
+        }
         if conn.session.is_some() {
             return vec![Reaction::Send(error_message(
                 codes::INVALID_MESSAGE,
@@ -555,6 +601,7 @@ pub async fn handle_message(
         ClientMessage::Heartbeat { .. } => heartbeat(state, &session, now).await,
         ClientMessage::Claim { tag, .. } => claim(state, &session, tag, now).await,
         ClientMessage::Release { tag, .. } => release(state, &session, tag).await,
+        ClientMessage::Op { op_id, .. } if conn.not_aligned => not_aligned(&session, op_id),
         ClientMessage::Op {
             base_revision,
             op_id,
@@ -568,13 +615,32 @@ pub async fn handle_message(
     }
 }
 
+/// Answers an `op` from a connection whose `welcome` refused its alignment.
+/// The op is not judged, logged or told to the room; its sender keeps it
+/// for a connection that aligns.
+fn not_aligned(session: &Session, op_id: String) -> Vec<Reaction> {
+    println!(
+        "[ocs_collab_server] 入站 op session={} user={} op_id={op_id} -> NOT_ALIGNED（这次连接没有对上房间，不裁决、不入日志、不广播）",
+        session.session_id, session.user_id
+    );
+    vec![Reaction::Send(ServerMessage::Error {
+        code: codes::NOT_ALIGNED.to_owned(),
+        message: "这次连接与房间对不上：这一步没有提交，需要取得最新图纸".to_owned(),
+        level: None,
+        holder: None,
+        op_id: Some(op_id),
+        rejected: None,
+    })]
+}
+
 /// What a session that was at revision `since` of `drawing_id` missed, when
 /// the server can say all of it: the op of every revision from `since + 1`
 /// to `current`, in order, as the op log has them. `None` when it cannot —
 /// the session did not ask, it names a revision the drawing has not reached
 /// (it was on another database), there is no op log, or the log does not
-/// hold every revision in between — and the session is then welcomed with
-/// no replay, to find out for itself that it is behind.
+/// hold every revision in between. A session whose `hello` named its
+/// repository is then refused (`REPLAY_GAP`); one that named none is
+/// welcomed with no replay, to find out for itself that it is behind.
 fn missed_ops(
     state: &AppState,
     drawing_id: &str,
@@ -601,9 +667,11 @@ fn missed_ops(
 /// takeover rules and answers `welcome` + `peer_joined`. A session that
 /// says where its drawing was (`since`) is sent, right behind the
 /// `welcome`, every op the room applied after that (`VAL-CROSS-008`). One
-/// that lists the tags the objects of its own copy carry (`existing_tags`)
-/// has them registered, so that no symbol placed by anybody is given one
-/// of them.
+/// that also names its repository (`repo_id`) is checked against the room,
+/// and the `welcome` says when it is not taken as consistent. One that
+/// lists the tags the objects of its own copy carry (`existing_tags`) has
+/// them registered, so that no symbol placed by anybody is given one of
+/// them.
 #[allow(clippy::too_many_arguments)]
 async fn hello(
     state: &AppState,
@@ -639,19 +707,21 @@ async fn hello(
     // well, whether or not the session is then let in: they are judged
     // against the drawing as it is at the revision read here, and a symbol
     // placed right behind this `hello` already finds them taken.
-    // A `hello` that names a repository or a revision claims to be a copy
-    // that was here before (`REQ-COLL-015`). Three ways that claim cannot
-    // hold: the repository is another, the revision is ahead of what the
-    // room has reached, or the op log no longer holds every revision the
-    // copy would need replayed. The session is still opened — the person
-    // sees the room — but the copy is not taken as consistent: it is told
-    // so right behind the `welcome`, and its `existing_tags` are not
-    // registered (a diverged copy's tags protect nobody).
+    // A `hello` that names a repository claims to be a copy that was here
+    // before (`REQ-COLL-015`). Three ways that claim cannot hold: the
+    // repository is another, the revision is ahead of what the room has
+    // reached, or the op log no longer holds every revision the copy would
+    // need replayed. The session is still opened — the person sees the
+    // room — but the copy is not taken as consistent: the `welcome` says
+    // so, and its `existing_tags` are not registered (a diverged copy's
+    // tags protect nobody). A `hello` that names only a revision claims
+    // nothing: it is replayed from when the log allows and welcomed with no
+    // replay when it does not, as a client from before the check expects.
     let (joined, base_revision, missed, refused, registered) = {
         let mut drawings = state.drawings.lock().expect("drawings mutex poisoned");
         let joined = state.bus.subscribe(drawing_id);
         let base_revision = current_revision(state, drawing_id);
-        let claims_align = repo_id.is_some() || since.is_some();
+        let claims_align = repo_id.is_some();
         let mut refused = None;
         if claims_align {
             if repo_id != Some(state.repo_id.as_str()) {
@@ -673,7 +743,7 @@ async fn hello(
         } else {
             missed_ops(state, drawing_id, since, base_revision)
         };
-        if refused.is_none() && since.is_some() && missed.is_none() {
+        if claims_align && refused.is_none() && since.is_some() && missed.is_none() {
             refused = Some((
                 codes::REPLAY_GAP,
                 "操作日志不完整，无法补发该修订之后的全部提交".to_owned(),
@@ -834,8 +904,19 @@ async fn hello(
                 );
             }
 
+            // The session stands either way; what a refused alignment takes
+            // back is the "consistent" part: nothing is replayed, and every
+            // `op` this connection sends is answered `NOT_ALIGNED`
+            // (`REQ-COLL-015`).
+            if let Some((code, message)) = &refused {
+                println!(
+                    "[ocs_collab_server] hello session={} user={user_id} 对账被拒 code={code}: {message}",
+                    session.session_id
+                );
+            }
             conn.session = Some(session.clone());
             conn.joined = Some(joined);
+            conn.not_aligned = refused.is_some();
             reactions.extend([
                 Reaction::Subscribe {
                     drawing_id: drawing_id.to_owned(),
@@ -847,22 +928,12 @@ async fn hello(
                     claims,
                     repo_id: state.repo_id.clone(),
                     replay_from: missed.as_ref().and(since),
+                    align_refused: refused.map(|(code, message)| AlignRefusal {
+                        code: code.to_owned(),
+                        message,
+                    }),
                 }),
             ]);
-            // The session stands either way; what a refused alignment takes
-            // back is the "consistent" part: the client marks the copy
-            // diverged and stops submitting (`REQ-COLL-015`). Sent right
-            // behind the welcome, before anything else on the socket.
-            if let Some((code, message)) = refused {
-                println!(
-                    "[ocs_collab_server] hello session={} user={user_id} 对账被拒 code={code}: {message}",
-                    session.session_id
-                );
-                reactions.push(Reaction::Send(ServerMessage::AlignRefused {
-                    code: code.to_owned(),
-                    message,
-                }));
-            }
             // What the session missed, each op as the room first heard it,
             // before anything else reaches this socket.
             reactions.extend(missed.unwrap_or_default().into_iter().map(|op| {
@@ -1074,6 +1145,22 @@ async fn op(
             error_message(&code, "会话已失效，无法提交操作"),
             &op_id,
         ))];
+    }
+
+    // An op the drawing has had before is answered with what came of it
+    // (`OFF-4`), before what may be written and by whom is asked: it was
+    // allowed when it came, and a refusal now would have its sender take
+    // back a step the room has.
+    if let Some(outcome) = crate::ops::heard_before(
+        state,
+        session,
+        peer_addr,
+        base_revision,
+        &op_id,
+        &payload,
+        now,
+    ) {
+        return outcome.reactions;
     }
 
     // A session that may not write does not write, whatever its client
@@ -1711,14 +1798,36 @@ mod tests {
         hello
     }
 
-    /// The `align_refused` an answered `hello` carried, if any.
+    /// What the `welcome` of an answered `hello` said against the copy's
+    /// claim to be aligned, `(code, message)`, if it said anything (`OFF-2`:
+    /// the refusal rides in the `welcome`).
     fn refused(reactions: &[Reaction]) -> Option<(String, String)> {
-        reactions.iter().find_map(|reaction| match reaction {
-            Reaction::Send(ServerMessage::AlignRefused { code, message }) => {
-                Some((code.clone(), message.clone()))
+        sends(reactions).iter().find_map(|message| {
+            let wire = serde_json::to_value(message).ok()?;
+            if wire["type"] != "welcome" {
+                return None;
             }
-            _ => None,
+            let refusal = wire.get("align_refused")?;
+            Some((
+                refusal["code"].as_str()?.to_owned(),
+                refusal["message"].as_str()?.to_owned(),
+            ))
         })
+    }
+
+    /// The wire form of every frame `reactions` sends anywhere: to this
+    /// connection, to one session, or to the room.
+    fn wire_of(reactions: &[Reaction]) -> Vec<serde_json::Value> {
+        reactions
+            .iter()
+            .filter_map(|reaction| match reaction {
+                Reaction::Send(message)
+                | Reaction::SendTo { message, .. }
+                | Reaction::Publish { message, .. }
+                | Reaction::Published { message, .. } => serde_json::to_value(message).ok(),
+                _ => None,
+            })
+            .collect()
     }
 
     fn session_id(conn: &Connection) -> String {
@@ -2745,11 +2854,43 @@ mod tests {
         ));
     }
 
+    /// `OFF-4`: what is said to one session alone goes after what its room
+    /// was told before. The answer to an op sent again names the revision it
+    /// took effect at; the revisions in front of it reach the copy first, in
+    /// the order the room was told them, each once.
+    #[test]
+    fn duplicate_op_what_the_room_was_told_before_goes_out_first() {
+        let bus = crate::bus::Bus::new(8);
+        let mut room = bus.subscribe("PID-1101");
+        let applied = |revision: i64| ServerMessage::OpApplied {
+            op_id: format!("op-r-1-{revision}"),
+            revision,
+            changes: vec![],
+        };
+        let me = Peer {
+            session_id: "s-1".into(),
+            user_id: "u1".into(),
+            display_name: "u1".into(),
+        };
+        bus.publish("PID-1101", &applied(1));
+        bus.publish("PID-1101", &ServerMessage::PeerJoined(me));
+        bus.publish("PID-1101", &applied(2));
+
+        assert_eq!(
+            earlier_in_the_room(&mut room, "s-1"),
+            [applied(1), applied(2)]
+        );
+        assert!(
+            earlier_in_the_room(&mut room, "s-1").is_empty(),
+            "each once"
+        );
+    }
+
     /// `REQ-COLL-015`: a `hello` whose copy claims alignment is judged. A
     /// matching repository and a replayable `since` is welcomed with the
     /// room's `repo_id` and the ops it missed; the three ways the claim
-    /// cannot hold are each answered by `align_refused` right behind the
-    /// `welcome` — the session still stands, the copy is not consistent.
+    /// cannot hold are each said in the `welcome` itself (`align_refused`)
+    /// — the session still stands, the copy is not taken as consistent.
     #[tokio::test]
     async fn a_hello_that_claims_alignment_is_judged() {
         let state = state();
@@ -2792,7 +2933,7 @@ mod tests {
         )));
 
         // A copy of another repository: same session treatment, plus a
-        // refusal right behind its welcome.
+        // refusal in its welcome.
         let mut alien = conn();
         let mut alien_hello = hello("u3", "协同编辑", "");
         if let ClientMessage::Hello { repo_id, since, .. } = &mut alien_hello {
@@ -2805,16 +2946,12 @@ mod tests {
             refused(&reactions).map(|(code, _)| code),
             Some(codes::REPO_MISMATCH.to_owned())
         );
-        let sent = sends(&reactions);
-        let order: Vec<&str> = sent
-            .iter()
-            .map(|message| match message {
-                ServerMessage::Welcome { .. } => "welcome",
-                ServerMessage::AlignRefused { .. } => "align_refused",
-                _ => "other",
-            })
+        // There is no frame of its own: it rides in the welcome.
+        let types: Vec<serde_json::Value> = wire_of(&reactions)
+            .into_iter()
+            .map(|wire| wire["type"].clone())
             .collect();
-        assert_eq!(order[..2], ["welcome", "align_refused"]);
+        assert!(!types.contains(&json!("align_refused")), "{types:?}");
 
         // A copy ahead of what this repository has reached.
         let mut ahead = conn();
@@ -2880,5 +3017,188 @@ mod tests {
                 .is_empty(),
             "a refused copy registers no tags"
         );
+    }
+
+    /// `OFF-2`: on a connection whose `hello` was refused, an op is answered
+    /// `NOT_ALIGNED` — by its `op_id`, and not `rejected`: the copy keeps it
+    /// queued and takes nothing back. Nothing reaches the room, and the
+    /// revision does not move.
+    #[tokio::test]
+    async fn an_op_on_a_connection_not_taken_as_aligned_is_answered_not_aligned() {
+        let state = state();
+        let mut alien = conn();
+        let mut alien_hello = hello("u1", "协同编辑", "");
+        if let ClientMessage::Hello { repo_id, since, .. } = &mut alien_hello {
+            *repo_id = Some("r-somebody-else".into());
+            *since = Some(0);
+        }
+        handle_message(&state, &mut alien, alien_hello, T0).await;
+        let op = ClientMessage::Op {
+            session_id: session_id(&alien),
+            base_revision: 0,
+            op_id: "op-alien".into(),
+            payload: json!({"kind": "set_property", "object_ref": "V-1001",
+                "field": "设计压力", "value": "1.6MPa"}),
+        };
+        let reactions = handle_message(&state, &mut alien, op, T0 + 1).await;
+        let wire = wire_of(&reactions);
+        assert_eq!(wire.len(), 1, "{wire:?}");
+        assert_eq!(wire[0]["type"], "error", "{wire:?}");
+        assert_eq!(wire[0]["code"], "NOT_ALIGNED", "{wire:?}");
+        assert_eq!(wire[0]["op_id"], "op-alien", "{wire:?}");
+        assert!(wire[0].get("rejected").is_none(), "{wire:?}");
+        assert_eq!(
+            current_revision(&state, "PID-1101"),
+            0,
+            "the op took no effect"
+        );
+        assert!(
+            store_of(&state)
+                .load_ops("PID-1101", 0)
+                .expect("read the op log")
+                .is_empty(),
+            "the op log has no new row"
+        );
+    }
+
+    /// `OFF-2` (R3 of `SPEC-collab-offline-sync.md` §11.2): a `hello` that
+    /// names no repository is not judged — it is served as it was before
+    /// the repository was named (protocol §7, rule 2): its `since` is
+    /// replayed from, and its tags are registered.
+    #[tokio::test]
+    async fn alignment_is_not_judged_for_a_hello_that_names_no_repository() {
+        let state = state();
+        let mut first = conn();
+        handle_message(&state, &mut first, hello("u1", "协同编辑", ""), T0).await;
+        let op = ClientMessage::Op {
+            session_id: session_id(&first),
+            base_revision: 0,
+            op_id: "op-1".into(),
+            payload: json!({"kind": "set_property", "object_ref": "V-1001",
+                "field": "设计压力", "value": "1.6MPa"}),
+        };
+        handle_message(&state, &mut first, op, T0 + 1).await;
+
+        let mut back = conn();
+        let mut since_only = hello_with("u2", "协同编辑", &["V-1099"]);
+        if let ClientMessage::Hello { since, .. } = &mut since_only {
+            *since = Some(0);
+        }
+        let reactions = handle_message(&state, &mut back, since_only, T0 + 2).await;
+        assert_eq!(refused(&reactions), None);
+        let wire = wire_of(&reactions);
+        let welcome = wire
+            .iter()
+            .find(|frame| frame["type"] == "welcome")
+            .expect("a welcome");
+        assert_eq!(welcome["replay_from"], 0, "{welcome}");
+        assert!(
+            wire.iter()
+                .any(|frame| frame["type"] == "op_applied" && frame["op_id"] == "op-1"),
+            "{wire:?}"
+        );
+        assert!(
+            wire.iter().all(|frame| frame["type"] != "align_refused"),
+            "{wire:?}"
+        );
+        assert_eq!(
+            store_of(&state)
+                .reported_tags("PID-1101")
+                .expect("read reported tags")
+                .len(),
+            1,
+            "its tags are registered"
+        );
+    }
+
+    /// What the binary builds on a database it could not open.
+    fn unavailable_state() -> AppState {
+        let mut state = storeless_state();
+        state.store_unavailable = true;
+        state
+    }
+
+    /// `OFF-11`: with no database the server would keep nothing a session
+    /// did, so it takes none. The `hello` is answered `STORE_UNAVAILABLE`
+    /// and the connection closed: no session, nothing told to the room, no
+    /// tag registered.
+    #[tokio::test]
+    async fn store_unavailable_a_hello_is_refused_and_the_connection_closed() {
+        let state = unavailable_state();
+        let mut conn = conn();
+        let listing = hello_with("u1", "协同编辑", &["V-1001"]);
+        let reactions = handle_message(&state, &mut conn, listing, T0).await;
+        let [Reaction::Send(ServerMessage::Error { code, message, .. }), Reaction::Close] =
+            reactions.as_slice()
+        else {
+            panic!("an error, then the close: {reactions:?}");
+        };
+        assert_eq!(code, codes::STORE_UNAVAILABLE);
+        assert!(message.contains("库"), "{message}");
+        assert!(
+            !message.contains(&state.db_path),
+            "the path stays on the server: {message}"
+        );
+        assert!(conn.session.is_none(), "no session");
+        assert!(crate::ops::reported_tags(&state, "PID-1101", None).is_empty());
+    }
+
+    /// `OFF-11`: a state built in code without a store — what these tests
+    /// call storeless — is not one whose database failed to open. It takes
+    /// sessions as it did, whatever its `db_error` says.
+    #[tokio::test]
+    async fn store_unavailable_is_not_what_a_storeless_state_built_in_code_is() {
+        let bare = AppState::new(None, None, ":memory:", SessionConfig::default());
+        for state in [storeless_state(), bare] {
+            assert!(!state.store_unavailable);
+            let mut conn = conn();
+            let reactions =
+                handle_message(&state, &mut conn, hello("u1", "协同编辑", ""), T0).await;
+            assert!(conn.session.is_some(), "{reactions:?}");
+            assert!(!reactions.contains(&Reaction::Close), "{reactions:?}");
+        }
+    }
+
+    /// `OFF-11`: after a restore from backup the server is started once
+    /// with `--new-repo-id`. A copy that remembers the id from before is
+    /// then of another repository — `REPO_MISMATCH` — even where the room
+    /// has moved on to the very revision it names, which is what made the
+    /// old id dangerous. The same claim under the new id passes.
+    #[tokio::test]
+    async fn new_repo_id_a_drawing_that_remembers_the_old_id_gets_repo_mismatch() {
+        let store = Store::open_in_memory().expect("memory store");
+        let old = store.repo_id().expect("repo id");
+        let renewed = store.renew_repo_id().expect("renewed");
+        let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default());
+        assert_eq!(state.repo_id, renewed);
+
+        let mut first = conn();
+        handle_message(&state, &mut first, hello("u1", "协同编辑", ""), T0).await;
+        let op = ClientMessage::Op {
+            session_id: session_id(&first),
+            base_revision: 0,
+            op_id: "op-1".into(),
+            payload: json!({"kind": "set_property", "object_ref": "V-1001",
+                "field": "设计压力", "value": "1.6MPa"}),
+        };
+        handle_message(&state, &mut first, op, T0 + 1).await;
+
+        let mut remembering = conn();
+        let mut hello_from_before = hello("u2", "协同编辑", "");
+        if let ClientMessage::Hello { repo_id, since, .. } = &mut hello_from_before {
+            *repo_id = Some(old);
+            *since = Some(1);
+        }
+        let reactions = handle_message(&state, &mut remembering, hello_from_before, T0 + 2).await;
+        assert_eq!(
+            refused(&reactions).map(|(code, _)| code),
+            Some(codes::REPO_MISMATCH.to_owned()),
+            "{reactions:?}"
+        );
+
+        let mut current = conn();
+        let hello_now = hello_back(&state, "u3", Some(1));
+        let reactions = handle_message(&state, &mut current, hello_now, T0 + 3).await;
+        assert_eq!(refused(&reactions), None, "{reactions:?}");
     }
 }

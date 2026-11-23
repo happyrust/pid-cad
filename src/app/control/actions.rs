@@ -562,6 +562,7 @@ impl OpenCADStudio {
             ));
         };
         let mut extracted = extracted.map_err(|e| failure("wblock_failed", e))?;
+        Self::without_collab_records(&mut extracted);
         // CF-01.2: optionally shift the export so its overall bounds minimum
         // lands on the origin (SPM.ACAD normalizes cloned drawings to 0,0,0).
         let normalized = req["normalize"].as_bool().unwrap_or(false);
@@ -4582,6 +4583,7 @@ impl OpenCADStudio {
             "dialog_ok" => match self.active_modal {
                 Some(crate::app::ModalKind::Unsaved) => Message::UnsavedDialogSave,
                 Some(crate::app::ModalKind::BlockEditChanges) => Message::BlockEditChangesSave,
+                Some(crate::app::ModalKind::CollabUnsynced) => Message::CollabUnsyncedLeave,
                 Some(crate::app::ModalKind::WriteBlock) => Message::WblockApply,
                 Some(crate::app::ModalKind::XrefAttach) => {
                     Message::XrefAttach(crate::ui::window::xref_attach::XrefAttachMsg::Apply)
@@ -4668,6 +4670,9 @@ impl OpenCADStudio {
                     } else {
                         Message::BlockEditChangesCancel
                     }
+                }
+                Some(crate::app::ModalKind::CollabUnsynced) if name == "dialog_cancel" => {
+                    Message::CollabUnsyncedCancel
                 }
                 _ => return Err(failure("no_dialog", "No dialog with that button is open")),
             },

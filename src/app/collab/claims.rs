@@ -65,17 +65,14 @@ impl OpenCADStudio {
         // that reconnects is no longer downgraded, and a reader of the bounds
         // must not find a badge the panel stopped drawing.
         if self.pid_collab_view.readonly != state.readonly || self.pid_collab_view.peers != peers {
-            crate::ui::wrap_bar::forget_bounds(
-                crate::ui::window::pid_collab::READONLY_BOUNDS_ID,
-            );
-            crate::ui::wrap_bar::forget_bounds(
-                crate::ui::window::pid_collab::HOLDER_BOUNDS_PREFIX,
-            );
+            crate::ui::wrap_bar::forget_bounds(crate::ui::window::pid_collab::READONLY_BOUNDS_ID);
+            crate::ui::wrap_bar::forget_bounds(crate::ui::window::pid_collab::HOLDER_BOUNDS_PREFIX);
         }
-        if self.pid_collab_view.diverged.is_some() != state.diverged.is_some() {
-            crate::ui::wrap_bar::forget_bounds(
-                crate::ui::window::pid_collab::DIVERGED_BOUNDS_ID,
-            );
+        // The badge is worn while the drawing is not the room's: parted
+        // from it, or not taken on the connection that is up.
+        let mismatch = state.mismatch();
+        if self.pid_collab_view.diverged.is_some() != mismatch.is_some() {
+            crate::ui::wrap_bar::forget_bounds(crate::ui::window::pid_collab::DIVERGED_BOUNDS_ID);
         }
         let conflicts: Vec<ConflictRow> = state
             .conflicts
@@ -102,12 +99,18 @@ impl OpenCADStudio {
                 crate::ui::window::pid_collab::CONFLICT_BOUNDS_PREFIX,
             );
         }
+        // The line under the banner, likewise, once nothing is left unsent.
+        let sync = self.collab_sync_line();
+        if self.pid_collab_view.sync.is_some() != sync.is_some() {
+            crate::ui::wrap_bar::forget_bounds(crate::ui::window::pid_collab::SYNC_BOUNDS_ID);
+        }
         self.pid_collab_view = CollabView {
             connected: state.connected,
             server_url: state.server_url.clone(),
             session_id: state.session_id.clone(),
             readonly: state.readonly,
-            diverged: state.diverged.clone(),
+            diverged: mismatch,
+            sync,
             peers,
             conflicts,
             claims,
@@ -216,12 +219,29 @@ impl OpenCADStudio {
                 self.set_collab_setting(CollabSetting::Drawing, value);
                 Some(Task::none())
             }
+            ("UNSYNCED", "") => {
+                self.list_unsynced();
+                Some(Task::none())
+            }
+            ("UNSYNCED", value) if value.eq_ignore_ascii_case("CLEAR") => {
+                self.clear_unsynced();
+                Some(Task::none())
+            }
+            ("EXPORT", value) => {
+                self.export_unsynced(value);
+                Some(Task::none())
+            }
+            ("DETACH", value) if value.is_empty() || value.eq_ignore_ascii_case("FORCE") => {
+                self.detach(!value.is_empty());
+                Some(Task::none())
+            }
             _ => {
                 // The word only: what follows it may be an address, and an
                 // address is not echoed as typed (`shown_address`).
                 self.command_line.push_error(&format!(
                     "PIDCOLLAB: 只接受 ON、OFF、SERVER <ws://主机:端口/ws>、USER <用户>、\
-                     DRAWING <图号>，实得 \"{word}\"。"
+                     DRAWING <图号>、UNSYNCED、UNSYNCED CLEAR、EXPORT <路径>、\
+                     DETACH [FORCE]，实得 \"{word}\"。"
                 ));
                 Some(Task::none())
             }
@@ -284,6 +304,7 @@ impl OpenCADStudio {
                 self.collab.configured_drawing_id = value.clone();
                 if !in_session {
                     self.collab.drawing_id = value.clone();
+                    self.collab.drawing_given = !value.is_empty();
                 }
             }
         }

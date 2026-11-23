@@ -26,6 +26,12 @@ pub struct AppState {
     /// reports 503 instead of pretending everything is fine.
     pub store: Option<Arc<Store>>,
     pub db_error: Option<String>,
+    /// Set by the binary when `--db` could not be opened: every `hello` is
+    /// then answered `STORE_UNAVAILABLE` and its connection closed, since
+    /// nothing a session did would be kept (`SPEC-collab-offline-sync.md`
+    /// §6). A state built in code without a store — the in-memory mode the
+    /// tests use — leaves it unset and takes sessions as before.
+    pub store_unavailable: bool,
     pub db_path: String,
     pub bus: Arc<Bus>,
     pub session_config: SessionConfig,
@@ -62,8 +68,9 @@ pub struct AppState {
     /// The repository's own id (`meta.repo_id`). A drawing file keeps a
     /// copy so a `hello` can prove it is coming back to the repository it
     /// aligned against (`REQ-COLL-015`). With a database it is the stored
-    /// id — stable across restarts; without one it is generated fresh each
-    /// start, so an in-memory run never stands in for a previous one.
+    /// id — stable across restarts until a start with `--new-repo-id`
+    /// replaces it; without one it is generated fresh each start, so an
+    /// in-memory run never stands in for a previous one.
     pub repo_id: String,
     pub version: &'static str,
 }
@@ -82,6 +89,7 @@ impl AppState {
         AppState {
             store: store.map(Arc::new),
             db_error,
+            store_unavailable: false,
             db_path: db_path.into(),
             bus: Arc::new(Bus::default()),
             session_config,

@@ -70,12 +70,14 @@ pub(crate) mod pdf_import;
 mod pdf_password;
 mod pdf_shx_text;
 mod pdf_underlay;
-mod pidbackup;
+pub(in crate::app) mod pidbackup;
 pub(in crate::app) mod pidbackupexport;
 pub(in crate::app) mod pidbackuppdf;
 mod pidbulk;
 mod pidconnector;
+pub(in crate::app) mod pidindex;
 mod pidlegend;
+pub(in crate::app) mod pidmasterdata;
 pub(in crate::app) mod pidmove;
 pub(in crate::app) mod pidpalette;
 mod pidpipe;
@@ -938,6 +940,15 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_pidscreen(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_pidmasterdata(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidindex(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_pidlocate(cmd, i) {
+            return Some(t);
+        }
         None
     }
 
@@ -1625,9 +1636,19 @@ inventory::submit!(crate::command::CommandRegistration {
         "PIDCONNECTOR",
         "PIDFITTING",
         "PIDGROUP",
+        // The P&ID project index (`pid::project_index`): the drawings in the
+        // current drawing's folder, the tags repeated across them and the
+        // off-page connectors paired across them.
+        "PIDINDEX",
         "PIDINSERT",
         "PIDLEGEND",
         "PIDLINE",
+        // Going to a tag anywhere in the project (`commands::pidindex`):
+        // the drawing it is on is opened if need be, and the object selected.
+        "PIDLOCATE",
+        // The project's master data (`pid::master_data`): which copy is in
+        // effect, and making, exporting, importing and embedding it.
+        "PIDMASTERDATA",
         "PIDPAIR",
         "PIDPALETTE",
         "PIDPIPE",

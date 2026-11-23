@@ -782,6 +782,9 @@ impl OpenCADStudio {
         let mut document = crate::io::load_bytes_finalized(&load_path, bytes)
             .map_err(|e| failure("template_failed", e))?;
         document.source_path = Some(path.to_string_lossy().into_owned());
+        // A drawing started from a template is one no room has seen: the sync
+        // records of the drawing the template was saved from stay behind.
+        Self::without_collab_records(&mut document);
         let i = self.active_tab;
         {
             let scene = &mut self.tabs[i].scene;

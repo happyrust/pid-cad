@@ -529,6 +529,323 @@ fn plot_content_extents(content: &PlotContent) -> Option<(f64, f64, f64, f64)> {
         .then_some(bounds)
 }
 
+/// Whether a plot wire has anything in the plot `window` (x0, y0, x1, y1).
+///
+/// The wire's box answers when it reaches the window. It is an f32 box,
+/// though, and a block copy's is its prototype's moved by an f32 sum, so it
+/// can lie a rounding beside the points it stands for. Rounding alone would
+/// then drop a stroke that stands on the window's edge: the outermost stroke
+/// of an extents plot, a frame line a window was snapped to. So a wire its
+/// box puts outside is measured by what it draws, which a copy moves exactly,
+/// before it is left out.
+fn plot_wire_in_window(wire: &crate::scene::WireModel, window: (f64, f64, f64, f64)) -> bool {
+    let (x0, y0, x1, y1) = window;
+    let [left, bottom, right, top] = wire.aabb;
+    if left <= x1 as f32 && right >= x0 as f32 && bottom <= y1 as f32 && top >= y0 as f32 {
+        return true;
+    }
+    // A break in a path is a NaN point: `min` and `max` pass over it.
+    let mut least = [f64::INFINITY; 2];
+    let mut most = [f64::NEG_INFINITY; 2];
+    let mut reach = |high: &[f32; 3], low: Option<&[f32; 3]>| {
+        for axis in 0..2 {
+            let at = f64::from(high[axis]) + low.map_or(0.0, |low| f64::from(low[axis]));
+            least[axis] = least[axis].min(at);
+            most[axis] = most[axis].max(at);
+        }
+    };
+    for (index, point) in wire.points.iter().enumerate() {
+        reach(point, wire.points_low.get(index));
+    }
+    for (index, corner) in wire.fill_tris.iter().enumerate() {
+        reach(corner, wire.fill_tris_low.get(index));
+    }
+    for vertex in &wire.text_verts {
+        reach(&vertex.pos, Some(&vertex.pos_low));
+    }
+    // The window's edges are sums that round as well.
+    let slack = 1e-9
+        * [x0, y0, x1, y1]
+            .iter()
+            .fold(1.0_f64, |size, edge| size.max(edge.abs()));
+    least[0] <= x1 + slack
+        && most[0] >= x0 - slack
+        && least[1] <= y1 + slack
+        && most[1] >= y0 - slack
+}
+
+#[cfg(test)]
+mod plot_window_tests {
+    use super::plot_wire_in_window;
+    use crate::app::OpenCADStudio;
+    use crate::scene::pipeline::text_gpu::TextVertex;
+    use crate::scene::WireModel;
+    use document::entities::{Insert, Line};
+    use document::types::Vector3;
+    use document::EntityType;
+
+    /// A window whose left edge is at an x a drawing puts a stroke on.
+    const WINDOW: (f64, f64, f64, f64) = (66.38663299194862, 20.0, 1779.0, 810.0);
+
+    fn point(x: f64, y: f64) -> ([f32; 3], [f32; 3]) {
+        let (high_x, low_x) = WireModel::split_ds(x);
+        let (high_y, low_y) = WireModel::split_ds(y);
+        ([high_x, high_y, 0.0], [low_x, low_y, 0.0])
+    }
+
+    /// A stroke from `from` to `to` whose box is `aabb`, whatever its points
+    /// say.
+    fn stroke(from: (f64, f64), to: (f64, f64), aabb: [f32; 4]) -> WireModel {
+        let mut wire = WireModel::default();
+        draw(&mut wire, from, to);
+        wire.aabb = aabb;
+        wire
+    }
+
+    /// Another stroke in `wire`, after a break in its path.
+    fn stroke_after_a_break(wire: &mut WireModel, from: (f64, f64), to: (f64, f64)) {
+        wire.points.push([f32::NAN; 3]);
+        wire.points_low.push([0.0; 3]);
+        draw(wire, from, to);
+    }
+
+    fn draw(wire: &mut WireModel, from: (f64, f64), to: (f64, f64)) {
+        for (x, y) in [from, to] {
+            let (high, low) = point(x, y);
+            wire.points.push(high);
+            wire.points_low.push(low);
+        }
+    }
+
+    /// The box tessellation gives a stroke: each coordinate rounded.
+    fn own_box(from: (f64, f64), to: (f64, f64)) -> [f32; 4] {
+        [
+            from.0.min(to.0) as f32,
+            from.1.min(to.1) as f32,
+            from.0.max(to.0) as f32,
+            from.1.max(to.1) as f32,
+        ]
+    }
+
+    #[test]
+    fn a_stroke_on_an_edge_of_the_window_is_plotted_though_its_box_is_a_step_outside() {
+        // What the box of a block copy can come to: its prototype's box
+        // moved by an f32 sum, one f32 step off the stroke it stands for.
+        let (x0, y0, x1, y1) = WINDOW;
+        let (left, bottom) = ((x0 as f32).next_down(), (y0 as f32).next_down());
+        let (right, top) = ((x1 as f32).next_up(), (y1 as f32).next_up());
+        let on_the_edge = [
+            (
+                "left",
+                stroke((x0, 100.0), (x0, 104.0), [left, 100.0, left, 104.0]),
+            ),
+            (
+                "right",
+                stroke((x1, 100.0), (x1, 104.0), [right, 100.0, right, 104.0]),
+            ),
+            (
+                "bottom",
+                stroke((100.0, y0), (104.0, y0), [100.0, bottom, 104.0, bottom]),
+            ),
+            (
+                "top",
+                stroke((100.0, y1), (104.0, y1), [100.0, top, 104.0, top]),
+            ),
+        ];
+        let dropped: Vec<&str> = on_the_edge
+            .iter()
+            .filter(|(_, wire)| !plot_wire_in_window(wire, WINDOW))
+            .map(|(edge, _)| *edge)
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "dropped the stroke on these edges: {dropped:?}"
+        );
+    }
+
+    #[test]
+    fn a_stroke_a_rounding_beside_the_edge_is_plotted() {
+        // Where a block copy stands is a sum of rounded numbers: a stroke
+        // meant for the edge stands a rounding beside it.
+        let (x0, ..) = WINDOW;
+        let x = x0 - 1e-12;
+        let left = (x0 as f32).next_down();
+        let wire = stroke((x, 100.0), (x, 104.0), [left, 100.0, left, 104.0]);
+        assert!(
+            wire.point_world(0, 1.0).x < x0,
+            "the stroke stands outside the edge"
+        );
+        assert!(plot_wire_in_window(&wire, WINDOW));
+    }
+
+    #[test]
+    fn the_low_halves_of_the_points_count() {
+        // This x rounds down as an f32: the high halves alone put the stroke
+        // left of the edge it stands on.
+        let x = 68.17399905035352;
+        let left = (x as f32).next_down();
+        let wire = stroke((x, 10.0), (x, 14.0), [left, 10.0, left, 14.0]);
+        assert!(f64::from(wire.points[0][0]) < x - 1e-6);
+        assert!(plot_wire_in_window(&wire, (x, 0.0, 200.0, 100.0)));
+    }
+
+    #[test]
+    fn a_break_in_the_path_is_passed_over() {
+        // Strokes of one pen share a wire, a NaN point between them.
+        let (x0, ..) = WINDOW;
+        let left = (x0 as f32).next_down();
+        let mut wire = stroke(
+            (x0 - 9.0, 100.0),
+            (x0 - 5.0, 100.0),
+            [left - 9.0, 100.0, left, 104.0],
+        );
+        stroke_after_a_break(&mut wire, (x0, 100.0), (x0, 104.0));
+        assert!(plot_wire_in_window(&wire, WINDOW));
+    }
+
+    /// A triangle that reaches the left edge of `WINDOW` from outside, and a
+    /// box for it that stops one f32 step short of that edge.
+    fn reaching_the_left_edge() -> ([(f64, f64); 3], [f32; 4]) {
+        let (x0, ..) = WINDOW;
+        let left = (x0 as f32).next_down();
+        (
+            [(x0 - 3.0, 100.0), (x0, 100.0), (x0, 104.0)],
+            [left - 3.0, 100.0, left, 104.0],
+        )
+    }
+
+    #[test]
+    fn a_fill_that_reaches_the_edge_is_plotted_though_its_box_stops_short() {
+        let (corners, aabb) = reaching_the_left_edge();
+        let mut fill = WireModel::default();
+        for (x, y) in corners {
+            let (high, low) = point(x, y);
+            fill.fill_tris.push(high);
+            fill.fill_tris_low.push(low);
+        }
+        fill.aabb = aabb;
+        assert!(plot_wire_in_window(&fill, WINDOW));
+    }
+
+    #[test]
+    fn a_text_that_reaches_the_edge_is_plotted_though_its_box_stops_short() {
+        let (corners, aabb) = reaching_the_left_edge();
+        let mut text = WireModel::default();
+        for (x, y) in corners {
+            let (pos, pos_low) = point(x, y);
+            text.text_verts.push(TextVertex {
+                pos,
+                pos_low,
+                uv: [0.0; 2],
+                color: [1.0; 4],
+                draw_depth: 0.0,
+                pen: 0.0,
+            });
+        }
+        text.aabb = aabb;
+        assert!(plot_wire_in_window(&text, WINDOW));
+    }
+
+    #[test]
+    fn what_lies_beside_the_window_is_left_out() {
+        let (x0, y0, x1, y1) = WINDOW;
+        let beside = [
+            ("left of", (x0 - 0.001, 100.0), (x0 - 0.001, 104.0)),
+            ("right of", (x1 + 0.001, 100.0), (x1 + 0.001, 104.0)),
+            ("below", (100.0, y0 - 0.001), (104.0, y0 - 0.001)),
+            ("above", (100.0, y1 + 0.001), (104.0, y1 + 0.001)),
+        ];
+        let kept: Vec<&str> = beside
+            .iter()
+            .filter(|(_, from, to)| {
+                plot_wire_in_window(&stroke(*from, *to, own_box(*from, *to)), WINDOW)
+            })
+            .map(|(side, ..)| *side)
+            .collect();
+        assert!(kept.is_empty(), "kept a stroke that lies {kept:?} it");
+
+        // A break in a path brings nothing in.
+        let (from, to) = ((x0 - 9.0, 100.0), (x0 - 1.0, 104.0));
+        let mut broken = stroke(from, (x0 - 5.0, 100.0), own_box(from, to));
+        stroke_after_a_break(&mut broken, (x0 - 1.0, 100.0), to);
+        assert!(!plot_wire_in_window(&broken, WINDOW));
+
+        // A wire that draws nothing has only its box to go by.
+        let nothing = WireModel {
+            aabb: [0.0, 0.0, 1.0, 1.0],
+            ..WireModel::default()
+        };
+        assert!(!plot_wire_in_window(&nothing, WINDOW));
+    }
+
+    #[test]
+    fn an_extents_plot_draws_every_stroke_of_a_block_copy_that_stands_on_the_extents() {
+        // Two references of one block, placed where a drawing of the test
+        // corpus has them. The second is drawn as a copy of the first. Its
+        // left edge is the leftmost stroke of the drawing, and the box the
+        // copy gets for it lies one f32 step left of the extents.
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let scene = &mut app.tabs[i].scene;
+        let (left, right) = (-42.31999999999999, -0.3199999999999932);
+        let (low, high) = (1.8100000000000023, 5.810000000000002);
+        scene.define_block_raw(
+            "OFF-UNIT",
+            Vector3::ZERO,
+            vec![
+                EntityType::Line(Line::from_coords(left, low, 0.0, right, low, 0.0)),
+                EntityType::Line(Line::from_coords(left, high, 0.0, left, low, 0.0)),
+            ],
+        );
+        let first_at = (110.49399905035351, 362.04267679049275);
+        let copy_at = (108.70663299194861, 621.079492002102);
+        let mut place = |(x, y): (f64, f64)| {
+            scene.add_entity(EntityType::Insert(Insert::new(
+                "OFF-UNIT",
+                Vector3::new(x, y, 0.0),
+            )))
+        };
+        let first = place(first_at);
+        let copy = place(copy_at);
+        app.plot_dialog.paper_space = false;
+        app.plot_dialog.area = "Extents".into();
+        let page = app.extents_plot_job().expect("the extents of the drawing");
+
+        // The strokes the plot draws of a reference, in the block's own
+        // coordinates, in millionths.
+        let millionths = |line: [f64; 4]| line.map(|v| (v * 1e6).round() as i64);
+        let drawn = |reference: document::Handle, at: (f64, f64)| {
+            let name = reference.value().to_string();
+            let mut strokes = Vec::new();
+            for wire in page.content.wires.iter().filter(|wire| wire.name == name) {
+                let points: Vec<_> = (0..wire.points.len())
+                    .map(|index| wire.point_world(index, 1.0))
+                    .collect();
+                for ends in points.windows(2) {
+                    if ends[0].is_finite() && ends[1].is_finite() {
+                        strokes.push(millionths([
+                            ends[0].x - at.0,
+                            ends[0].y - at.1,
+                            ends[1].x - at.0,
+                            ends[1].y - at.1,
+                        ]));
+                    }
+                }
+            }
+            strokes.sort_unstable();
+            strokes
+        };
+        let block = [[left, low, right, low], [left, high, left, low]].map(millionths);
+        assert_eq!(drawn(first, first_at), block, "the first reference");
+        assert_eq!(
+            drawn(copy, copy_at),
+            block,
+            "its copy, whose left edge stands on the extents"
+        );
+    }
+}
+
 /// Stamp the owning entity's effective color index onto a plot wire so CTB
 /// plot-style lookups (`wire.aci > 0`) apply.
 ///
@@ -2082,8 +2399,14 @@ impl OpenCADStudio {
     }
 
     pub(in crate::app) fn next_open_id(&mut self) -> u64 {
-        self.open_job_serial = self.open_job_serial.wrapping_add(1).max(1);
+        self.open_job_serial = self.open_id_to_come();
         self.open_job_serial
+    }
+
+    /// The id the next open will go by, without starting one: what
+    /// [`Self::next_open_id`] gives when it is asked next.
+    pub(in crate::app) fn open_id_to_come(&self) -> u64 {
+        self.open_job_serial.wrapping_add(1).max(1)
     }
 
     /// Index of a tab already showing `path`, or `None`.
@@ -2853,7 +3176,21 @@ impl OpenCADStudio {
                     .as_ref(),
                 );
             }
+            // Said only when it happened as well: a border template the
+            // drawing links and the import did not draw. The sheet has
+            // opened without its frame and title block, which looks no
+            // different from a drawing that has none. A warning and not
+            // an error: the drawing itself is whole, and automation reads
+            // an error as a failed open.
+            if let Some(not_drawn) = &summary.template_not_drawn {
+                self.command_line.push_warning(&not_drawn.headline());
+            }
         }
+        // A drawing the backup panel asked for takes the tags the backup's
+        // database gives the items of its symbols: here, before it is
+        // shown, when they have been read; when they arrive, when not.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.tag_the_drawing_the_backup_opened(i);
         self.tabs[i].active_layer = self.tabs[i]
             .scene
             .document
@@ -3200,6 +3537,7 @@ impl OpenCADStudio {
             }
             .map_err(|error| error.to_string())?;
             extracted.header.insertion_units = unit;
+            Self::without_collab_records(&mut extracted);
             Ok(extracted)
         };
         #[cfg(not(target_arch = "wasm32"))]
@@ -3610,16 +3948,47 @@ impl OpenCADStudio {
     /// ops the room has not answered. Written into the save snapshot only:
     /// the live document's dirty flag and undo stack are untouched, and a
     /// drawing no repository has claimed keeps no record.
-    fn write_collab_state_into_snapshot(&mut self, i: usize, snapshot: &mut document::Document) {
+    ///
+    /// What the drawing is known to be apart from the room for rides with
+    /// the record (`diverged`; `SPEC-collab-offline-sync.md` §5.1): the
+    /// mark it was read with or this run gave it, else `UNQUEUED_EDITS` when
+    /// edits no queue took were made on it, which go on its unsynced list.
+    /// Ops restored from its file that the room refused go there too, and
+    /// mark nothing (§5.4). A drawing that is not the session's keeps its
+    /// record's three as they were read.
+    ///
+    /// Every exit that writes the whole drawing calls this on the copy it
+    /// writes; one that writes another drawing out of it calls
+    /// [`Self::without_collab_records`] instead.
+    pub(in crate::app) fn write_collab_state_into_snapshot(
+        &mut self,
+        i: usize,
+        snapshot: &mut document::Document,
+    ) {
+        let unqueued = self
+            .collab
+            .unqueued_for_save(self.tabs[i].id)
+            .map(|(entries, mark)| (entries.to_vec(), mark));
+        let refused = self
+            .collab
+            .refused
+            .get(&self.tabs[i].id)
+            .cloned()
+            .unwrap_or_default();
         if self.collab_tab() == Some(i) && self.collab.had_session {
             if let Some(repo_id) = self.collab.repo_id.clone() {
-                crate::pid::collab_state::store_state(
+                let diverged = self
+                    .collab
+                    .diverged_record()
+                    .or_else(|| unqueued.as_ref().map(|(_, mark)| mark.clone()));
+                crate::pid::collab_state::store_state_diverged(
                     snapshot,
                     Some(&crate::pid::FileCollabState {
                         drawing_id: self.collab.drawing_id.clone(),
                         repo_id,
                         revision: self.collab.base_revision,
                     }),
+                    diverged.as_ref(),
                 );
                 let queued: Vec<crate::pid::QueuedOp> = self
                     .collab
@@ -3631,11 +4000,50 @@ impl OpenCADStudio {
                         base_revision: entry.base_revision,
                         on: entry.on,
                         label: entry.label.clone(),
+                        user_id: entry.user_id.clone(),
+                        queued_at: entry.queued_at,
+                        inverse: entry.inverse.clone(),
                     })
                     .collect();
-                crate::pid::collab_state::store_queue(snapshot, &queued);
+                crate::pid::collab_state::store_queue_keeping(
+                    snapshot,
+                    &queued,
+                    &self.collab.unreadable_queue,
+                );
+                if let Some((entries, _)) = &unqueued {
+                    crate::pid::collab_state::append_unsynced(snapshot, entries);
+                }
+                if !refused.is_empty() {
+                    crate::pid::collab_state::append_unsynced(snapshot, &refused);
+                }
+                return;
             }
         }
+        if unqueued.is_none() && refused.is_empty() {
+            return;
+        }
+        let Some(record) = crate::pid::collab_state::load_state(snapshot) else {
+            return;
+        };
+        if let Some((entries, mark)) = unqueued {
+            let kept = crate::pid::collab_state::load_diverged(snapshot);
+            let mark = kept.unwrap_or(mark);
+            crate::pid::collab_state::store_state_diverged(snapshot, Some(&record), Some(&mark));
+            crate::pid::collab_state::append_unsynced(snapshot, &entries);
+        }
+        if !refused.is_empty() {
+            crate::pid::collab_state::append_unsynced(snapshot, &refused);
+        }
+    }
+
+    /// A block, objects or the whole drawing written out make another
+    /// drawing, one no room has seen: it carries none of the three sync
+    /// records, whatever the drawing it came from or a template it was
+    /// written onto had.
+    pub(in crate::app) fn without_collab_records(drawing: &mut document::Document) {
+        crate::pid::collab_state::store_state(drawing, None);
+        crate::pid::collab_state::store_queue(drawing, &[]);
+        crate::pid::collab_state::store_unsynced(drawing, &[]);
     }
 
     /// Point the drawing at the file it now lives in. The fields that report
@@ -4730,7 +5138,7 @@ impl OpenCADStudio {
                     tasks.push(self.open_unsaved_dialog_window());
                 } else {
                     tasks.push(self.close_unsaved_dialog_window());
-                    tasks.push(self.exit_app());
+                    tasks.push(self.quit_unless_unsynced());
                 }
             }
             crate::app::SaveContinuation::CloseTab => {
@@ -9532,18 +9940,13 @@ impl OpenCADStudio {
             origin_y
         };
         let scene = &self.tabs[i].scene;
-        let (wx0, wy0, wx1, wy1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
         let mut content = plot_scene_content(
             scene,
             self.plot_dialog.paperspace_last,
             plot_render_mode_override(&self.plot_dialog),
         );
         let in_window = |wire: &crate::io::pdf_export::PlotWire| {
-            wire.name != "paper_printable_area"
-                && wire.aabb[0] <= wx1
-                && wire.aabb[2] >= wx0
-                && wire.aabb[1] <= wy1
-                && wire.aabb[3] >= wy0
+            wire.name != "paper_printable_area" && plot_wire_in_window(wire, window)
         };
         content.group_splits.wires = content.wires
             [..content.group_splits.wires.min(content.wires.len())]
@@ -13074,6 +13477,283 @@ mod minimized_save_tests {
         assert_eq!(
             app.pid_shell.theme,
             crate::ui::style::pid_tokens::PidTheme::Light
+        );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod pid_import_lines_tests {
+    use crate::app::{Message, OpenCADStudio, OpenProgress};
+    use crate::i18n::Language;
+    use crate::io::pid::{
+        imported_sheet_counted, imported_sheet_summarised, TemplateGap, TemplateNotDrawn,
+    };
+    use crate::ui::command_line::EntryKind;
+
+    const SHEET: (f64, f64) = (594.0, 420.0);
+
+    /// The six counts of the import's headline in the order the English
+    /// sentence has them: entities drawn, decoded records, source records
+    /// not drawn, entities on the drawing's own layers, those layers, and
+    /// the ones among them whose name did not resolve. No two are the same
+    /// number, so one in another's place shows.
+    const COUNTS: [usize; 6] = [335, 206, 12, 309, 7, 1];
+
+    /// The headline of [`COUNTS`] as an English interface is told it.
+    const ENGLISH: &str = "P&ID import: 335 entities from 206 decoded records; 12 source records not drawn; 309 entities on 7 authored sheet layers (1 unresolved)";
+
+    /// The same headline as a Chinese interface is told it.
+    const CHINESE: &str = "P&ID 导入：从 206 条已解码记录画出 335 个实体；12 条源记录未绘制；309 个实体在 7 个原图图层上（1 个未解析）";
+
+    /// What the command line gained when a `.pid` whose import had
+    /// `template_not_drawn` to say finished opening: the kind and the text
+    /// of each entry, in order.
+    fn lines_after_opening(
+        tag: &str,
+        template_not_drawn: Option<TemplateNotDrawn>,
+    ) -> Vec<(EntryKind, String)> {
+        lines_after_opening_sheet(
+            tag,
+            imported_sheet_summarised(SHEET, template_not_drawn),
+            None,
+        )
+    }
+
+    /// What the command line gained when `document`, a `.pid` as its import
+    /// leaves it, finished opening: the kind and the text of each entry, in
+    /// order. The drawing arrives through the message the open pipeline ends
+    /// with, carrying its import's summary the way the reader leaves it.
+    /// Given a `language`, the interface speaks it by the time the drawing
+    /// arrives.
+    fn lines_after_opening_sheet(
+        tag: &str,
+        document: document::Document,
+        language: Option<Language>,
+    ) -> Vec<(EntryKind, String)> {
+        // A real file, as the handler is given one. No "template" in the
+        // folder's name: a folder so named under the temp directory is a
+        // template root for the drawings a backup unpacks there.
+        let folder = std::env::temp_dir().join(format!(
+            "ocs-pid-import-lines-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&folder).expect("scratch dir");
+        let file = folder.join("sheet.pid");
+        std::fs::write(&file, b"bytes enough to be a real file on disk").expect("write");
+
+        let mut app = OpenCADStudio::new_for_test();
+        // After the application is up: starting it sets the configured
+        // language.
+        if let Some(language) = language {
+            crate::i18n::set_language(language).expect("Fluent resources must parse");
+        }
+        let before = app.command_line.history.len();
+        let name = "sheet.pid".to_string();
+        let caches = crate::scene::build_derived_caches_with_progress(&document, &|_| {}, None);
+        app.opening = Some(OpenProgress {
+            id: 7,
+            name: name.clone(),
+            source_path: Some(file.clone()),
+            size_bytes: 0,
+            state: std::sync::Arc::new(crate::io::OpenProgressState::new(
+                crate::app::OPEN_PHASE_CACHING,
+            )),
+            started: std::time::Instant::now(),
+            recovery_error: None,
+            recovery_read_stats: None,
+            fingerprint: None,
+        });
+        let _ = app.update(Message::FileOpened(
+            7,
+            Ok((name, file, document, caches, None)),
+        ));
+        let _ = std::fs::remove_dir_all(&folder);
+        app.command_line.history[before..]
+            .iter()
+            .map(|entry| (entry.kind.clone(), entry.text.clone()))
+            .collect()
+    }
+
+    /// A drawing that links a border template the import could not draw is
+    /// told so on the command line once it has opened: one line, a warning,
+    /// after the import's own lines, naming the template.
+    #[test]
+    fn a_template_not_drawn_is_said_on_the_command_line_after_the_import_lines() {
+        let not_drawn = TemplateNotDrawn {
+            named: "CPE-SQ~2.IGR".to_string(),
+            why: TemplateGap::NoFile,
+        };
+        let said = not_drawn.headline();
+        assert!(said.contains("CPE-SQ~2.IGR"), "{said}");
+        let lines = lines_after_opening("said", Some(not_drawn));
+        let about_it: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, text))| text.contains(&said))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(about_it.len(), 1, "said once: {lines:?}");
+        let at = about_it[0];
+        assert_eq!(lines[at].0, EntryKind::Warning, "{lines:?}");
+        let unit_note = lines
+            .iter()
+            .position(|(_, text)| text.contains("the metre was assumed"))
+            .expect("the import's note on the unit");
+        assert!(unit_note < at, "after the import's own lines: {lines:?}");
+    }
+
+    /// A drawing whose import has nothing to say of a border template -- it
+    /// links none, or wears the one it links -- gets the import's lines and
+    /// none about a template.
+    #[test]
+    fn a_drawing_with_nothing_to_say_of_its_template_gets_no_such_line() {
+        let lines = lines_after_opening("silent", None);
+        assert!(
+            lines
+                .iter()
+                .any(|(_, text)| text.contains("decoded records")),
+            "the import's headline is there: {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|(_, text)| text.contains("border template")),
+            "{lines:?}"
+        );
+    }
+
+    /// A sheet whose import counted [`COUNTS`] for its headline, and five
+    /// sheet layer names of which two start switched off for the line after
+    /// it.
+    fn counted_sheet() -> document::Document {
+        imported_sheet_counted(SHEET, |summary| {
+            summary.drawn = COUNTS[0];
+            summary.decoded = COUNTS[1];
+            summary.missing = COUNTS[2];
+            summary.layered_entities = COUNTS[3];
+            summary.sheet_layers = COUNTS[4];
+            summary.unresolved_sheet_layers = COUNTS[5];
+            summary.sheet_layer_names = 5;
+            summary.sheet_layers_off = 2;
+        })
+    }
+
+    /// The numbers `text` names, smallest first.
+    fn numbers_in(text: &str) -> Vec<usize> {
+        let mut numbers: Vec<usize> = text
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|digits| digits.parse().ok())
+            .collect();
+        numbers.sort_unstable();
+        numbers
+    }
+
+    /// Where the import's headline is among `lines`: the entries that name
+    /// its six counts and no other number, in whatever order the language of
+    /// the interface has them.
+    fn headlines(lines: &[(EntryKind, String)]) -> Vec<usize> {
+        let mut counts = COUNTS.to_vec();
+        counts.sort_unstable();
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, text))| numbers_in(text) == counts)
+            .map(|(at, _)| at)
+            .collect()
+    }
+
+    /// A line of information without the mark the command line puts before
+    /// one.
+    fn told(text: &str) -> &str {
+        text.strip_prefix("ⓘ ").unwrap_or(text)
+    }
+
+    /// The first thing the command line says of an import is its headline:
+    /// how many entities were drawn from how many decoded records, how many
+    /// source records were not drawn, and how many entities sit on how many
+    /// of the drawing's own layers. It is said once, as information, each
+    /// count where the sentence has it, and the line of the sheet layers
+    /// comes right after it.
+    #[test]
+    fn the_import_headline_names_its_six_counts_each_in_its_place() {
+        let lines = lines_after_opening_sheet("headline", counted_sheet(), None);
+        let said = headlines(&lines);
+        assert_eq!(said.len(), 1, "said once: {lines:?}");
+        let (kind, text) = &lines[said[0]];
+        assert_eq!(*kind, EntryKind::Info, "{lines:?}");
+        assert_eq!(told(text), ENGLISH);
+        let after = lines.get(said[0] + 1).map(|(_, text)| numbers_in(text));
+        assert_eq!(after, Some(vec![2, 5]), "the sheet layers next: {lines:?}");
+    }
+
+    /// In every language of the interface the headline is said once and
+    /// names its six counts -- no catalog drops one or leaves a placeholder
+    /// -- and only an English interface is told it in English: a Chinese one
+    /// is told it in Chinese, word for word. The language is one loader for
+    /// the whole process, so this runs in a child process of the test
+    /// binary.
+    #[test]
+    fn the_import_headline_speaks_the_ui_language() {
+        const CHILD: &str = "OCS_PID_IMPORT_HEADLINE_CHILD";
+        const NAME: &str =
+            "app::update::file::pid_import_lines_tests::the_import_headline_speaks_the_ui_language";
+        if std::env::var_os(CHILD).is_none() {
+            let program = std::env::current_exe().expect("the test binary has a path");
+            let output = std::process::Command::new(program)
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .expect("the test binary must start");
+            assert!(
+                output.status.success(),
+                "the child run failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let mut wrong = Vec::new();
+        for language in Language::ALL {
+            if language == Language::System {
+                continue;
+            }
+            let lines = lines_after_opening_sheet("spoken", counted_sheet(), Some(language));
+            if lines.iter().any(|(_, text)| text.contains("__ocs_fmt_")) {
+                wrong.push(format!("{language:?} leaves a placeholder: {lines:?}"));
+            }
+            let said = headlines(&lines);
+            if said.len() != 1 {
+                wrong.push(format!(
+                    "{language:?} names the six counts in {} lines, not one: {lines:?}",
+                    said.len()
+                ));
+                continue;
+            }
+            let (kind, text) = &lines[said[0]];
+            let text = told(text);
+            if *kind != EntryKind::Info {
+                wrong.push(format!(
+                    "{language:?} does not say it as information: {text}"
+                ));
+            }
+            match language {
+                Language::EnUs if text != ENGLISH => wrong.push(format!("EnUs: {text}")),
+                Language::ZhCn if text != CHINESE => wrong.push(format!("ZhCn: {text}")),
+                Language::EnUs | Language::ZhCn => {}
+                _ if text == ENGLISH => wrong.push(format!("{language:?} is told in English")),
+                _ => {}
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} wrong:\n{}",
+            wrong.len(),
+            wrong.join("\n")
         );
     }
 }

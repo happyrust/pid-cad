@@ -332,6 +332,79 @@ impl Change {
     pub fn is_structural(&self) -> bool {
         self.kind == KIND_INSERT_SYMBOL || self.kind == KIND_DELETE_OBJECT || self.pipe.is_some()
     }
+
+    /// The tags this is about: the object it names, the tag a retag gives
+    /// it, and for a run the line it is on and the fittings on it that
+    /// have a tag of their own.
+    pub fn names(&self) -> Vec<String> {
+        let mut names = vec![self.object_ref.clone()];
+        if self.kind == KIND_SET_TAG || self.kind == KIND_REASSIGN_TAG {
+            names.push(self.value.clone());
+        }
+        if let Some(super::pipes::Pipe::Run(said)) = &self.pipe {
+            names.push(said.line_tag.clone());
+            names.extend(said.fitting.iter().filter_map(|(_, _, tag)| tag.clone()));
+            names.extend(
+                said.run
+                    .fittings
+                    .iter()
+                    .filter_map(|fitting| fitting.tag.clone()),
+            );
+        }
+        names.retain(|name| !name.is_empty());
+        names
+    }
+
+    /// The tags a later step is built on when it names one of them
+    /// (`SPEC-collab-offline-sync.md` §5.4): what this made, renamed or
+    /// erased, the line or run it is about. A field it wrote is none: a
+    /// later write to the same object stands on its own.
+    pub fn built_names(&self) -> Vec<String> {
+        if self.kind == KIND_SET_PROPERTY {
+            return Vec::new();
+        }
+        self.names()
+    }
+}
+
+/// Whether `doc` is still as `change` left it (`SPEC-collab-offline-sync.md`
+/// §5.4): the field holds the value written, something carries the tag a
+/// retag gave, the symbol placed is there, nothing carries the tag of the
+/// object erased, a line or run is as stated, the connector made is there
+/// and the one taken away is not. A refused step's inverse is written only
+/// where it holds: what somebody else did on top of it since stays.
+pub fn still_as_written(doc: &Document, change: &Change) -> bool {
+    let carries = |tag: &str| {
+        doc.entities()
+            .any(|entity| PidAuthor::from_entity(entity).is_some_and(|author| author.tag == tag))
+    };
+    match &change.pipe {
+        Some(super::pipes::Pipe::Connector(said)) => {
+            return super::connectors::as_said(doc, change, said);
+        }
+        Some(_) => return super::pipes::as_said(doc, change),
+        None => {}
+    }
+    match change.kind.as_str() {
+        KIND_SET_PROPERTY => {
+            let targets = resolve(doc, change);
+            !targets.is_empty()
+                && targets.iter().all(|handle| {
+                    PidAuthor::load(doc, *handle).is_some_and(|author| {
+                        let (values, _) = split_props(&author.props);
+                        values
+                            .get(&change.field)
+                            .map(String::as_str)
+                            .unwrap_or_default()
+                            == change.value
+                    })
+                })
+        }
+        KIND_SET_TAG | KIND_REASSIGN_TAG => carries(&change.value),
+        KIND_INSERT_SYMBOL => !resolve(doc, change).is_empty(),
+        KIND_DELETE_OBJECT => !carries(&change.object_ref),
+        _ => false,
+    }
 }
 
 /// Whether `entity` is a symbol standing on its own: an `Insert` carrying an

@@ -6,7 +6,9 @@ use super::*;
 /// entities: the counts the report and the summary state, and the extent
 /// the camera is framed on.
 pub(super) struct Built {
-    /// Entities handed to the document.
+    /// Entities the drawing's records drew. What a symbol placement draws
+    /// counts for every placement, though placements that draw the same
+    /// share one block definition.
     pub(super) drawn: usize,
     /// Decoded source records those entities came from.
     pub(super) decoded: usize,
@@ -22,16 +24,47 @@ pub(super) struct Built {
     /// The sheet layers the drawing draws nothing of, by name: what the view
     /// filter starts with switched off.
     pub(super) sheet_layers_off: BTreeSet<String>,
+    /// Symbol placements filed as block references.
+    pub(super) symbol_blocks: usize,
+    /// The block definitions those references share.
+    pub(super) symbol_definitions: usize,
+    /// The references the drawing file states a plant item for.
+    pub(super) symbol_items: usize,
+    /// The references that carry a tag (`label`).
+    pub(super) symbol_tags: usize,
+    /// Loose texts whose label hangs on a symbol of the sheet.
+    pub(super) symbol_labels: usize,
+    /// Loose texts whose label hangs on a line or on anything else.
+    pub(super) other_labels: usize,
     /// The extent of the decoded geometry, for framing.
     pub(super) bounds: Bounds,
+}
+
+/// What the drawing file says its graphics are, beside what they draw: the
+/// tables [`build_document_entities`] reads a symbol's plant item and a
+/// label's owner from.
+#[derive(Clone, Copy)]
+pub(super) struct Stated<'a> {
+    /// The plant item behind each placed symbol.
+    pub(super) items: &'a SheetItems,
+    /// What each label text of the sheet hangs on.
+    pub(super) labels: &'a SheetLabels,
 }
 
 /// Build every entity of the drawing and file it into `doc` under the layer
 /// the drawing filed it under, styled from `lookups` and drawn from the
 /// bodies the drawing caches or `library` stands in with.
+///
+/// A symbol placement is filed as one block reference, and what it draws is
+/// in the block definition that reference names (see [`SymbolBlocks`]). The
+/// reference also states what the symbol is: the plant item `stated.items`
+/// gives for its graphic (see [`attach_symbol_identity`]). A loose text
+/// that is a label's states what the label hangs on, as `stated.labels`
+/// pairs them (see [`attach_label_owner`]).
 pub(super) fn build_document_entities(
     geometry: &NormalizedPidGeometry,
     lookups: &Styles,
+    stated: Stated<'_>,
     library: &mut Option<SymbolLibrary>,
     unit: &ImportUnit,
     doc: &mut Document,
@@ -47,6 +80,7 @@ pub(super) fn build_document_entities(
         semantics,
         ..
     } = lookups;
+    let Stated { items, labels } = stated;
     let projection = Projection::for_geometry(geometry, unit);
     let mut bounds = Bounds::new(projection);
     let mut decoded = 0usize;
@@ -63,6 +97,20 @@ pub(super) fn build_document_entities(
     // Rings the file stores twice -- identical fill, identical vertices --
     // draw once, the way the reference plots draw them.
     let mut seen_fill_rings: HashSet<u64> = HashSet::new();
+    // The block definitions the symbol placements are filed into, kept so
+    // that placements which draw the same thing share one.
+    let mut blocks = SymbolBlocks::default();
+    // References the file states a plant item for, and references that end
+    // up carrying a tag; see `ImportSummary`.
+    let mut symbol_items = 0usize;
+    let mut symbol_tags = 0usize;
+    // What a label text hangs on is settled once every record is filed: a
+    // label may be drawn before the symbol it hangs on, and it hangs on a
+    // symbol only where that symbol was filed as a reference. Kept until
+    // then: the references filed, by stream and graphic, and the label
+    // texts filed, each with the graphic the file hangs its label on.
+    let mut placed: HashSet<(&str, u32)> = HashSet::new();
+    let mut labelled: Vec<(document::Handle, &str, u32)> = Vec::new();
     for entity in &geometry.entities {
         // A boundary ring is the one kind whose style decides its shape rather
         // than its colour: filled, it is an area; unfilled, it is an outline
@@ -96,6 +144,15 @@ pub(super) fn build_document_entities(
                 definition: Some(definition),
                 ..
             } => geometry.symbol_definition(*definition),
+            _ => None,
+        };
+        // The stream the record lies in. A record's number is its stream's
+        // own, so a label and what it hangs on are matched within one.
+        let stream = entity.source.stream_path.as_deref().unwrap_or_default();
+        // The graphic this record's label hangs on, where the record is a
+        // text of a label; see `SheetLabels`.
+        let hung_on = match (&entity.kind, entity.graphic_oid) {
+            (PidGraphicKind::Text { .. }, Some(text)) => labels.hung_on(stream, text),
             _ => None,
         };
         let built = match entity.confidence {
@@ -192,6 +249,19 @@ pub(super) fn build_document_entities(
         if measures.as_ref().is_some_and(|m| m.driving.is_some()) {
             parametric_placements += 1;
         }
+        // A symbol placement is filed as one block reference rather than as
+        // the loose entities it draws: those are collected here, styled and
+        // filed exactly as before, and go into a block definition once the
+        // last of them is built (plan 2026-11-19-pid-symbol-block).
+        let placement = match &entity.kind {
+            PidGraphicKind::SymbolInstance {
+                insertion,
+                symbol_path,
+                ..
+            } => Some((insertion, symbol_path.as_deref())),
+            _ => None,
+        };
+        let mut members: Vec<EntityType> = Vec::new();
         for mut one in built {
             if let Some(style) = symbology {
                 apply_symbology(&mut one, style, dash_linetypes, paper_style_scale);
@@ -224,14 +294,22 @@ pub(super) fn build_document_entities(
             // says where the drawing filed the entity, and `PID-HIDDEN` where
             // it hid one -- neither says what it is.
             let role = role_of_layer(&one.common().layer);
-            attach_pid_metadata(
-                &mut one,
-                semantic_hit.as_ref(),
-                entity.source_layer.as_ref(),
-                role,
-                style_name,
-                measures.as_ref(),
-            );
+            if placement.is_some() {
+                // What a placement says -- where the drawing filed it, the
+                // style it draws with, its measures, the plant item it
+                // stands for -- it says once, on its reference below. A
+                // member keeps only what it is.
+                attach_pid_metadata(&mut one, None, None, role, None, None);
+            } else {
+                attach_pid_metadata(
+                    &mut one,
+                    semantic_hit.as_ref(),
+                    entity.source_layer.as_ref(),
+                    role,
+                    style_name,
+                    measures.as_ref(),
+                );
+            }
             let source_layer = entity.source_layer.as_ref();
             let hidden = source_layer.is_some_and(sheet_layer_is_hidden);
             let authored_name = source_layer.and_then(|layer| layer.name.as_deref());
@@ -244,8 +322,8 @@ pub(super) fn build_document_entities(
                 // A symbol's own label is the exception: it is lettering the
                 // importer adds beside a placement, not content the drawing
                 // has on that sheet layer, and it ships switched off for a
-                // reason (`LAYER_SYMBOL_LABEL`). It keeps its layer, and its
-                // `sheet_layer=` still says which placement it belongs to.
+                // reason (`LAYER_SYMBOL_LABEL`). It keeps its layer, inside
+                // the block of the placement it belongs to.
                 Some(name) if role != Some("symbol-label") => {
                     one.common_mut().layer = name.to_string();
                     // `ConsistencyChecks` is the vendor's review-overlay
@@ -261,7 +339,8 @@ pub(super) fn build_document_entities(
                 }
                 // The label of a placement on a hidden sheet layer is not
                 // moved either: its layer is already off, and the view filter
-                // darkens it by its `sheet_layer=` like the body.
+                // darkens the reference it is drawn through by that
+                // reference's `sheet_layer=`.
                 Some(_) => {
                     ensure_taxonomy_layer(doc, &one.common().layer.clone());
                 }
@@ -287,7 +366,85 @@ pub(super) fn build_document_entities(
                     sheet_layers_off.insert(name.to_string());
                 }
             }
-            let _ = doc.add_entity(one);
+            if placement.is_some() {
+                members.push(one);
+            } else {
+                let filed = doc.add_entity(one);
+                // A label's text states what it hangs on after the loop.
+                if let (Some(graphic), Ok(handle)) = (hung_on, filed) {
+                    labelled.push((handle, stream, graphic));
+                }
+            }
+        }
+        if let Some((insertion, symbol_path)) = placement {
+            let source_layer = entity.source_layer.as_ref();
+            // The reference is filed where the loop above filed the body, and
+            // a member filed there too floats on layer `0` instead: it then
+            // shows and hides with its reference, and placements of one
+            // symbol on different sheet layers still draw the same and share
+            // a definition. A member filed anywhere else -- the name beside
+            // the body, a fill under no authored layer -- keeps its layer.
+            let layer = placement_layer(&members, source_layer);
+            ensure_taxonomy_layer(doc, &layer);
+            for member in &mut members {
+                if member.common().layer == layer {
+                    member.common_mut().layer = LAYER_FLOATING.to_string();
+                }
+            }
+            let name = symbol_path.and_then(symbol_name);
+            let origin = projection.point(insertion);
+            let reference = blocks.place(doc, name.as_deref(), origin, members);
+            let mut reference = EntityType::Insert(reference);
+            reference.common_mut().layer = layer;
+            // The reference says what every entity of the placement used to
+            // say, and as a whole it is the symbol, whatever its members are.
+            attach_pid_metadata(
+                &mut reference,
+                semantic_hit.as_ref(),
+                source_layer,
+                Some("symbol"),
+                style_name,
+                measures.as_ref(),
+            );
+            if let Some(name) = name.as_deref() {
+                attach_symbol_name(&mut reference, name);
+            }
+            // And what the drawing file itself says the symbol is: the plant
+            // item its graphic draws.
+            let item = entity
+                .graphic_oid
+                .and_then(|graphic_oid| items.item_of(graphic_oid));
+            symbol_items += usize::from(item.is_some());
+            if attach_symbol_identity(&mut reference, entity.graphic_oid, item) {
+                symbol_tags += 1;
+            }
+            let filed = doc.add_entity(reference);
+            if let (Some(graphic), Ok(_)) = (entity.graphic_oid, filed) {
+                placed.insert((stream, graphic));
+            }
+        }
+    }
+    // Each label text says what it hangs on: a symbol, where the graphic the
+    // file names was filed as a reference of the text's own stream; failing
+    // that a line, where the graphic is a run of line; anything else
+    // otherwise.
+    let mut symbol_labels = 0usize;
+    let mut other_labels = 0usize;
+    for (handle, stream, graphic) in labelled {
+        let on = if placed.contains(&(stream, graphic)) {
+            LabelOn::Symbol
+        } else if labels.is_run(stream, graphic) {
+            LabelOn::Line
+        } else {
+            LabelOn::Other
+        };
+        let Some(text) = doc.get_entity_mut(handle) else {
+            continue;
+        };
+        attach_label_owner(text, graphic, on);
+        match on {
+            LabelOn::Symbol => symbol_labels += 1,
+            LabelOn::Line | LabelOn::Other => other_labels += 1,
         }
     }
     Built {
@@ -298,7 +455,43 @@ pub(super) fn build_document_entities(
         parametric_placements,
         sheet_layer_distribution,
         sheet_layers_off,
+        symbol_blocks: blocks.references,
+        symbol_definitions: blocks.definitions,
+        symbol_items,
+        symbol_tags,
+        symbol_labels,
+        other_labels,
         bounds,
+    }
+}
+
+/// The layer a block's members float on: what is on layer `0` inside a block
+/// shows on whatever layer the block's reference is on.
+const LAYER_FLOATING: &str = "0";
+
+/// The layer a placement's block reference is filed under, given the
+/// `members` it draws on the layers the entity loop filed them under.
+///
+/// It is the layer the placement's body was filed under: the authored sheet
+/// layer when the drawing names one, `PID-HIDDEN` for a hidden layer with no
+/// name to be off under, `PID-SYMBOL` otherwise. A placement that draws
+/// nothing but the name beside it -- a label symbol whose own lettering is
+/// not drawn -- is filed under that name's layer instead, so what shipped
+/// switched off as a loose entity ships switched off as a reference.
+fn placement_layer(members: &[EntityType], source_layer: Option<&PidSourceLayer>) -> String {
+    let name_alone = members
+        .iter()
+        .all(|member| member.common().layer == LAYER_SYMBOL_LABEL);
+    if name_alone {
+        return LAYER_SYMBOL_LABEL.to_string();
+    }
+    match source_layer {
+        Some(layer) => match layer.name.as_deref() {
+            Some(name) => name.to_string(),
+            None if sheet_layer_is_hidden(layer) => LAYER_HIDDEN.to_string(),
+            None => LAYER_SYMBOL.to_string(),
+        },
+        None => LAYER_SYMBOL.to_string(),
     }
 }
 

@@ -111,21 +111,32 @@ pub(crate) use super::PID_SEMANTICS_XDATA_APP;
 use super::pid_view_filter::{is_hidden_sheet_layer, PidViewFilter, PidViewSummary};
 
 mod build;
+mod database_tags;
+mod items;
+mod labels;
 mod metadata;
 mod page;
 mod styles;
 mod summary;
+mod symbol_blocks;
 mod symbols;
 mod template;
 mod text;
 
 use self::build::*;
+pub(crate) use self::database_tags::{fill_database_tags, DatabaseTagFill};
+use self::items::*;
+use self::labels::*;
 use self::metadata::*;
 use self::page::*;
 use self::styles::*;
 use self::summary::*;
-pub use self::summary::{ImportSummary, ImportUnit, SUMMARY_PROPERTY_PREFIX};
+pub use self::summary::{
+    ImportSummary, ImportUnit, TemplateGap, TemplateNotDrawn, SUMMARY_PROPERTY_PREFIX,
+};
+use self::symbol_blocks::*;
 use self::symbols::*;
+pub(crate) use self::symbols::{symbol_file_document, symbol_file_primitive_entities};
 use self::template::*;
 use self::text::*;
 
@@ -491,9 +502,19 @@ pub fn load_pid_with(path: &Path, options: &PidImportOptions) -> Result<PidImpor
     let mut library = discover_symbol_library(path);
     let styles = resolve_styles(&parsed, &geometry, path, &mut doc, paper_style_scale);
     let unit = ImportUnit::read(&geometry, path);
+    // What each placed symbol stands for, as the file itself states it: the
+    // plant item behind the graphic (plan 2026-11-20-pid-symbol-identity).
+    let items = SheetItems::read(path);
+    // And what each label of the sheet hangs on, off the records the parse
+    // above already holds.
+    let labels = SheetLabels::read(&parsed);
     let built = build_document_entities(
         &geometry,
         &styles,
+        Stated {
+            items: &items,
+            labels: &labels,
+        },
         &mut library,
         &unit,
         &mut doc,
@@ -540,7 +561,7 @@ pub fn load_pid_with(path: &Path, options: &PidImportOptions) -> Result<PidImpor
         &styles,
         unit,
         built,
-        template.as_ref(),
+        &template,
         placement,
         &mut doc,
     );
@@ -608,7 +629,7 @@ fn finish(
     styles: &Styles,
     unit: ImportUnit,
     built: Built,
-    template: Option<&TemplateOverlay>,
+    template: &LinkedTemplate,
     placement: FramePlacement,
     doc: &mut Document,
 ) -> ImportSummary {
@@ -620,6 +641,12 @@ fn finish(
         parametric_placements,
         sheet_layer_distribution,
         sheet_layers_off,
+        symbol_blocks,
+        symbol_definitions,
+        symbol_items,
+        symbol_tags,
+        symbol_labels,
+        other_labels,
         bounds,
     } = built;
     report_import(
@@ -631,11 +658,31 @@ fn finish(
         symbol_bodies,
         &sheet_layer_distribution,
     );
+    // Each placement is one block reference, and placements that draw the
+    // same thing share a definition (plan 2026-11-19-pid-symbol-block).
+    if symbol_blocks > 0 {
+        log::info!(
+            "{}: {symbol_blocks} symbol placement(s) are block references to {symbol_definitions} definition(s)",
+            path.display()
+        );
+        log::info!(
+            "{}: the drawing states a plant item for {symbol_items} of them, and {symbol_tags} carry a tag",
+            path.display()
+        );
+    }
+    // What the sheet's label texts hang on, as the drawing file pairs them.
+    if symbol_labels + other_labels > 0 {
+        log::info!(
+            "{}: {symbol_labels} label text(s) hang on a symbol of the sheet, and {other_labels} on a line or on something else",
+            path.display()
+        );
+    }
     let page_mm = geometry.page_dimensions_mm;
     // The linked template draws the real frame when it overlays; the
     // synthetic rectangle only stands in where it did not -- drawing both
     // would double the border.
-    if !template.is_some_and(|overlay| overlay.page_frame_covered) {
+    let overlay = template.overlay();
+    if !overlay.is_some_and(|overlay| overlay.page_frame_covered) {
         draw_page_border(doc, page_mm, placement.corner_mm);
     }
     frame_drawing(doc, &bounds, page_mm, placement.corner_mm);
@@ -695,15 +742,22 @@ fn finish(
         hidden_strokes_skipped: symbol_bodies.hidden_strokes_skipped,
         label_anchors_undrawn: symbol_bodies.label_anchors,
         lettering_flattened: styles.lettering_flattened,
-        border_template: template.map(|overlay| {
+        border_template: overlay.map(|overlay| {
             overlay
                 .file
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| overlay.file.display().to_string())
         }),
-        template_entities: template.map(|overlay| overlay.drawn).unwrap_or(0),
-        template_missing: template.map(|overlay| overlay.missing).unwrap_or(0),
+        template_entities: overlay.map(|overlay| overlay.drawn).unwrap_or(0),
+        template_missing: overlay.map(|overlay| overlay.missing).unwrap_or(0),
+        template_not_drawn: template.not_drawn().cloned(),
+        symbol_blocks,
+        symbol_definitions,
+        symbol_items,
+        symbol_tags,
+        symbol_labels,
+        other_labels,
         symbol_library: library
             .map(|library| library.roots().to_vec())
             .unwrap_or_default(),
@@ -742,5 +796,56 @@ pub(crate) fn imported_sheet(page_mm: (f64, f64)) -> Document {
     doc
 }
 
+/// [`imported_sheet`] as the open pipeline hands a drawing over: carrying
+/// the summary of its import, which here drew nothing and has
+/// `template_not_drawn` to say of the border template the drawing links.
+/// For the tests of what the command line says once such a drawing has
+/// opened (`crate::app::update::file`).
+#[cfg(test)]
+pub(crate) fn imported_sheet_summarised(
+    page_mm: (f64, f64),
+    template_not_drawn: Option<TemplateNotDrawn>,
+) -> Document {
+    imported_sheet_counted(page_mm, |summary| {
+        summary.template_not_drawn = template_not_drawn;
+    })
+}
+
+/// [`imported_sheet`] carrying the summary of an import that counted what
+/// `count` writes into it and nothing else: for the same tests, where they
+/// read the numbers the command line is given.
+#[cfg(test)]
+pub(crate) fn imported_sheet_counted(
+    page_mm: (f64, f64),
+    count: impl FnOnce(&mut ImportSummary),
+) -> Document {
+    let mut doc = imported_sheet(page_mm);
+    let mut summary = ImportSummary::empty();
+    count(&mut summary);
+    summary.store(&mut doc);
+    doc
+}
+
+/// The imported sheets the program-level tests of a symbol open: the first
+/// that of what a symbol and its labels say of each other and the third
+/// those of a symbol as one object (both in
+/// `crate::app::pid_symbol_block_tests`), the fourth those of what is drawn
+/// of it (`crate::app::pid_symbol_view_tests`). The P&ID editor's inspector
+/// is tested on the first and on the second
+/// (`crate::app::pid_shell::pid_editor_screen`). The sheet the tags of a
+/// plant database are put on, and those tags, are for the tests of a
+/// drawing opened from the backup panel
+/// (`crate::app::commands::pidbackup::tags`).
+#[cfg(test)]
+pub(crate) use self::tests::placements_as_blocks::{
+    sheet_for_the_database, sheet_of_a_tagged_valve_and_its_labels,
+    sheet_of_symbols_the_file_says_less_of, sheet_of_two_valves_a_note_and_a_pipe,
+    sheet_of_valves_on_shown_and_hidden_layers, tags_for_that_sheet,
+};
+
+#[cfg(test)]
+mod plant_totals;
+#[cfg(test)]
+mod sample_budget;
 #[cfg(test)]
 mod tests;
