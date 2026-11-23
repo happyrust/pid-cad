@@ -60,6 +60,8 @@ mod collab_op_ids;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_pipe_ops;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_geometry;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_restored_rollback;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_save_exits;

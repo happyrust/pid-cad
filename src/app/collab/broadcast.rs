@@ -6,8 +6,9 @@
 //!
 //! * [`collect_changes`] reads the `(handle, before, after)` triples an undo
 //!   step already carries and states what changed in P&ID semantics — a tag,
-//!   a property — instead of shipping geometry. The server only ever sees
-//!   semantics (`architecture.md` §3).
+//!   a property, and for a symbol standing on its own its position, rotation
+//!   and scale. A fitting's move is not said here: the run it belongs to is
+//!   said whole, valve and segment ends together (`super::pipes`).
 //! * [`apply_change`] writes those semantics onto the local document, using
 //!   the same `PidAuthor` store the properties panel writes through, so a
 //!   remote tag edit relabels the drawing exactly like a local one.
@@ -41,6 +42,14 @@ use crate::pid::topology::{
 /// Op kinds this client emits and understands.
 pub const KIND_SET_TAG: &str = "set_tag";
 pub const KIND_SET_PROPERTY: &str = "set_property";
+
+/// One field for where a standalone symbol stands. Move, and any later move,
+/// supersede on this field alone (`#95`): rotation and scale are their own.
+pub const FIELD_POSITION: &str = "position";
+/// A standalone symbol's turn, in radians, as one field.
+pub const FIELD_ROTATION: &str = "rotation";
+/// A standalone symbol's uniform scale, as one field.
+pub const FIELD_SCALE: &str = "scale";
 /// Not a wire kind: this client's note to itself that the server gave a
 /// symbol it placed another tag than the one it was sent under, because
 /// that one was taken (`State::apply` writes it when its own `insert_symbol`
@@ -390,6 +399,12 @@ pub fn still_as_written(doc: &Document, change: &Change) -> bool {
             let targets = resolve(doc, change);
             !targets.is_empty()
                 && targets.iter().all(|handle| {
+                    if is_geometry_field(&change.field) {
+                        return doc.get_entity(*handle).is_some_and(|entity| {
+                            geometry_text(entity, &change.field).as_deref()
+                                == Some(change.value.as_str())
+                        });
+                    }
                     PidAuthor::load(doc, *handle).is_some_and(|author| {
                         let (values, _) = split_props(&author.props);
                         values
@@ -478,6 +493,167 @@ fn erased_symbol(handle: Handle, entity: &EntityType) -> Option<Change> {
         tag_source: None,
         overrides: None,
     })
+}
+
+fn is_geometry_field(field: &str) -> bool {
+    matches!(field, FIELD_POSITION | FIELD_ROTATION | FIELD_SCALE)
+}
+
+/// Six digits, trailing zeros dropped, so a move and the peer that applies
+/// it name the same text.
+fn geom_num(n: f64) -> String {
+    let rounded = (n * 1_000_000.0).round() / 1_000_000.0;
+    let text = format!("{rounded:.6}");
+    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "-" {
+        "0".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn position_text(insert: &document::entities::Insert) -> String {
+    format!(
+        "{},{},{}",
+        geom_num(insert.insert_point.x),
+        geom_num(insert.insert_point.y),
+        geom_num(insert.insert_point.z),
+    )
+}
+
+fn geometry_text(entity: &EntityType, field: &str) -> Option<String> {
+    let EntityType::Insert(insert) = entity else {
+        return None;
+    };
+    Some(geometry_text_of_insert(insert, field)).filter(|text| !text.is_empty())
+}
+
+pub(super) fn geometry_text_of_insert(insert: &document::entities::Insert, field: &str) -> String {
+    match field {
+        FIELD_POSITION => position_text(insert),
+        FIELD_ROTATION => geom_num(insert.rotation),
+        FIELD_SCALE => geom_num(insert.x_scale()),
+        _ => String::new(),
+    }
+}
+
+fn parse_geom_num(text: &str) -> Option<f64> {
+    text.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
+fn parse_position(text: &str) -> Option<[f64; 3]> {
+    let mut parts = text.split(',');
+    let x = parse_geom_num(parts.next()?.trim())?;
+    let y = parse_geom_num(parts.next()?.trim())?;
+    let z = parse_geom_num(parts.next()?.trim()).unwrap_or(0.0);
+    (parts.next().is_none()).then_some([x, y, z])
+}
+
+fn near(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-6
+}
+
+/// Write `value` onto a standalone symbol. `false` when it is already there
+/// or `value` is not a number this field can take.
+fn write_symbol_geometry(insert: &mut document::entities::Insert, field: &str, value: &str) -> bool {
+    match field {
+        FIELD_POSITION => {
+            let Some([x, y, z]) = parse_position(value) else {
+                return false;
+            };
+            if near(insert.insert_point.x, x)
+                && near(insert.insert_point.y, y)
+                && near(insert.insert_point.z, z)
+            {
+                return false;
+            }
+            insert.insert_point = document::types::Vector3::new(x, y, z);
+            true
+        }
+        FIELD_ROTATION => {
+            let Some(angle) = parse_geom_num(value) else {
+                return false;
+            };
+            if near(insert.rotation, angle) {
+                return false;
+            }
+            insert.rotation = angle;
+            true
+        }
+        FIELD_SCALE => {
+            let Some(scale) = parse_geom_num(value).filter(|scale| *scale != 0.0) else {
+                return false;
+            };
+            if near(insert.x_scale(), scale) {
+                return false;
+            }
+            insert.set_x_scale(scale);
+            insert.set_y_scale(scale);
+            insert.set_z_scale(scale);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn geometry_change(handle: Handle, tag: &str, field: &str, value: String, old: String) -> Change {
+    Change {
+        kind: KIND_SET_PROPERTY.to_owned(),
+        object_ref: tag.to_owned(),
+        handles: vec![handle],
+        field: field.to_owned(),
+        value,
+        old: Some(old),
+        placed: None,
+        pipe: None,
+        tag_source: None,
+        overrides: None,
+    }
+}
+
+/// Position, rotation and scale of a symbol that stands on its own, each
+/// only when that one moved. A fitting belongs to its run.
+fn geometry_changes(
+    handle: Handle,
+    before: &EntityType,
+    after: &EntityType,
+    before_author: &PidAuthor,
+    after_author: &PidAuthor,
+) -> Vec<Change> {
+    if !before_author.owner.is_empty()
+        || !before_author.topology.is_empty()
+        || !after_author.owner.is_empty()
+        || !after_author.topology.is_empty()
+    {
+        return Vec::new();
+    }
+    let (EntityType::Insert(before_insert), EntityType::Insert(after_insert)) = (before, after)
+    else {
+        return Vec::new();
+    };
+    let mut changes = Vec::new();
+    let say = |field: &str, value: String, old: String| {
+        geometry_change(handle, &after_author.tag, field, value, old)
+    };
+    let (before_at, after_at) = (position_text(before_insert), position_text(after_insert));
+    if before_at != after_at {
+        changes.push(say(FIELD_POSITION, after_at, before_at));
+    }
+    let (before_turn, after_turn) = (
+        geom_num(before_insert.rotation),
+        geom_num(after_insert.rotation),
+    );
+    if before_turn != after_turn {
+        changes.push(say(FIELD_ROTATION, after_turn, before_turn));
+    }
+    let (before_scale, after_scale) = (
+        geom_num(before_insert.x_scale()),
+        geom_num(after_insert.x_scale()),
+    );
+    if before_scale != after_scale {
+        changes.push(say(FIELD_SCALE, after_scale, before_scale));
+    }
+    changes
 }
 
 /// What one handle's before/after images amount to in P&ID semantics: a
@@ -587,6 +763,17 @@ fn changes_between(
     if after_author.tag.is_empty() {
         return changes;
     }
+    // Where a symbol standing on its own moved, turned or grew. Said even
+    // when its properties are not known from the images: the geometry is on
+    // the entity, not in the property record. A fitting is a run's, and the
+    // run says where it stands.
+    changes.extend(geometry_changes(
+        handle,
+        before,
+        after,
+        &before_author,
+        &after_author,
+    ));
     // The properties of each side: in its image, or where the image points.
     let before_text = if PidAuthor::props_are_inline(before) {
         Some(before_author.props)
@@ -1045,6 +1232,20 @@ pub fn write_to(doc: &mut Document, targets: &[Handle], change: &Change, applied
                 author.tag = change.value.clone();
                 author.store(doc, handle);
                 applied.retagged.push(handle);
+            }
+            KIND_SET_PROPERTY if is_geometry_field(&change.field) => {
+                let wrote = match doc.get_entity_mut(handle) {
+                    Some(EntityType::Insert(insert)) => {
+                        write_symbol_geometry(insert, &change.field, &change.value)
+                    }
+                    _ => false,
+                };
+                if !wrote {
+                    continue;
+                }
+                // The tag label is stored in world coordinates. Moving the
+                // symbol without it leaves the label where the symbol was.
+                crate::app::commands::pidpalette::sync_pid_tag_attribute(doc, handle);
             }
             KIND_SET_PROPERTY => {
                 let (mut values, mut marks) = split_props(&author.props);

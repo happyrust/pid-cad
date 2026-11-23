@@ -145,6 +145,39 @@ impl Change {
         self.text("tag").unwrap_or_default()
     }
 
+    /// Every tag a claim can stand against for this change: the object it
+    /// names, the tag a retag would give it, and — when it redraws a run —
+    /// the line, the run and each fitting that has a tag of its own. A
+    /// geometry edit of a claimed valve is the run said again; the claim is
+    /// on the valve, not on the run (`#94`, `#95`).
+    pub fn claim_subjects(&self) -> Vec<String> {
+        let mut tags = vec![self.subject()];
+        if self.kind == KIND_SET_TAG {
+            tags.push(self.value.clone());
+        }
+        if self.changes_topology() {
+            tags.extend(self.text("line_tag"));
+            tags.extend(self.text("run_tag"));
+            tags.extend(self.text("tag"));
+            if let Some(fittings) = self
+                .raw
+                .get("run")
+                .and_then(|run| run.get("fittings"))
+                .and_then(Value::as_array)
+            {
+                for fitting in fittings {
+                    if let Some(tag) = fitting.get("tag").and_then(Value::as_str) {
+                        tags.push(tag.to_owned());
+                    }
+                }
+            }
+        }
+        tags.retain(|tag| !tag.is_empty());
+        tags.sort();
+        tags.dedup();
+        tags
+    }
+
     /// A string the change carries under `key`.
     pub fn text(&self, key: &str) -> Option<String> {
         self.raw.get(key).and_then(Value::as_str).map(str::to_owned)
@@ -1104,6 +1137,62 @@ mod tests {
                 object_ref: "P-1001".into(),
                 replaces: Some("1.6MPa".into())
             }
+        );
+    }
+
+    // Position is one field (#95): a later write from an older baseline yields,
+    // one that has seen the current position replaces it, and a turn is not
+    // that field.
+    #[test]
+    fn a_later_position_write_yields_and_a_turn_does_not() {
+        let model = written("position", "100,200,0", 1, "s1");
+        assert_eq!(
+            model.judge(&set("P-1001", "position", "140,200,0"), 0, "s2"),
+            Verdict::Yield {
+                object_ref: "P-1001".into(),
+                winner: "100,200,0".into(),
+                winner_revision: 1,
+                winner_user: "u1".into(),
+            }
+        );
+        assert_eq!(
+            model.judge(&set("P-1001", "position", "140,200,0"), 1, "s2"),
+            Verdict::Apply {
+                object_ref: "P-1001".into(),
+                replaces: Some("100,200,0".into()),
+            }
+        );
+        assert!(applies(
+            &model.judge(&set("P-1001", "rotation", "1.570796"), 0, "s2")
+        ));
+        assert!(!collides(
+            &set("P-1001", "position", "140,200,0"),
+            &set("P-1001", "rotation", "1.570796"),
+        ));
+        assert!(collides(
+            &set("P-1001", "position", "140,200,0"),
+            &set("P-1001", "position", "180,200,0"),
+        ));
+    }
+
+    // A redraw of a run names the fittings on it, so a claim on the valve
+    // stands against the geometry edit (#94).
+    #[test]
+    fn a_run_redraw_names_the_fittings_a_claim_can_stand_against() {
+        let change = Change::list(&json!({
+            "kind": "update_pipe_run",
+            "run_tag": "L-1001-01",
+            "line_tag": "L-1001",
+            "run": {"fittings": [{"tag": "V-1001"}, {"tag": ""}]}
+        }))
+        .remove(0);
+        assert_eq!(
+            change.claim_subjects(),
+            vec![
+                "L-1001".to_owned(),
+                "L-1001-01".to_owned(),
+                "V-1001".to_owned(),
+            ]
         );
     }
 

@@ -1797,24 +1797,12 @@ async fn held_by_another(
     let changes = ocs_collab::conflict::Change::list(payload);
     let occupancy = state.occupancy.lock().await;
     changes.into_iter().find_map(|change| {
-        let mut tags = vec![change.subject()];
-        if change.kind == ocs_collab::conflict::KIND_SET_TAG {
-            tags.push(change.value.clone());
-        }
-        // A change to how a pipe line is connected up is a change to the
-        // line and to the run it names: a claim on either stands against it.
-        if change.changes_topology() {
-            tags.extend(change.text("line_tag"));
-            tags.extend(change.text("run_tag"));
-        }
-        tags.iter()
-            .filter(|tag| !tag.is_empty())
-            .find_map(|tag| {
-                occupancy
-                    .held_by_another(tag, &session.drawing_id, &session.session_id, now)
-                    .cloned()
-            })
-            .map(|held| (change, held))
+        let held = change.claim_subjects().into_iter().find_map(|tag| {
+            occupancy
+                .held_by_another(&tag, &session.drawing_id, &session.session_id, now)
+                .cloned()
+        })?;
+        Some((change, held))
     })
 }
 

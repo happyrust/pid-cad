@@ -595,9 +595,10 @@ type Stretch = (Handle, [f64; 4], PidAuthor);
 /// that is gone are said as gone; every other touched run is said as it
 /// stands.
 ///
-/// Not said, as before: a line that lost some of its stretches and kept
-/// others, and anything that only moved a line's stretch — the geometry of
-/// an object that is there is not in the protocol.
+/// A fitting that only moved is said: the run is given again as it stands,
+/// so the valve and the segment ends that followed it travel together
+/// (`#94`). Not said: a line that lost some of its stretches and kept
+/// others, and a stretch that moved with no run to belong to.
 pub fn statements(doc: &Document, images: &[Image<'_>]) -> Vec<Change> {
     let mut made: BTreeMap<(String, String), Vec<Stretch>> = BTreeMap::new();
     let mut lost: BTreeSet<(String, String)> = BTreeSet::new();
