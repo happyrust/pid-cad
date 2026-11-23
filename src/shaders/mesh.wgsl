@@ -176,6 +176,30 @@ fn relative_position(
         + (rotated_low + instance.translation_low.xyz - u.eye_low);
 }
 
+// Coincident faces of two solids share a slope, so the pipeline depth bias
+// (`constant: 1`, `slope_scale: 1`) moves both by the same amount and the
+// depth buffer flickers (#177). A slot from the face normal and the
+// instance origin shifts clip z by a few steps of a 24-bit depth buffer —
+// enough to keep one face — and stays inside one draw-order step (0.02 of
+// clip w). `coincident_face_ndc_bias` in `mesh_gpu.rs` is the same arithmetic.
+fn separate_coincident_face(
+    clip: vec4<f32>,
+    normal: vec3<f32>,
+    instance: MeshInstance,
+) -> vec4<f32> {
+    let origin = vec3<f32>(
+        instance.model_row_0.w,
+        instance.model_row_1.w,
+        instance.model_row_2.w,
+    ) + instance.translation_low.xyz;
+    let n = select(normal, vec3<f32>(0.0, 0.0, 1.0), length(normal) < 1.0e-6);
+    let mixed = dot(n, vec3<f32>(12.9898, 78.233, 37.719))
+        + dot(origin, vec3<f32>(0.1031, 0.11369, 0.13787));
+    let slot = floor(fract(mixed) * 32.0);
+    let ndc = (slot - 15.5) * 2.4e-7;
+    return vec4<f32>(clip.xy, clip.z - ndc * clip.w, clip.w);
+}
+
 fn mesh_instance(input: InstanceIn) -> MeshInstance {
     return MeshInstance(
         input.model_row_0,
@@ -197,11 +221,13 @@ fn vs_main(
     let instance = mesh_instance(i);
     let rel = relative_position(v.position, v.position_low, instance);
     out.clip_pos  = u.view_rot * vec4<f32>(rel, 1.0);
-    out.normal    = normalize(vec3<f32>(
+    let shaded = vec3<f32>(
         dot(instance.normal_row_0.xyz, v.normal),
         dot(instance.normal_row_1.xyz, v.normal),
         dot(instance.normal_row_2.xyz, v.normal),
-    ));
+    );
+    out.normal = normalize(shaded);
+    out.clip_pos = separate_coincident_face(out.clip_pos, shaded, instance);
     out.world_pos = rel;
     out.uv_diffuse = v.uv_diffuse;
     out.uv_specular = v.uv_specular_reflection.xy;
@@ -222,11 +248,13 @@ fn vs_main_plain(
     let instance = mesh_instance(i);
     let rel = relative_position(v.position, v.position_low, instance);
     out.clip_pos  = u.view_rot * vec4<f32>(rel, 1.0);
-    out.normal    = normalize(vec3<f32>(
+    let shaded = vec3<f32>(
         dot(instance.normal_row_0.xyz, v.normal),
         dot(instance.normal_row_1.xyz, v.normal),
         dot(instance.normal_row_2.xyz, v.normal),
-    ));
+    );
+    out.normal = normalize(shaded);
+    out.clip_pos = separate_coincident_face(out.clip_pos, shaded, instance);
     out.world_pos = rel;
     out.uv_diffuse = vec2<f32>(0.0);
     out.uv_specular = vec2<f32>(0.0);

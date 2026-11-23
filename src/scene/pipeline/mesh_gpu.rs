@@ -2684,6 +2684,38 @@ pub fn build_mesh_batch_filtered(
     (chunks, total_tris)
 }
 
+/// How many depths coincident faces are spread across. The whole set has
+/// to stay inside one draw-order step (`0.02` of clip `w`).
+const COINCIDENT_FACE_SLOTS: u32 = 32;
+/// One slot, in NDC: four steps of a 24-bit depth buffer (about `6e-8`).
+const COINCIDENT_FACE_SLOT_NDC: f32 = 2.4e-7;
+
+/// Which depth slot a face lands on. `normal` is the shaded normal and
+/// `origin` is the instance translation (high and low parts summed), the
+/// same inputs `separate_coincident_face` in `mesh.wgsl` hashes.
+pub(crate) fn coincident_face_slot(normal: [f32; 3], origin: [f32; 3]) -> u32 {
+    let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    let n = if length < 1.0e-6 {
+        [0.0, 0.0, 1.0]
+    } else {
+        normal
+    };
+    let mixed = n[0] * 12.9898
+        + n[1] * 78.233
+        + n[2] * 37.719
+        + origin[0] * 0.1031
+        + origin[1] * 0.11369
+        + origin[2] * 0.13787;
+    let unit = mixed - mixed.floor();
+    (unit * COINCIDENT_FACE_SLOTS as f32) as u32 % COINCIDENT_FACE_SLOTS
+}
+
+/// Signed NDC shift for `slot`. Subtract `bias * clip.w` from clip `z`
+/// (smaller clip `z` is closer), matching the shader.
+pub(crate) fn coincident_face_ndc_bias(slot: u32) -> f32 {
+    (slot as f32 - 15.5) * COINCIDENT_FACE_SLOT_NDC
+}
+
 #[cfg(test)]
 mod texture_limit_tests {
     use super::{downscale_rgba_to_limit, opacity_image_is_binary_cutout};
@@ -2805,5 +2837,52 @@ mod texture_limit_tests {
             assert!(downscale_rgba_to_limit(width, height, &pixels, 16).is_none());
         }
         assert!(downscale_rgba_to_limit(1, 1, &[0; 4], 0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod coincident_face_tests {
+    use super::{coincident_face_ndc_bias, coincident_face_slot, COINCIDENT_FACE_SLOT_NDC};
+
+    /// #177: two solids that share a face (a section member against the next
+    /// one) used to write the same depth. The mesh pipeline's slope bias is
+    /// the same for both, so the view flickered. Slots from the normal and
+    /// the instance origin have to differ for that pair, stay far enough
+    /// apart for a 24-bit depth buffer, and stay inside one draw-order step.
+    #[test]
+    fn coincident_faces_of_two_solids_take_different_depth_slots() {
+        let wall = [0.0, 0.0, 1.0];
+        let here = [0.0, 0.0, 0.0];
+        let next = [1200.0, 0.0, 0.0];
+        let slot_here = coincident_face_slot(wall, here);
+        let slot_next = coincident_face_slot(wall, next);
+        assert_ne!(
+            slot_here, slot_next,
+            "two solids sharing a face must not land on one depth"
+        );
+        let gap = (coincident_face_ndc_bias(slot_here) - coincident_face_ndc_bias(slot_next)).abs();
+        assert!(
+            gap + f32::EPSILON >= COINCIDENT_FACE_SLOT_NDC,
+            "slots {slot_here} and {slot_next} are only {gap} NDC apart"
+        );
+        // One draw-order step moves clip z by up to 0.02 of clip w.
+        let furthest = coincident_face_ndc_bias(0).abs().max(coincident_face_ndc_bias(31).abs());
+        assert!(furthest < 1.0e-4, "bias {furthest} reaches a draw-order step");
+        assert_eq!(
+            coincident_face_slot(wall, next),
+            slot_next,
+            "the same solid must keep its slot"
+        );
+        // Opposite sides of one wall are different faces too.
+        assert_ne!(
+            coincident_face_slot(wall, here),
+            coincident_face_slot([0.0, 0.0, -1.0], here)
+        );
+
+        let source = include_str!("../../shaders/mesh.wgsl");
+        assert!(source.contains("fn separate_coincident_face"));
+        assert!(source.contains("2.4e-7"));
+        assert!(source.contains("* 32.0"));
+        naga::front::wgsl::parse_str(source).expect("mesh.wgsl parses");
     }
 }
