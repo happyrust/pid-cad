@@ -167,6 +167,7 @@ pub fn evaluate(
                 effective_node_id: None,
                 effective_node_path: Vec::new(),
                 inherited: false,
+                deciding_row: None,
             };
         }
     }

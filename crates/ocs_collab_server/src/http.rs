@@ -1453,6 +1453,94 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// #74: on one node, opposite user and role rows deny the write, and the
+    /// probe names the denying row. Both rows allowing lets the op through.
+    #[tokio::test]
+    async fn opposite_user_and_role_rows_on_one_node_block_the_write() {
+        let state = seeded_state();
+        let store = state.store.clone().expect("store");
+        let now = ocs_collab::now_unix();
+        let (mut conn, _) = live_conn(&state, "u-proc", now).await;
+
+        let user_deny = serde_json::from_value(json!({
+            "pbs_acl": [
+                {"node_id": "n-cell-a1", "subject": "u-proc", "permission": "编辑", "allowed": false},
+                {"node_id": "n-cell-a1", "subject": "工艺设计人员", "permission": "编辑", "allowed": true}
+            ]
+        }))
+        .expect("acl json");
+        store.seed(&user_deny).expect("seed user deny");
+
+        let denied = submit_property(&state, &mut conn, "op-user-deny", "1.0MPa", now + 1).await;
+        let (code, level) = refusal_in(&denied).expect("user deny must refuse the op");
+        assert_eq!(code, codes::PERM_DENIED_PBS);
+        assert_eq!(level.as_deref(), Some("pbs"));
+        let revision = store.drawing("d-a1-coop").expect("drawing").expect("row").2;
+        assert_eq!(revision, 0, "a refused write does not advance the drawing");
+
+        let probe = permission_check(
+            State(state.clone()),
+            Json(PermissionCheckBody {
+                user_id: Some("u-proc".into()),
+                drawing_id: Some("d-a1-coop".into()),
+                operation: Some("编辑图纸".into()),
+            }),
+        )
+        .await;
+        assert_eq!(probe.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(probe.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["deciding_row"]["subject"], "u-proc");
+        assert_eq!(body["deciding_row"]["rule"], "拒绝为准");
+        assert_eq!(body["deciding_row"]["subject_kind"], "user");
+
+        let role_deny = serde_json::from_value(json!({
+            "pbs_acl": [
+                {"node_id": "n-cell-a1", "subject": "u-proc", "permission": "编辑", "allowed": true},
+                {"node_id": "n-cell-a1", "subject": "工艺设计人员", "permission": "编辑", "allowed": false}
+            ]
+        }))
+        .expect("acl json");
+        store.seed(&role_deny).expect("seed role deny");
+        let denied = submit_property(&state, &mut conn, "op-role-deny", "1.6MPa", now + 2).await;
+        let (code, _) = refusal_in(&denied).expect("role deny must refuse the op");
+        assert_eq!(code, codes::PERM_DENIED_PBS);
+        let probe = permission_check(
+            State(state.clone()),
+            Json(PermissionCheckBody {
+                user_id: Some("u-proc".into()),
+                drawing_id: Some("d-a1-coop".into()),
+                operation: Some("编辑图纸".into()),
+            }),
+        )
+        .await;
+        let body = axum::body::to_bytes(probe.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["deciding_row"]["subject"], "工艺设计人员");
+        assert_eq!(body["deciding_row"]["subject_kind"], "role");
+        assert_eq!(body["allowed"], false);
+
+        let both_allow = serde_json::from_value(json!({
+            "pbs_acl": [
+                {"node_id": "n-cell-a1", "subject": "u-proc", "permission": "编辑", "allowed": true},
+                {"node_id": "n-cell-a1", "subject": "工艺设计人员", "permission": "编辑", "allowed": true}
+            ]
+        }))
+        .expect("acl json");
+        store.seed(&both_allow).expect("seed both allow");
+        let applied = submit_property(&state, &mut conn, "op-both-allow", "2.5MPa", now + 3).await;
+        assert!(
+            applied_in(&applied),
+            "both rows allowing must let the write through: {applied:?}"
+        );
+        let revision = store.drawing("d-a1-coop").expect("drawing").expect("row").2;
+        assert_eq!(revision, 1);
+    }
+
     #[tokio::test]
     async fn permission_check_maps_errors_to_their_statuses() {
         let state = seeded_state();
@@ -1754,6 +1842,7 @@ mod tests {
                 effective_node_id: None,
                 effective_node_path: Vec::new(),
                 inherited: false,
+                deciding_row: None,
             },
             status: StatusCode::FORBIDDEN,
             holder: Some("s-9".into()),
@@ -2098,6 +2187,29 @@ mod tests {
             }
             _ => None,
         })
+    }
+
+    async fn submit_property(
+        state: &AppState,
+        conn: &mut crate::ws::Connection,
+        op_id: &str,
+        value: &str,
+        now: i64,
+    ) -> Vec<crate::ws::Reaction> {
+        let session_id = conn.session.as_ref().expect("session").session_id.clone();
+        let op = off_the_wire(json!({
+            "type": "op",
+            "session_id": session_id,
+            "base_revision": 0,
+            "op_id": op_id,
+            "payload": {
+                "kind": "set_property",
+                "object_ref": "V-7401",
+                "field": "设计压力",
+                "value": value,
+            },
+        }));
+        crate::ws::handle_message(state, conn, op, now).await
     }
 
     fn applied_in(reactions: &[crate::ws::Reaction]) -> bool {

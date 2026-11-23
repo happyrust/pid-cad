@@ -251,6 +251,26 @@ pub struct PermissionRequest<'a> {
     pub nodes: &'a [AclNode],
 }
 
+/// The ACL row that decided the PBS tier (#74).
+///
+/// On one node, a user row and a role row for the same permission that
+/// disagree resolve to the denying row (`rule` = `拒绝为准`). A nearer node
+/// still wins over an ancestor, so an exception is configured on the child.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecidingRow {
+    pub subject: String,
+    /// `user` when `subject` is a user id, `role` when it is a role name.
+    pub subject_kind: String,
+    pub permission: String,
+    pub allowed: bool,
+    /// `拒绝为准`, `两行一致`, or `唯一授权行`.
+    pub rule: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_allowed: Option<bool>,
+}
+
 /// The chain's answer, matching appendix A.3's JSON shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionDecision {
@@ -260,10 +280,13 @@ pub struct PermissionDecision {
     pub effective_node_id: Option<String>,
     pub effective_node_path: Vec<String>,
     pub inherited: bool,
+    /// Present when the PBS tier ran and a row on some node decided it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deciding_row: Option<DecidingRow>,
 }
 
 impl PermissionDecision {
-    fn allow(node_id: &str, path: Vec<String>, inherited: bool) -> Self {
+    fn allow(node_id: &str, path: Vec<String>, inherited: bool, row: DecidingRow) -> Self {
         PermissionDecision {
             allowed: true,
             denied_level: None,
@@ -271,10 +294,11 @@ impl PermissionDecision {
             effective_node_id: Some(node_id.to_owned()),
             effective_node_path: path,
             inherited,
+            deciding_row: Some(row),
         }
     }
 
-    fn deny_pbs(node_id: &str, path: Vec<String>, inherited: bool) -> Self {
+    fn deny_pbs(node_id: &str, path: Vec<String>, inherited: bool, row: DecidingRow) -> Self {
         PermissionDecision {
             allowed: false,
             denied_level: Some(DenialLevel::Pbs),
@@ -282,6 +306,7 @@ impl PermissionDecision {
             effective_node_id: Some(node_id.to_owned()),
             effective_node_path: path,
             inherited,
+            deciding_row: Some(row),
         }
     }
 
@@ -293,6 +318,7 @@ impl PermissionDecision {
             effective_node_id: None,
             effective_node_path: Vec::new(),
             inherited: false,
+            deciding_row: None,
         }
     }
 
@@ -304,6 +330,7 @@ impl PermissionDecision {
             effective_node_id: None,
             effective_node_path: Vec::new(),
             inherited: false,
+            deciding_row: None,
         }
     }
 }
@@ -333,10 +360,44 @@ pub fn state_allows(state: DrawingState, operation: Operation) -> bool {
     }
 }
 
+/// One node's combined user/role answer, plus the row a probe should name.
+struct AclHit {
+    allowed: bool,
+    node_id: String,
+    path: Vec<String>,
+    inherited: bool,
+    row: DecidingRow,
+}
+
 /// Result of the ACL lookup, before the state tier runs.
 struct AclLookup {
     /// `None` when nothing along the path is configured (which denies).
-    decision: Option<(bool, String, Vec<String>, bool)>,
+    decision: Option<AclHit>,
+}
+
+/// Same-node user row and role row. Disagreement is deny-wins (#74).
+fn combine_same_node<'a>(
+    user_row: Option<&'a AclEntry>,
+    role_row: Option<&'a AclEntry>,
+) -> Option<(
+    &'a AclEntry,
+    &'static str,
+    &'static str,
+    Option<&'a AclEntry>,
+)> {
+    match (user_row, role_row) {
+        (Some(user), Some(role)) if user.allowed != role.allowed => {
+            if user.allowed {
+                Some((role, "role", "拒绝为准", Some(user)))
+            } else {
+                Some((user, "user", "拒绝为准", Some(role)))
+            }
+        }
+        (Some(user), Some(role)) => Some((user, "user", "两行一致", Some(role))),
+        (Some(user), None) => Some((user, "user", "唯一授权行", None)),
+        (None, Some(role)) => Some((role, "role", "唯一授权行", None)),
+        (None, None) => None,
+    }
 }
 
 fn lookup_acl(request: &PermissionRequest<'_>) -> AclLookup {
@@ -364,15 +425,15 @@ fn lookup_acl(request: &PermissionRequest<'_>) -> AclLookup {
 
     // Step 2: walk the same chain back from the target node, so the nearest
     // configured ancestor wins. `inherited` is true once we leave the target.
+    // On that node, a user row and a role row that disagree both lose to deny.
     let mut inherited = false;
-    let mut deciding: Option<(bool, String)> = None;
+    let mut deciding: Option<AclHit> = None;
     for node_id in chain.iter().rev() {
         let node = match request.nodes.iter().find(|node| node.node_id == *node_id) {
             Some(node) => node,
             None => break,
         };
 
-        // User-level rows win over role-level rows on the same node.
         let user_row = node
             .entries
             .iter()
@@ -381,21 +442,29 @@ fn lookup_acl(request: &PermissionRequest<'_>) -> AclLookup {
             .entries
             .iter()
             .find(|entry| entry.subject == request.role.as_str() && entry.permission == permission);
-        if let Some(row) = user_row.or(role_row) {
-            deciding = Some((row.allowed, node_id.clone()));
+        if let Some((row, kind, rule, other)) = combine_same_node(user_row, role_row) {
+            deciding = Some(AclHit {
+                allowed: row.allowed,
+                node_id: node_id.clone(),
+                path: chain.clone(),
+                inherited,
+                row: DecidingRow {
+                    subject: row.subject.clone(),
+                    subject_kind: kind.to_owned(),
+                    permission: row.permission.as_str().to_owned(),
+                    allowed: row.allowed,
+                    rule: rule.to_owned(),
+                    other_subject: other.map(|entry| entry.subject.clone()),
+                    other_allowed: other.map(|entry| entry.allowed),
+                },
+            });
             break;
         }
 
         inherited = true;
     }
 
-    // Step 3: the path is always the full chain; only the deciding id varies.
-    match deciding {
-        Some((allowed, deciding_node_id)) => AclLookup {
-            decision: Some((allowed, deciding_node_id, chain, inherited)),
-        },
-        None => AclLookup { decision: None },
-    }
+    AclLookup { decision: deciding }
 }
 
 /// Runs the chain: role → PBS ACL → drawing state.
@@ -417,11 +486,13 @@ pub fn decide_without_state(request: &PermissionRequest<'_>) -> PermissionDecisi
     match lookup_acl(request) {
         AclLookup { decision: None } => PermissionDecision::deny(DenialLevel::Pbs),
         AclLookup {
-            decision: Some((false, node_id, path, inherited)),
-        } => PermissionDecision::deny_pbs(&node_id, path, inherited),
+            decision: Some(hit),
+        } if !hit.allowed => {
+            PermissionDecision::deny_pbs(&hit.node_id, hit.path, hit.inherited, hit.row)
+        }
         AclLookup {
-            decision: Some((true, node_id, path, inherited)),
-        } => PermissionDecision::allow(&node_id, path, inherited),
+            decision: Some(hit),
+        } => PermissionDecision::allow(&hit.node_id, hit.path, hit.inherited, hit.row),
     }
 }
 
@@ -599,14 +670,20 @@ mod tests {
             nodes: &nodes,
         };
         let decision = decide(&request);
-        assert!(decision.allowed, "the target node allows edit: {decision:?}");
+        assert!(
+            decision.allowed,
+            "the target node allows edit: {decision:?}"
+        );
         assert_eq!(decision.effective_node_id.as_deref(), Some("n-cell-a1"));
         assert_eq!(
             decision.effective_node_path,
             vec!["n-plant", "n-unit-a", "n-cell-a1"],
             "path stays the full root-to-target chain when the target decides"
         );
-        assert!(!decision.inherited, "the deciding node is the target itself");
+        assert!(
+            !decision.inherited,
+            "the deciding node is the target itself"
+        );
     }
 
     #[test]
@@ -650,8 +727,19 @@ mod tests {
         assert_eq!(decision.code.as_deref(), Some(codes::PERM_DENIED_PBS));
     }
 
+    fn edit_as_designer<'a>(nodes: &'a [AclNode]) -> PermissionRequest<'a> {
+        PermissionRequest {
+            user_id: "u1",
+            role: Role::ProcessDesigner,
+            operation: Operation::EditDrawing,
+            drawing_state: DrawingState::Collaborative,
+            node_id: "n-unit-a",
+            nodes,
+        }
+    }
+
     #[test]
-    fn user_level_acl_wins_over_role_level_on_the_same_node() {
+    fn same_node_user_deny_and_role_allow_is_deny() {
         let nodes = vec![node(
             "n-unit-a",
             None,
@@ -660,15 +748,62 @@ mod tests {
                 allow_row("工艺设计人员", AclPermission::Edit),
             ],
         )];
-        let request = PermissionRequest {
-            user_id: "u1",
-            role: Role::ProcessDesigner,
-            operation: Operation::EditDrawing,
-            drawing_state: DrawingState::Collaborative,
-            node_id: "n-unit-a",
-            nodes: &nodes,
-        };
-        assert!(!decide(&request).allowed, "user row must take precedence");
+        let decision = decide(&edit_as_designer(&nodes));
+        assert!(!decision.allowed);
+        assert_eq!(decision.code.as_deref(), Some(codes::PERM_DENIED_PBS));
+        let row = decision.deciding_row.expect("the denying row");
+        assert_eq!(row.subject, "u1");
+        assert_eq!(row.subject_kind, "user");
+        assert!(!row.allowed);
+        assert_eq!(row.rule, "拒绝为准");
+        assert_eq!(row.other_subject.as_deref(), Some("工艺设计人员"));
+        assert_eq!(row.other_allowed, Some(true));
+    }
+
+    #[test]
+    fn same_node_role_deny_and_user_allow_is_deny() {
+        let nodes = vec![node(
+            "n-unit-a",
+            None,
+            vec![
+                allow_row("u1", AclPermission::Edit),
+                deny_row("工艺设计人员", AclPermission::Edit),
+            ],
+        )];
+        let decision = decide(&edit_as_designer(&nodes));
+        assert!(
+            !decision.allowed,
+            "deny wins; a user allow cannot override a role deny on the same node"
+        );
+        let row = decision.deciding_row.expect("the denying row");
+        assert_eq!(row.subject, "工艺设计人员");
+        assert_eq!(row.subject_kind, "role");
+        assert!(!row.allowed);
+        assert_eq!(row.rule, "拒绝为准");
+        assert_eq!(row.other_subject.as_deref(), Some("u1"));
+        assert_eq!(row.other_allowed, Some(true));
+    }
+
+    #[test]
+    fn nearer_user_allow_still_overrides_an_ancestor_role_deny() {
+        let nodes = vec![
+            node(
+                "n-plant",
+                None,
+                vec![deny_row("工艺设计人员", AclPermission::Edit)],
+            ),
+            node(
+                "n-unit-a",
+                Some("n-plant"),
+                vec![allow_row("u1", AclPermission::Edit)],
+            ),
+        ];
+        let decision = decide(&edit_as_designer(&nodes));
+        assert!(decision.allowed);
+        assert_eq!(decision.effective_node_id.as_deref(), Some("n-unit-a"));
+        let row = decision.deciding_row.expect("the child row");
+        assert_eq!(row.rule, "唯一授权行");
+        assert_eq!(row.subject, "u1");
     }
 
     #[test]
