@@ -3058,6 +3058,93 @@ mod tests {
         assert_eq!(line_value(&state, DRAWING, "L-1001", "管道等级").as_deref(), Some("A1A"));
     }
 
+    /// #91: an upstream value still lands when the inflow drawing is read-only
+    /// and the line tag is claimed. The audit names the source drawing.
+    #[tokio::test]
+    async fn upstream_value_is_accepted_when_the_inflow_side_is_readonly_or_claimed() {
+        let state = state();
+        state
+            .store
+            .as_ref()
+            .expect("store")
+            .set_drawing_state(OTHER, "只读")
+            .expect("readonly inflow drawing");
+        let mut u1 = join_on(&state, "u1", DRAWING).await;
+        let mut u2 = join_on(&state, "u2", OTHER).await;
+        let u2_session = u2.session.as_ref().expect("session").session_id.clone();
+        state.occupancy.lock().await.claim(
+            "L-1001",
+            OTHER,
+            &u2_session,
+            "u2",
+            T0,
+            300,
+        );
+        submit(&state, &mut u1, 0, "op-dn", line_field("L-1001", "公称直径", "DN50")).await;
+        submit(&state, &mut u1, 1, "op-out", outflow("L-1001", OTHER)).await;
+        let base = base_of(&state, &u2).await;
+        let paired = submit(&state, &mut u2, base, "op-in", inflow("L-1001", 20.0)).await;
+        assert!(
+            told(&paired).iter().any(|(drawing, _, _, kinds)| {
+                drawing == OTHER && kinds.iter().any(|kind| kind == "set_property")
+            }),
+            "the inflow room is told: {paired:?}"
+        );
+        assert_eq!(
+            line_value(&state, OTHER, "L-1001", "公称直径").as_deref(),
+            Some("DN50")
+        );
+        let audit = state
+            .store
+            .as_ref()
+            .expect("store")
+            .audit_query(&AuditQuery {
+                object_ref: Some("L-1001".into()),
+                ..AuditQuery::default()
+            })
+            .expect("audit");
+        assert!(
+            audit.items.iter().any(|row| row.change_text.contains("沿连接符")),
+            "the carried value is audited: {:?}",
+            audit.items
+        );
+        let base = base_of(&state, &u1).await;
+        let written = submit(
+            &state,
+            &mut u1,
+            base,
+            "op-grade",
+            line_field("L-1001", "管道等级", "A1A"),
+        )
+        .await;
+        assert_eq!(
+            line_value(&state, OTHER, "L-1001", "管道等级").as_deref(),
+            Some("A1A"),
+            "a later upstream write still lands: {written:?}"
+        );
+        let audit = state
+            .store
+            .as_ref()
+            .expect("store")
+            .audit_query(&AuditQuery {
+                object_ref: Some("L-1001".into()),
+                ..AuditQuery::default()
+            })
+            .expect("audit");
+        assert!(
+            audit.items.iter().any(|row| {
+                row.change_text.contains("沿连接符") && row.change_text.contains(DRAWING)
+            }),
+            "audit names the source drawing: {:?}",
+            audit.items
+        );
+        assert_eq!(
+            state.occupancy.lock().await.get(OTHER, "L-1001").map(|claim| claim.session_id.as_str()),
+            Some(u2_session.as_str()),
+            "the claim is still held"
+        );
+    }
+
     /// A second inflow connector on a line of a drawing that has one is
     /// refused by the server too — two people making one each at the same
     /// moment both pass their own editor's check — and refused whole, by
