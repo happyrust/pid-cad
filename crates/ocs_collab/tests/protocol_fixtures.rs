@@ -101,6 +101,7 @@ fn server_frame_fixtures_round_trip_and_cover_all_types_and_error_codes() {
         "claim_released",
         "op_applied",
         "peer_joined",
+        "peer_disconnected",
         "peer_left",
         "readonly_downgrade",
         "conflict",

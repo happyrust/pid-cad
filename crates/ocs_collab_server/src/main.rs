@@ -582,6 +582,7 @@ mod tests {
             existing_tags: Vec::new(),
             repo_id: repo_id.map(str::to_owned),
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
         }
     }
 

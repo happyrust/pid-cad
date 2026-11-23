@@ -1177,6 +1177,16 @@ impl Store {
         Ok(())
     }
 
+    /// Moves all claims held by `from_session` to `to_session` (#36).
+    pub fn transfer_claims(&self, from_session: &str, to_session: &str) -> Result<usize, String> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE claims SET session_id = ?2 WHERE session_id = ?1",
+            params![from_session, to_session],
+        )
+        .map_err(|err| format!("transfer claims {from_session} -> {to_session}: {err}"))
+    }
+
     pub fn delete_claims_of_session(&self, session_id: &str) -> Result<Vec<String>, String> {
         let conn = self.lock()?;
         let mut stmt = conn

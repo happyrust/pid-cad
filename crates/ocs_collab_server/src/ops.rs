@@ -1704,6 +1704,7 @@ mod tests {
             existing_tags: Vec::new(),
             repo_id: None,
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -1856,6 +1857,7 @@ mod tests {
             existing_tags: Vec::new(),
             repo_id: None,
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
         };
         let welcome = handle_message(&state, &mut late, hello, T0).await;
         let told = welcome
@@ -2440,6 +2442,7 @@ mod tests {
             existing_tags: Vec::new(),
             repo_id: Some(state.repo_id.clone()),
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
         };
         handle_message(state, &mut conn, hello, T0 + 5).await
     }
@@ -2534,6 +2537,7 @@ mod tests {
             existing_tags: Vec::new(),
             repo_id: Some(state.repo_id.clone()),
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
         };
         let reactions = handle_message(&state, &mut late, hello, T0 + 5).await;
         let (_, _, replayed) = welcomed(&reactions);
@@ -2689,6 +2693,7 @@ mod tests {
             existing_tags: Vec::new(),
             repo_id: None,
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -2978,6 +2983,7 @@ mod tests {
             existing_tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             repo_id: Some(state.repo_id.clone()),
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");

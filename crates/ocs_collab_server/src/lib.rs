@@ -8,6 +8,7 @@ pub mod bus;
 pub mod http;
 pub mod ops;
 pub mod perm;
+pub mod proxy;
 pub mod store;
 pub mod ws;
 

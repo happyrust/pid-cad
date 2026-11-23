@@ -61,6 +61,10 @@ pub struct Session {
     pub base_revision: i64,
     pub last_heartbeat: i64,
     pub created_at: i64,
+    /// Unix timestamp when the underlying socket dropped abruptly without an
+    /// explicit close frame (#37). `None` while connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disconnected_at: Option<i64>,
 }
 
 impl Session {
@@ -209,12 +213,46 @@ impl SessionRegistry {
             base_revision,
             last_heartbeat: now,
             created_at: now,
+            disconnected_at: None,
         };
         self.sessions.push(session.clone());
         OpenOutcome::Opened {
             session,
             taken_over,
         }
+    }
+
+    /// Marks an active session as network-disconnected (#37) while keeping it
+    /// active until `heartbeat_timeout`. Returns `(session, hold_until)`.
+    pub fn mark_disconnected(&mut self, session_id: &str, now: i64) -> Option<(Session, i64)> {
+        let timeout = self.config.heartbeat_timeout;
+        let session = self.get_mut(session_id)?;
+        if session.status != SessionStatus::Active {
+            return None;
+        }
+        session.disconnected_at = Some(now);
+        let hold_until = session.last_heartbeat + timeout;
+        Some((session.clone(), hold_until))
+    }
+
+    /// Resumes an existing session belonging to the same `(user_id, drawing_id)`
+    /// on reconnect (#36): marks the previous session `TakenOver` immediately so
+    /// the caller can transfer its claims and open the replacement session.
+    pub fn resume(
+        &mut self,
+        old_session_id: &str,
+        user_id: &str,
+        drawing_id: &str,
+    ) -> Option<Session> {
+        let session = self.get_mut(old_session_id)?;
+        if session.user_id != user_id
+            || session.drawing_id != drawing_id
+            || session.status == SessionStatus::TakenOver
+        {
+            return None;
+        }
+        session.status = SessionStatus::TakenOver;
+        Some(session.clone())
     }
 
     /// Records a heartbeat. Returns the session when it is still usable.
@@ -224,6 +262,7 @@ impl SessionRegistry {
             Some(session) => match session.status {
                 SessionStatus::Active => {
                     session.last_heartbeat = now;
+                    session.disconnected_at = None;
                     Ok(session)
                 }
                 SessionStatus::Stale => Err(codes::SESSION_EXPIRED.to_owned()),

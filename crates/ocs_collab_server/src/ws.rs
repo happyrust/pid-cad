@@ -286,16 +286,37 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, peer_addr: S
     }
 
     // The session and its claims survive a dropped socket: the heartbeat
-    // timeout, not the socket close, owns teardown (VAL-SRV-027). A session
-    // already retired by an explicit `Close` frame needs neither step again —
-    // `close_session` wrote the row and told the room.
+    // timeout, not the socket close, owns teardown (VAL-SRV-027, #37).
+    // Broadcast `peer_disconnected` (NOT `peer_left`) with `hold_until` so
+    // peers show "连接中断" while claims remain held; `peer_left` is only
+    // sent when the session expires or exits via an explicit Close frame.
     if !retired {
-        if let Some(session) = &conn.session {
-            state.bus.publish(
-                &session.drawing_id,
-                &ServerMessage::PeerLeft(peer_of(session)),
-            );
-        }
+        disconnect_session(&state, &conn, now_unix()).await;
+    }
+}
+
+/// Marks a dropped connection's session as network-disconnected (#37) and
+/// notifies peers with `PeerDisconnected` + `hold_until` without releasing its
+/// claims.
+pub async fn disconnect_session(state: &AppState, conn: &Connection, now: i64) {
+    let Some(session) = &conn.session else {
+        return;
+    };
+    let marked = {
+        let mut sessions = state.sessions.lock().await;
+        sessions.mark_disconnected(&session.session_id, now)
+    };
+    if let Some((session, hold_until)) = marked {
+        let mut peer = peer_of(&session, state.session_config.heartbeat_timeout);
+        peer.status = Some("disconnected".to_owned());
+        peer.hold_until = Some(hold_until);
+        state
+            .bus
+            .publish(&session.drawing_id, &ServerMessage::PeerDisconnected(peer));
+        println!(
+            "[ocs_collab_server] 广播 peer_disconnected session={} user={} drawing={} hold_until={hold_until}",
+            session.session_id, session.user_id, session.drawing_id
+        );
     }
 }
 
@@ -344,9 +365,10 @@ async fn close_session(state: &AppState, conn: &Connection) -> bool {
             },
         );
     }
-    state
-        .bus
-        .publish(&retired.drawing_id, &ServerMessage::PeerLeft(peer_of(&retired)));
+    state.bus.publish(
+        &retired.drawing_id,
+        &ServerMessage::PeerLeft(peer_of(&retired, state.session_config.heartbeat_timeout)),
+    );
     println!(
         "[ocs_collab_server] 广播 peer_left session={} user={} drawing={} reason=close-frame",
         retired.session_id, retired.user_id, retired.drawing_id
@@ -506,9 +528,9 @@ async fn send_message(socket: &mut WebSocket, message: &ServerMessage) -> bool {
 /// (`op_applied`, `claim_released`, errors) reaches the originator too.
 pub fn should_forward(own_session_id: &str, message: &ServerMessage) -> bool {
     match message {
-        ServerMessage::PeerJoined(peer) | ServerMessage::PeerLeft(peer) => {
-            peer.session_id != own_session_id
-        }
+        ServerMessage::PeerJoined(peer)
+        | ServerMessage::PeerDisconnected(peer)
+        | ServerMessage::PeerLeft(peer) => peer.session_id != own_session_id,
         _ => true,
     }
 }
@@ -545,6 +567,7 @@ pub async fn handle_message(
         existing_tags,
         repo_id,
         protocol_version,
+        resume_session_id,
         ..
     } = &message
     {
@@ -593,6 +616,7 @@ pub async fn handle_message(
             repo_id.as_deref(),
             *since,
             existing_tags,
+            resume_session_id.as_deref(),
             now,
         )
         .await;
@@ -703,6 +727,7 @@ async fn hello(
     repo_id: Option<&str>,
     since: Option<i64>,
     existing_tags: &[String],
+    resume_session_id: Option<&str>,
     now: i64,
 ) -> Vec<Reaction> {
     if let Some(store) = &state.store {
@@ -803,6 +828,19 @@ async fn hello(
         mode
     };
     let display_name = state.display_name_of(user_id);
+    // #36: If the client reconnects with `resume_session_id` naming its own
+    // previous session on this drawing, take it over immediately before
+    // `sessions.open` so claims can transfer seamlessly and single-editor mode
+    // does not self-reject.
+    let resumed_old = if let Some(old_id) = resume_session_id {
+        state
+            .sessions
+            .lock()
+            .await
+            .resume(old_id, user_id, drawing_id)
+    } else {
+        None
+    };
     let outcome = {
         let mut sessions = state.sessions.lock().await;
         sessions.open(OpenRequest {
@@ -914,6 +952,83 @@ async fn hello(
                 }
             }
 
+            // #36: Complete explicit session resume after the new session row
+            // exists in SQLite (satisfies `claims.session_id` FK): transfer
+            // live claims to the new session, persist old session as TakenOver,
+            // write `session_taken_over` audit, notify old socket, remove old
+            // peer row (`PeerLeft`), and broadcast updated `ClaimGranted`.
+            if let Some(old) = resumed_old {
+                let (transferred, expired_during_transfer) = state
+                    .occupancy
+                    .lock()
+                    .await
+                    .transfer_session(&old.session_id, &session.session_id, now);
+                reactions.extend(expired_release_reactions(state, expired_during_transfer, now));
+                if let Some(store) = &state.store {
+                    if let Err(err) = store.transfer_claims(&old.session_id, &session.session_id) {
+                        eprintln!("[ocs_collab_server] 迁移续接会话占用失败：{err}");
+                    }
+                    if let Err(err) = store.upsert_session(&session_row(&old)) {
+                        eprintln!("[ocs_collab_server] 更新被续接会话失败：{err}");
+                    }
+                    let label = ocs_collab::protocol::format_user_label(
+                        &session.display_name,
+                        &session.user_id,
+                    );
+                    let row = audit_row(
+                        Some(store),
+                        &session,
+                        "session_taken_over",
+                        drawing_id,
+                        format!(
+                            "会话接管：{label} 重连续接，新会话 {} 接管原会话 {}（保留 {} 项占用）",
+                            session.session_id,
+                            old.session_id,
+                            transferred.len()
+                        ),
+                        &conn.peer_addr,
+                        now,
+                    );
+                    if let Err(err) = store.audit_append(&row) {
+                        eprintln!("[ocs_collab_server] 写入重连接管审计失败：{err}");
+                    }
+                }
+                reactions.push(Reaction::SendTo {
+                    session_id: old.session_id.clone(),
+                    message: ServerMessage::Error {
+                        code: codes::SESSION_TAKEN_OVER.to_owned(),
+                        message: "会话已被重连的新连接接续".to_owned(),
+                        level: None,
+                        holder: None,
+                        op_id: None,
+                        rejected: None,
+                        actor_user_id: None,
+                        actor_display_name: None,
+                    },
+                });
+                reactions.push(Reaction::Publish {
+                    drawing_id: drawing_id.to_owned(),
+                    message: ServerMessage::PeerLeft(peer_of(
+                        &old,
+                        state.session_config.heartbeat_timeout,
+                    )),
+                });
+                for claim in transferred {
+                    let dn = (!session.display_name.is_empty())
+                        .then(|| session.display_name.clone());
+                    reactions.push(Reaction::Publish {
+                        drawing_id: claim.drawing_id,
+                        message: ServerMessage::ClaimGranted {
+                            tag: claim.tag,
+                            session_id: claim.session_id,
+                            user_id: Some(claim.user_id),
+                            display_name: dn,
+                            expires_at: Some(claim.expires_at),
+                        },
+                    });
+                }
+            }
+
             // The others on the drawing. The session being welcomed is not
             // its own peer: the first one in finds the list empty, the
             // second finds the first (`VAL-CLI-013`, `VAL-CROSS-006`,
@@ -924,7 +1039,7 @@ async fn hello(
                     .active_peers(drawing_id)
                     .iter()
                     .filter(|peer| peer.session_id != session.session_id)
-                    .map(peer_of)
+                    .map(|p| peer_of(p, state.session_config.heartbeat_timeout))
                     .collect()
             };
             let (claims, expired) = {
@@ -997,7 +1112,10 @@ async fn hello(
             }));
             reactions.push(Reaction::Publish {
                 drawing_id: drawing_id.to_owned(),
-                message: ServerMessage::PeerJoined(peer_of(&session)),
+                message: ServerMessage::PeerJoined(peer_of(
+                    &session,
+                    state.session_config.heartbeat_timeout,
+                )),
             });
             // A session that may not write is told so as it comes in: its
             // user's role does not edit, or the drawing is 只读 already (a
@@ -1579,7 +1697,10 @@ pub async fn sweep_expired(state: &AppState, now: i64) -> Vec<Reaction> {
         }
         reactions.push(Reaction::Publish {
             drawing_id: session.drawing_id.clone(),
-            message: ServerMessage::PeerLeft(peer_of(&session)),
+            message: ServerMessage::PeerLeft(peer_of(
+                &session,
+                state.session_config.heartbeat_timeout,
+            )),
         });
         println!(
             "[ocs_collab_server] 广播 peer_left session={} user={} drawing={} reason=heartbeat-timeout",
@@ -1712,11 +1833,21 @@ fn message_session_id(message: &ClientMessage) -> &str {
     }
 }
 
-fn peer_of(session: &Session) -> Peer {
+fn peer_of(session: &Session, heartbeat_timeout: i64) -> Peer {
+    let (status, hold_until) = if session.disconnected_at.is_some() {
+        (
+            Some("disconnected".to_owned()),
+            Some(session.last_heartbeat + heartbeat_timeout),
+        )
+    } else {
+        (None, None)
+    };
     Peer {
         session_id: session.session_id.clone(),
         user_id: session.user_id.clone(),
         display_name: session.display_name.clone(),
+        status,
+        hold_until,
     }
 }
 
@@ -1905,6 +2036,7 @@ mod tests {
             existing_tags: Vec::new(),
             repo_id: None,
             protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
         }
     }
 
@@ -2628,6 +2760,7 @@ mod tests {
                 existing_tags: Vec::new(),
                 repo_id: None,
                 protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+                resume_session_id: None,
             },
             T0 + 2,
         )
@@ -2969,11 +3102,15 @@ mod tests {
             session_id: "s-1".into(),
             user_id: "u1".into(),
             display_name: "u1".into(),
+            status: None,
+            hold_until: None,
         };
         let other = Peer {
             session_id: "s-2".into(),
             user_id: "u2".into(),
             display_name: "u2".into(),
+            status: None,
+            hold_until: None,
         };
         assert!(!should_forward("s-1", &ServerMessage::PeerJoined(own.clone())));
         assert!(!should_forward("s-1", &ServerMessage::PeerLeft(own)));
@@ -3013,6 +3150,8 @@ mod tests {
             session_id: "s-1".into(),
             user_id: "u1".into(),
             display_name: "u1".into(),
+            status: None,
+            hold_until: None,
         };
         bus.publish("PID-1101", &applied(1));
         bus.publish("PID-1101", &ServerMessage::PeerJoined(me));

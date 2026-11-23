@@ -73,6 +73,11 @@ pub enum ClientMessage {
         /// clients (treated as version 1).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         protocol_version: Option<u32>,
+        /// Previous session id to resume/take over after a transient disconnect
+        /// (#36). Only honored when the previous session belongs to the same
+        /// user and drawing; transfers its live claims to the new session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_session_id: Option<String>,
     },
     /// Keep-alive, expected every 15 s.
     Heartbeat { session_id: String },
@@ -197,6 +202,9 @@ pub enum ServerMessage {
     },
     /// A peer joined this drawing.
     PeerJoined(Peer),
+    /// A peer's network connection dropped without an explicit close; its
+    /// session and claims remain held until `hold_until` (#37).
+    PeerDisconnected(Peer),
     /// A peer left this drawing.
     PeerLeft(Peer),
     /// The session may not write. Sent to a session when its drawing goes
@@ -242,13 +250,21 @@ pub enum ServerMessage {
     },
 }
 
-/// One connected participant.
+/// One connected (or temporarily disconnected) participant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
     pub session_id: String,
     pub user_id: String,
     #[serde(default)]
     pub display_name: String,
+    /// Optional peer connection status (`"disconnected"` while a dropped
+    /// socket waits for reconnect or heartbeat timeout, #37).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Unix timestamp until which a disconnected peer's session and claims are
+    /// retained (#37).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_until: Option<i64>,
 }
 
 /// One outstanding tag claim, as advertised in `welcome`.
@@ -458,6 +474,8 @@ mod tests {
                 session_id: "s-1".into(),
                 user_id: "u1".into(),
                 display_name: "工艺甲".into(),
+                status: None,
+                hold_until: None,
             }],
             claims: vec![ClaimInfo {
                 tag: "V-1001".into(),
@@ -670,6 +688,8 @@ mod tests {
             session_id: "s-2".into(),
             user_id: "u2".into(),
             display_name: "工艺乙".into(),
+            status: None,
+            hold_until: None,
         });
         let value: Value = serde_json::to_value(&msg).expect("peer_joined must serialize");
         assert_eq!(value["type"], "peer_joined");

@@ -13,7 +13,8 @@
         "since": 5,
         "repo_id": "r-00000000-0000-4000-8000-000000000001",
         "existing_tags": ["P-1001", "V-1001"],
-        "protocol_version": 2
+        "protocol_version": 2,
+        "resume_session_id": "s-00000000-0000-4000-8000-000000000000"
       }
     },
     {
@@ -203,6 +204,17 @@
         "session_id": "s-00000000-0000-4000-8000-000000000002",
         "user_id": "u2",
         "display_name": "李工"
+      }
+    },
+    {
+      "name": "peer_disconnected",
+      "frame": {
+        "type": "peer_disconnected",
+        "session_id": "s-00000000-0000-4000-8000-000000000002",
+        "user_id": "u2",
+        "display_name": "李工",
+        "status": "disconnected",
+        "hold_until": 1700000090
       }
     },
     {

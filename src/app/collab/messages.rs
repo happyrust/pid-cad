@@ -99,6 +99,9 @@ pub(super) fn read(text: &str) -> Reading {
             })
         }
         ServerMessage::PeerJoined(peer) => Frame::Event(CollabEvent::PeerJoined(peer_info(&peer))),
+        ServerMessage::PeerDisconnected(peer) => {
+            Frame::Event(CollabEvent::PeerJoined(peer_info(&peer)))
+        }
         ServerMessage::PeerLeft(peer) => Frame::Event(CollabEvent::PeerLeft {
             session_id: peer.session_id,
         }),

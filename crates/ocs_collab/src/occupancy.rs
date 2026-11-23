@@ -172,6 +172,26 @@ impl OccupancyTable {
         }
     }
 
+    /// Transfers every non-expired claim owned by `from_session` to
+    /// `to_session` (used when a user reconnects and resumes their prior
+    /// session, #36). Returns `(transferred, expired)`.
+    pub fn transfer_session(
+        &mut self,
+        from_session: &str,
+        to_session: &str,
+        now: i64,
+    ) -> (Vec<Occupancy>, Vec<Occupancy>) {
+        let expired = self.expire(now);
+        let mut transferred = Vec::new();
+        for claim in &mut self.claims {
+            if claim.session_id == from_session {
+                claim.session_id = to_session.to_owned();
+                transferred.push(claim.clone());
+            }
+        }
+        (transferred, expired)
+    }
+
     /// Drops every claim held by a session (used when it becomes stale).
     pub fn release_session(&mut self, session_id: &str) -> Vec<Occupancy> {
         let mut removed = Vec::new();
