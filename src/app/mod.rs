@@ -810,6 +810,8 @@ pub(super) struct OpenCADStudio {
     /// last inbound frames said. Kept beside `control` because both are
     /// out-of-band channels into the live editor.
     collab: collab::State,
+    /// Editing sessions of the other open drawings (#102).
+    drawing_sessions: Vec<collab::DrawingSession>,
     /// The P&ID module: which of its screens is showing, or none while the
     /// window is the general CAD interface (`--classic`).
     pid_shell: pid_shell::PidShell,
@@ -6448,6 +6450,7 @@ impl OpenCADStudio {
         let mut app = Self {
             control: control::State::new(),
             collab: collab::State::new(),
+            drawing_sessions: Vec::new(),
             // Off: `boot` turns the P&ID module on from the command line.
             pid_shell: pid_shell::PidShell::default(),
             start: Instant::now(),

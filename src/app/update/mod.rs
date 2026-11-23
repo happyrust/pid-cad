@@ -684,6 +684,7 @@ impl OpenCADStudio {
         if self.collab.tags_wanted.is_some() {
             self.answer_collab_tags();
         }
+        self.pump_drawing_sessions();
         // Here, not on a frame tick: ticks come only while something on
         // screen moves, and not at all without a window.
         self.read_queued_inverses();

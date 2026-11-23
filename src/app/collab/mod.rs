@@ -62,6 +62,8 @@ mod collab_pipe_ops;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_geometry;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod collab_per_drawing;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_restored_rollback;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod collab_save_exits;
@@ -625,6 +627,18 @@ pub struct HistoryFilter {
     pub to_text: String,
     pub field_query: String,
     pub action_kind: String,
+}
+
+/// An open drawing's own editing session, when it is not the one
+/// [`State`] on the app is bound to (#102). Its roster and its claims
+/// are not the other drawing's.
+#[derive(Debug)]
+pub(crate) struct DrawingSession {
+    pub tab: u64,
+    pub state: State,
+    /// Events from this drawing's own transport thread (#102).
+    #[cfg(not(target_arch = "wasm32"))]
+    rx: Option<iced::futures::channel::mpsc::Receiver<CollabEvent>>,
 }
 
 /// The GUI's view of the collaboration session.

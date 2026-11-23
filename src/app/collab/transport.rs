@@ -166,6 +166,21 @@ impl Link {
         }
     }
 
+    /// A link for one drawing's session, sharing nothing with the app's
+    /// other sessions (#102).
+    pub(super) fn owned(config: ClientConfig) -> Self {
+        Self {
+            config: Arc::new(Mutex::new(config)),
+            outbox: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            stop: Arc::new(AtomicBool::new(false)),
+            realign: Arc::new(Mutex::new(None)),
+            hold: Arc::new(AtomicBool::new(false)),
+            heartbeat: HEARTBEAT_INTERVAL,
+            leave_wait: LEAVE_WAIT,
+            tags: None,
+        }
+    }
+
     /// A link that shares nothing with the app's client.
     #[cfg(test)]
     fn detached(config: ClientConfig) -> Self {

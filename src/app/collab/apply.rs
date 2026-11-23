@@ -148,6 +148,14 @@ impl OpenCADStudio {
     /// sends `close`, the server ends the session and releases its claims,
     /// and this client stays disconnected until a drawing is opened (#96).
     pub(in crate::app) fn end_collab_if_drawing_closed(&mut self, tab: u64) {
+        if let Some(pos) = self.drawing_sessions.iter().position(|session| session.tab == tab) {
+            let session = self.drawing_sessions.remove(pos);
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(link) = &session.state.link {
+                link.request_hold();
+            }
+            return;
+        }
         let session_drawing = match self.collab.document {
             Some(open) => open == tab,
             None => {
@@ -179,6 +187,111 @@ impl OpenCADStudio {
                 will_retry: false,
             });
         }
+    }
+
+    /// Bind tab `tab_index` to an editing session on `drawing_id` (#102).
+    ///
+    /// The first drawing uses the app's session. Each further open drawing
+    /// gets a session of its own: its own roster and its own claims.
+    pub(in crate::app) fn begin_drawing_session(&mut self, tab_index: usize, drawing_id: &str) {
+        let Some(tab) = self.tabs.get(tab_index).map(|tab| tab.id) else {
+            return;
+        };
+        if self.collab.document.is_none() || self.collab.document == Some(tab) {
+            self.collab.drawing_id = drawing_id.to_owned();
+            self.collab.drawing_given = true;
+            self.collab.document = Some(tab);
+            return;
+        }
+        if let Some(session) = self.drawing_sessions.iter_mut().find(|session| session.tab == tab) {
+            session.state.drawing_id = drawing_id.to_owned();
+            session.state.drawing_given = true;
+            session.state.document = Some(tab);
+            return;
+        }
+        let mut state = super::State::new();
+        state.user_id = self.collab.user_id.clone();
+        state.server_url = self.collab.server_url.clone();
+        state.mode = self.collab.mode.clone();
+        state.drawing_id = drawing_id.to_owned();
+        state.drawing_given = true;
+        state.document = Some(tab);
+        #[cfg(not(target_arch = "wasm32"))]
+        let rx = if state.wanted() {
+            let link = super::transport::Link::owned(state.client_config());
+            let (mut sender, receiver) = iced::futures::channel::mpsc::channel(64);
+            let thread_link = link.clone();
+            std::thread::spawn(move || {
+                let _ = super::transport::run_client(&mut sender, &thread_link);
+            });
+            state.link = Some(link);
+            Some(receiver)
+        } else {
+            None
+        };
+        self.drawing_sessions.push(super::DrawingSession {
+            tab,
+            state,
+            #[cfg(not(target_arch = "wasm32"))]
+            rx,
+        });
+    }
+
+    /// Fold whatever a second drawing's transport has reported into that
+    /// drawing's session, and write a peer's changes onto its tab (#102).
+    pub(in crate::app) fn pump_drawing_sessions(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let count = self.drawing_sessions.len();
+            for index in 0..count {
+                let mut events = Vec::new();
+                if let Some(rx) = self.drawing_sessions[index].rx.as_mut() {
+                    while let Ok(event) = rx.try_recv() {
+                        events.push(event);
+                    }
+                }
+                for event in events {
+                    self.drawing_sessions[index].state.apply(event);
+                }
+                if self.drawing_sessions[index].state.pending_remote.is_empty() {
+                    continue;
+                }
+                std::mem::swap(&mut self.collab, &mut self.drawing_sessions[index].state);
+                self.apply_remote_changes();
+                std::mem::swap(&mut self.collab, &mut self.drawing_sessions[index].state);
+            }
+        }
+    }
+
+    /// Deliver `event` to the session of tab `tab_index`, not to another
+    /// drawing's session.
+    pub(in crate::app) fn apply_drawing_event(
+        &mut self,
+        tab_index: usize,
+        event: super::CollabEvent,
+    ) {
+        let Some(tab) = self.tabs.get(tab_index).map(|tab| tab.id) else {
+            return;
+        };
+        if self.collab.document == Some(tab) {
+            self.collab.apply(event);
+            return;
+        }
+        if let Some(session) = self.drawing_sessions.iter_mut().find(|session| session.tab == tab) {
+            session.state.apply(event);
+        }
+    }
+
+    /// The session bound to tab `tab_index`, when one has been begun.
+    pub(in crate::app) fn drawing_session(&self, tab_index: usize) -> Option<&super::State> {
+        let tab = self.tabs.get(tab_index)?.id;
+        if self.collab.document == Some(tab) {
+            return Some(&self.collab);
+        }
+        self.drawing_sessions
+            .iter()
+            .find(|session| session.tab == tab)
+            .map(|session| &session.state)
     }
 
     /// A drawing was opened after its session had been ended by a close.
@@ -461,6 +574,36 @@ impl OpenCADStudio {
         label: &str,
     ) {
         if self.applying_remote {
+            return;
+        }
+        let extra = self
+            .tabs
+            .get(i)
+            .and_then(|tab| self.drawing_sessions.iter().position(|session| session.tab == tab.id));
+        if extra.is_some() {
+            let Some(payload) = broadcast::payload_for(&changes) else {
+                return;
+            };
+            let readonly = self.drawing_sessions[extra.unwrap()].state.readonly;
+            if readonly {
+                self.command_line.push_warning(&format!(
+                    "协同：当前会话只读，本地的 {} 项变更没有广播，本图与其他人的图已不一致",
+                    changes.len()
+                ));
+                self.keep_unqueued(i, &changes, label, "当前会话只读");
+                return;
+            }
+            match self.drawing_sessions[extra.unwrap()]
+                .state
+                .queue_op(payload, steps, on, label)
+            {
+                Ok(_) => {}
+                Err(reason) => {
+                    self.command_line
+                        .push_warning(&format!("协同：变更未广播（{reason}）"));
+                    self.keep_unqueued(i, &changes, label, &reason);
+                }
+            }
             return;
         }
         // Ahead of `rolling_back`, which is up while the steps are read.
@@ -2120,10 +2263,24 @@ impl OpenCADStudio {
         i: usize,
         entities: &broadcast::EntityImages,
     ) -> Option<(String, String)> {
-        if self.applying_remote || self.collab.claims.is_empty() || !self.is_collab_tab(i) {
+        if self.applying_remote {
             return None;
         }
-        let own = self.collab.user_id.as_str();
+        let tab = self.tabs.get(i).map(|tab| tab.id);
+        let extra = tab.and_then(|tab| self.drawing_sessions.iter().find(|session| session.tab == tab));
+        let (claims, own) = match extra {
+            Some(session) => (&session.state.claims, session.state.user_id.as_str()),
+            None => {
+                if self.collab.claims.is_empty() || !self.is_collab_tab(i) {
+                    return None;
+                }
+                (&self.collab.claims, self.collab.user_id.as_str())
+            }
+        };
+        if claims.is_empty() {
+            return None;
+        }
+        let own = own.to_owned();
         entities
             .iter()
             .flat_map(|(_, before, after)| [before.as_deref(), after.as_deref()])
@@ -2131,8 +2288,8 @@ impl OpenCADStudio {
             .filter_map(crate::pid::persist::PidAuthor::from_entity)
             .filter(|author| !author.tag.is_empty())
             .find_map(|author| {
-                let holder = self.collab.claims.get(&author.tag)?;
-                (holder != own).then(|| (author.tag.clone(), holder.clone()))
+                let holder = claims.get(&author.tag)?;
+                (holder != &own).then(|| (author.tag.clone(), holder.clone()))
             })
     }
 
