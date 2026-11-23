@@ -266,6 +266,9 @@ mod tests {
             display_name: user_id.to_owned(),
             role: role.to_owned(),
             company: "甲设计院".to_owned(),
+            credential_hash: None,
+            credential: None,
+            active: true,
         }
     }
 

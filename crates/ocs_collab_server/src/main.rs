@@ -54,6 +54,21 @@ struct Cli {
     /// Give the database a new repository id before serving it: the start
     /// after a backup has been restored.
     new_repo_id: bool,
+    /// Open mode (#67): accept unregistered users and drawings (for demos/tests).
+    /// Default is strict mode (`false`).
+    open_mode: bool,
+    /// Require credentials verified against `users.credential_hash` (#68).
+    require_auth: bool,
+    /// PEM certificate chain for HTTPS/WSS transport encryption (#69).
+    tls_cert: Option<String>,
+    /// PEM private key for HTTPS/WSS transport encryption (#69).
+    tls_key: Option<String>,
+    /// Optional structured JSON-lines log file path (#39).
+    log_file: Option<String>,
+    /// Directory for periodic/on-demand online SQLite backups (#105).
+    backup_dir: Option<String>,
+    /// Periodic online backup interval in seconds (0 = disabled, #105).
+    backup_interval: u64,
 }
 
 fn default_db_path() -> String {
@@ -70,9 +85,13 @@ fn default_db_path() -> String {
 fn usage() -> &'static str {
     "ocs_collab_server --port <port> --db <path> [--bind <IP 地址>] \
      [--heartbeat-timeout <seconds>] [--claim-ttl <seconds>] [--seed <json>] \
-     [--tie-window-ms <milliseconds>] [--new-repo-id]\n\
-     --bind 默认 127.0.0.1，只有本机能连。服务器没有登录验证、不加密，\
-     监听别的地址（如 0.0.0.0）只适合可信内网。\n\
+     [--tie-window-ms <milliseconds>] [--new-repo-id] [--open-mode] [--require-auth] \
+     [--tls-cert <pem> --tls-key <pem>] [--log-file <path>] \
+     [--backup-dir <dir>] [--backup-interval <seconds>]\n\
+     --bind 默认 127.0.0.1，只有本机能连。监听非本机回环地址时必须同时启用 --require-auth 与 TLS（--tls-cert/--tls-key）。\n\
+     --open-mode 打开开放模式（允许未登记用户与图纸入会，仅用于演示与测试；缺省为严格模式）。\n\
+     --require-auth 强制所有入会与管理接口核对用户凭据（凭据在库中仅存散列）。\n\
+     --tls-cert / --tls-key 启用 HTTPS/WSS 传输加密。\n\
      --new-repo-id 给库换一个新的库标识后照常启动。从备份恢复库文件之后用它启动一次，\
      记着旧库标识的图纸加入时得到 REPO_MISMATCH；每次带它启动都会再换一次。"
 }
@@ -87,6 +106,13 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
         seed: None,
         tie_window_ms: 0,
         new_repo_id: false,
+        open_mode: false,
+        require_auth: false,
+        tls_cert: None,
+        tls_key: None,
+        log_file: None,
+        backup_dir: None,
+        backup_interval: 0,
     };
 
     let mut iter = args.into_iter();
@@ -135,12 +161,49 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
                     .map_err(|_| format!("--tie-window-ms 需要非负整数毫秒数，收到 {raw}"))?;
             }
             "--new-repo-id" => cli.new_repo_id = true,
+            "--open-mode" => cli.open_mode = true,
+            "--require-auth" => cli.require_auth = true,
+            "--tls-cert" => cli.tls_cert = Some(value("--tls-cert")?),
+            "--tls-key" => cli.tls_key = Some(value("--tls-key")?),
+            "--log-file" => cli.log_file = Some(value("--log-file")?),
+            "--backup-dir" => cli.backup_dir = Some(value("--backup-dir")?),
+            "--backup-interval" => {
+                let raw = value("--backup-interval")?;
+                cli.backup_interval = raw.parse().map_err(|_| {
+                    format!("--backup-interval 需要非负整数秒数，收到 {raw}")
+                })?;
+            }
             "--help" | "-h" => return Err(usage().to_owned()),
             other => return Err(format!("未知参数 {other}；用法：{}", usage())),
         }
     }
 
     Ok(cli)
+}
+
+/// Validates startup security invariants (#69):
+/// - `--tls-cert` and `--tls-key` must be supplied together.
+/// - Binding a non-loopback address without `--require-auth` or without TLS
+///   is refused with an explicit reason.
+fn validate_startup(cli: &Cli) -> Result<(), String> {
+    if cli.tls_cert.is_some() != cli.tls_key.is_some() {
+        return Err("--tls-cert 与 --tls-key 必须成对提供".to_owned());
+    }
+    if !cli.bind.is_loopback() {
+        if !cli.require_auth {
+            return Err(format!(
+                "拒绝启动：监听非本机地址 {} 时必须启用身份核对（--require-auth）",
+                cli.bind
+            ));
+        }
+        if cli.tls_cert.is_none() {
+            return Err(format!(
+                "拒绝启动：监听非本机地址 {} 时必须启用传输加密（--tls-cert 与 --tls-key）",
+                cli.bind
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn build_state(cli: &Cli) -> AppState {
@@ -178,6 +241,8 @@ fn build_state(cli: &Cli) -> AppState {
             }
             println!("[ocs_collab_server] 数据库 {}", cli.db);
             AppState::new(Some(store), None, cli.db.clone(), session_config)
+                .with_open_mode(cli.open_mode)
+                .with_require_auth(cli.require_auth)
         }
         Err(err) => {
             eprintln!("[ocs_collab_server] 数据库初始化失败：{err}");
@@ -210,8 +275,13 @@ async fn bind(addr: SocketAddr) -> std::io::Result<(tokio::net::TcpListener, Soc
 
 /// The line startup prints once the server listens on `bound`.
 fn listening_line(bound: SocketAddr, cli: &Cli) -> String {
+    let scheme = if cli.tls_cert.is_some() {
+        "https"
+    } else {
+        "http"
+    };
     format!(
-        "[ocs_collab_server] v{} 监听 http://{bound}（heartbeat_timeout={}s, claim_ttl={}s, tie_window={}ms）",
+        "[ocs_collab_server] v{} 监听 {scheme}://{bound}（heartbeat_timeout={}s, claim_ttl={}s, tie_window={}ms）",
         env!("CARGO_PKG_VERSION"),
         cli.heartbeat_timeout,
         cli.claim_ttl,
@@ -237,6 +307,25 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Err(reason) = validate_startup(&cli) {
+        eprintln!("[ocs_collab_server] {reason}");
+        return ExitCode::from(2);
+    }
+    let tls_config = match (&cli.tls_cert, &cli.tls_key) {
+        (Some(cert), Some(key)) => {
+            match ocs_collab_server::tls::load_server_config(
+                std::path::Path::new(cert),
+                std::path::Path::new(key),
+            ) {
+                Ok(cfg) => Some(cfg),
+                Err(err) => {
+                    eprintln!("[ocs_collab_server] {err}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        _ => None,
+    };
 
     // Bind **before** the database is opened. `build_state` calls
     // `clear_ephemeral`, which drops every session and claim row in the shared
@@ -258,7 +347,65 @@ async fn main() -> ExitCode {
 
     let mut state = build_state(&cli);
     state.tie_window = std::time::Duration::from_millis(cli.tie_window_ms);
+    state.tls_enabled = tls_config.is_some();
+    state.backup_dir = cli.backup_dir.as_ref().map(std::path::PathBuf::from);
+    if let Some(log_path) = &cli.log_file {
+        if let Err(err) = state.logger.set_file(log_path) {
+            eprintln!("[ocs_collab_server] {err}");
+            return ExitCode::FAILURE;
+        }
+    }
+    state.logger.emit(
+        "info",
+        "server_started",
+        serde_json::json!({
+            "bind": bound.to_string(),
+            "tls_enabled": state.tls_enabled,
+            "open_mode": state.open_mode,
+            "auth_enabled": state.require_auth,
+        }),
+    );
     let state = Arc::new(state);
+    // #105: Periodic online SQLite backup task when `--backup-dir` and
+    // `--backup-interval > 0` are configured.
+    if let (Some(backup_dir), Some(store)) = (state.backup_dir.clone(), state.store.clone()) {
+        if cli.backup_interval > 0 {
+            let logger = state.logger.clone();
+            let interval_secs = cli.backup_interval;
+            tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await; // skip immediate tick at t=0
+                let mut seq = 1u64;
+                loop {
+                    tick.tick().await;
+                    match store.backup_into_dir(&backup_dir, seq) {
+                        Ok(info) => {
+                            println!(
+                                "[ocs_collab_server] 在线备份完成 path={} size={} ops={}",
+                                info.path, info.size_bytes, info.total_ops
+                            );
+                            logger.emit(
+                                "info",
+                                "backup_completed",
+                                serde_json::json!({
+                                    "path": info.path,
+                                    "size_bytes": info.size_bytes,
+                                    "total_ops": info.total_ops,
+                                    "max_op_at": info.max_op_at,
+                                }),
+                            );
+                            seq += 1;
+                        }
+                        Err(err) => {
+                            eprintln!("[ocs_collab_server] 在线备份失败：{err}");
+                        }
+                    }
+                }
+            });
+        }
+    }
     // With a tie window, ops made against the current revision wait it out
     // before they commit; this is what commits them.
     if !state.tie_window.is_zero() {
@@ -275,8 +422,10 @@ async fn main() -> ExitCode {
     let app = http::router(state);
 
     println!("{}", listening_line(bound, &cli));
-    if let Some(warning) = exposure_warning(bound) {
-        eprintln!("{warning}");
+    if tls_config.is_none() {
+        if let Some(warning) = exposure_warning(bound) {
+            eprintln!("{warning}");
+        }
     }
 
     let shutdown = async {
@@ -284,13 +433,23 @@ async fn main() -> ExitCode {
         println!("[ocs_collab_server] 收到中断，正在退出");
     };
 
-    if let Err(err) = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await
-    {
+    let serve_result = if let Some(cfg) = tls_config {
+        let tls_listener = ocs_collab_server::tls::TlsListener::new(listener, cfg);
+        axum::serve(
+            tls_listener,
+            app.into_make_service_with_connect_info::<ocs_collab_server::tls::PeerAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+    } else {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+    };
+    if let Err(err) = serve_result {
         eprintln!("[ocs_collab_server] 服务异常退出：{err}");
         return ExitCode::FAILURE;
     }
@@ -414,9 +573,9 @@ mod tests {
         for said in [
             "--bind <IP 地址>",
             "默认 127.0.0.1",
-            "没有登录验证",
-            "不加密",
-            "可信内网",
+            "--open-mode",
+            "--require-auth",
+            "--tls-cert",
         ] {
             assert!(usage.contains(said), "{said} is not in {usage}");
         }
@@ -501,6 +660,13 @@ mod tests {
             seed: None,
             tie_window_ms: 0,
             new_repo_id: false,
+            open_mode: false,
+            require_auth: false,
+            tls_cert: None,
+            tls_key: None,
+            log_file: None,
+            backup_dir: None,
+            backup_interval: 0,
         };
         let state = build_state(&cli);
         assert!(state.store.is_none());
@@ -521,6 +687,13 @@ mod tests {
             seed: None,
             tie_window_ms: 0,
             new_repo_id: false,
+            open_mode: false,
+            require_auth: false,
+            tls_cert: None,
+            tls_key: None,
+            log_file: None,
+            backup_dir: None,
+            backup_interval: 0,
         };
         let state = build_state(&cli);
         assert!(state.db_healthy());
@@ -553,6 +726,7 @@ mod tests {
     fn cli_on(db: &str, new_repo_id: bool) -> Cli {
         Cli {
             new_repo_id,
+            open_mode: true,
             ..parse_args(args(&["--db", db])).expect("flags parse")
         }
     }
@@ -581,6 +755,9 @@ mod tests {
             since,
             existing_tags: Vec::new(),
             repo_id: repo_id.map(str::to_owned),
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
+            credential: None,
         }
     }
 
@@ -813,5 +990,37 @@ mod tests {
             Some(vec![CLOSE]),
             "a close, then the end of the stream"
         );
+    }
+
+    /// #69: Non-loopback bind refuses startup without `--require-auth` and TLS.
+    #[test]
+    fn non_loopback_bind_requires_auth_and_tls() {
+        let no_auth = parse_args(args(&["--bind", "0.0.0.0"])).expect("parses");
+        let err = validate_startup(&no_auth).expect_err("must refuse without auth");
+        assert!(err.contains("--require-auth"), "{err}");
+
+        let no_tls =
+            parse_args(args(&["--bind", "0.0.0.0", "--require-auth"])).expect("parses");
+        let err = validate_startup(&no_tls).expect_err("must refuse without TLS");
+        assert!(err.contains("--tls-cert"), "{err}");
+
+        let half_tls = parse_args(args(&["--tls-cert", "a.pem"])).expect("parses");
+        assert!(validate_startup(&half_tls).is_err());
+
+        let full = parse_args(args(&[
+            "--bind",
+            "0.0.0.0",
+            "--require-auth",
+            "--tls-cert",
+            "a.pem",
+            "--tls-key",
+            "b.pem",
+        ]))
+        .expect("parses");
+        assert!(validate_startup(&full).is_ok());
+
+        // Loopback remains allowed without TLS/auth for local single-machine use.
+        let local = parse_args(args(&[])).expect("parses");
+        assert!(validate_startup(&local).is_ok());
     }
 }

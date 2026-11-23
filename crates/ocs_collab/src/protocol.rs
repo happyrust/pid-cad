@@ -7,6 +7,28 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Current wire protocol version spoken by this build.
+pub const PROTOCOL_VERSION: u32 = 2;
+/// Oldest wire protocol version this build remains compatible with (v1 = clients
+/// predating the explicit `protocol_version` field).
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
+
+/// Whether a client speaking `version` can collaborate with this server.
+pub fn is_protocol_compatible(version: u32) -> bool {
+    (MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version)
+}
+
+/// Formats a user as `显示名（user_id）` when a distinct display name is
+/// registered, or plain `user_id` when no display name is registered (#27).
+pub fn format_user_label(display_name: &str, user_id: &str) -> String {
+    let name = display_name.trim();
+    if name.is_empty() || name == user_id {
+        user_id.to_owned()
+    } else {
+        format!("{name}（{user_id}）")
+    }
+}
+
 /// A message sent by a client to the server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -47,6 +69,18 @@ pub enum ClientMessage {
         /// somebody else places. Absent when there is none to list.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         existing_tags: Vec<String>,
+        /// Wire protocol version spoken by the client. Absent from older
+        /// clients (treated as version 1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_version: Option<u32>,
+        /// Previous session id to resume/take over after a transient disconnect
+        /// (#36). Only honored when the previous session belongs to the same
+        /// user and drawing; transfers its live claims to the new session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_session_id: Option<String>,
+        /// Authentication credential/token for `user_id` (#68). Never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<String>,
     },
     /// Keep-alive, expected every 15 s.
     Heartbeat { session_id: String },
@@ -74,6 +108,9 @@ pub enum ClientMessage {
         #[serde(default)]
         text: String,
     },
+    /// Asks the server to re-evaluate whether this session may write now (#72).
+    /// Answered immediately with [`ServerMessage::WriteStatus`].
+    RequestWrite { session_id: String },
 }
 
 /// A message sent by the server to a client.
@@ -107,6 +144,16 @@ pub enum ServerMessage {
         /// replayed, and every `op` it sends is answered `NOT_ALIGNED`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align_refused: Option<AlignRefusal>,
+        /// Wire protocol version spoken by the server. Absent from older servers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_version: Option<u32>,
+        /// Registered display name of the joining user (empty when unregistered, #27).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        display_name: String,
+        /// Whether the server is running in `--open-mode` (accepting
+        /// unregistered users/drawings, #67).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_mode: Option<bool>,
     },
     /// Structured failure. `level` names the first denying tier when the
     /// failure came out of the permission chain.
@@ -126,14 +173,34 @@ pub enum ServerMessage {
         /// `op_applied`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rejected: Option<bool>,
+        /// The user who caused this refusal (e.g., prior writer in `OP_SUPERSEDED`,
+        /// deleter in `OBJECT_DELETED`, claim holder in `CLAIM_HELD`, #28).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor_user_id: Option<String>,
+        /// Registered display name of `actor_user_id`, when available (#28).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor_display_name: Option<String>,
     },
-    /// Tag ownership granted.
-    ClaimGranted { tag: String, session_id: String },
+    /// Tag ownership granted. Broadcast to every session on the drawing (#25).
+    ClaimGranted {
+        tag: String,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at: Option<i64>,
+    },
     /// Tag ownership refused; `holder` still owns it until `expires_at`.
     ClaimDenied {
         tag: String,
         holder: String,
         expires_at: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_user_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_display_name: Option<String>,
     },
     /// Tag ownership ended. `reason` is `released` or `expired`.
     ClaimReleased { tag: String, reason: String },
@@ -145,6 +212,9 @@ pub enum ServerMessage {
     },
     /// A peer joined this drawing.
     PeerJoined(Peer),
+    /// A peer's network connection dropped without an explicit close; its
+    /// session and claims remain held until `hold_until` (#37).
+    PeerDisconnected(Peer),
     /// A peer left this drawing.
     PeerLeft(Peer),
     /// The session may not write. Sent to a session when its drawing goes
@@ -167,6 +237,20 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
     },
+    /// Automatic notification that this session's write permission has been
+    /// restored without needing to reconnect (#71).
+    WriteRestored { reason: String },
+    /// Immediate answer to [`ClientMessage::RequestWrite`] (#72).
+    WriteStatus {
+        writable: bool,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder: Option<String>,
+    },
     /// A conflict entry was created and awaits adjudication.
     Conflict {
         conflict_id: String,
@@ -179,16 +263,39 @@ pub enum ServerMessage {
         /// knows its op went into the entry.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         op_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_a: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name_a: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_b: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name_b: Option<String>,
+        /// Value the field held before the two tying writes (#79).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_value: Option<String>,
+        /// Instructs tying senders to revert their local value back to
+        /// `previous_value` until adjudication arrives (#79).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revert_local: Option<bool>,
     },
 }
 
-/// One connected participant.
+/// One connected (or temporarily disconnected) participant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
     pub session_id: String,
     pub user_id: String,
     #[serde(default)]
     pub display_name: String,
+    /// Optional peer connection status (`"disconnected"` while a dropped
+    /// socket waits for reconnect or heartbeat timeout, #37).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Unix timestamp until which a disconnected peer's session and claims are
+    /// retained (#37).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_until: Option<i64>,
 }
 
 /// One outstanding tag claim, as advertised in `welcome`.
@@ -197,6 +304,8 @@ pub struct ClaimInfo {
     pub tag: String,
     pub session_id: String,
     pub user_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display_name: String,
     pub expires_at: i64,
 }
 
@@ -270,7 +379,55 @@ pub mod codes {
     /// (`VAL-PIPE-024`, `VAL-CROSS-009`). The editor refuses it before it is
     /// made; the server refuses the second of two made at once.
     pub const DUPLICATE_INFLOW_CONNECTOR: &str = "DUPLICATE_INFLOW_CONNECTOR";
+    /// The client's `hello.protocol_version` is outside the range this server
+    /// supports; no editing session is established.
+    pub const PROTOCOL_VERSION_UNSUPPORTED: &str = "PROTOCOL_VERSION_UNSUPPORTED";
+    /// Credential/token verification failed (#68).
+    pub const AUTH_FAILED: &str = "AUTH_FAILED";
+    /// The user account is disabled (`active = 0`, #68).
+    pub const USER_DISABLED: &str = "USER_DISABLED";
+
+    /// Every error/reason code registered in this protocol crate.
+    /// Shared fixture tests assert that each one has a frame example.
+    pub const ALL: &[&str] = &[
+        SESSION_UNKNOWN,
+        SESSION_EXPIRED,
+        SESSION_TAKEN_OVER,
+        HELLO_REQUIRED,
+        UNKNOWN_MESSAGE_TYPE,
+        INVALID_MESSAGE,
+        UNKNOWN_DRAWING,
+        UNKNOWN_USER,
+        PERM_DENIED_ROLE,
+        PERM_DENIED_PBS,
+        PERM_DENIED_STATE,
+        PERM_UNKNOWN_SUBJECT,
+        PERM_UNKNOWN_OPERATION,
+        PERM_INVALID_STATE,
+        OBJECT_REFERENCED,
+        REPO_MISMATCH,
+        REVISION_AHEAD,
+        REPLAY_GAP,
+        NOT_ALIGNED,
+        STORE_UNAVAILABLE,
+        OBJECT_DELETED,
+        INVALID_STATE_TRANSITION,
+        STALE_BASE_REVISION,
+        CONFLICT_UNKNOWN,
+        CONFLICT_ALREADY_RESOLVED,
+        OP_SUPERSEDED,
+        CLAIM_HELD,
+        DUPLICATE_INFLOW_CONNECTOR,
+        PROTOCOL_VERSION_UNSUPPORTED,
+        AUTH_FAILED,
+        USER_DISABLED,
+    ];
 }
+
+/// Shared wire-protocol JSON fixtures (client frames, server frames, all
+/// registered error codes, and legacy frames) used by both `ocs_collab`
+/// round-trip tests and server/scenario tests.
+pub const FIXTURE_JSON: &str = include_str!("../fixtures/protocol_frames.json");
 
 /// Reasons carried by [`ServerMessage::ClaimReleased`].
 pub mod release_reasons {
@@ -354,16 +511,22 @@ mod tests {
                 session_id: "s-1".into(),
                 user_id: "u1".into(),
                 display_name: "工艺甲".into(),
+                status: None,
+                hold_until: None,
             }],
             claims: vec![ClaimInfo {
                 tag: "V-1001".into(),
                 session_id: "s-1".into(),
                 user_id: "u1".into(),
+                display_name: "工艺甲".into(),
                 expires_at: 1_700_000_000,
             }],
             repo_id: "r-test".into(),
             replay_from: None,
             align_refused: None,
+            protocol_version: Some(PROTOCOL_VERSION),
+            display_name: "工艺甲".into(),
+            open_mode: Some(false),
         };
         let value: Value = serde_json::to_value(&msg).expect("welcome must serialize");
         assert_eq!(value["type"], "welcome");
@@ -381,6 +544,8 @@ mod tests {
             holder: None,
             op_id: None,
             rejected: None,
+            actor_user_id: None,
+            actor_display_name: None,
         };
         let text = serde_json::to_string(&msg).expect("error must serialize");
         assert!(!text.contains("level"));
@@ -422,6 +587,9 @@ mod tests {
             repo_id: "r-test".into(),
             replay_from: Some(6),
             align_refused: None,
+            protocol_version: None,
+            display_name: String::new(),
+            open_mode: None,
         };
         let value: Value = serde_json::to_value(&replaying).expect("serialize");
         assert_eq!(value["replay_from"], 6);
@@ -434,6 +602,8 @@ mod tests {
             holder: None,
             op_id: Some("op-s1-12".into()),
             rejected: Some(true),
+            actor_user_id: None,
+            actor_display_name: None,
         };
         let value: Value = serde_json::to_value(&refused).expect("serialize");
         assert_eq!((&value["op_id"], &value["rejected"]), (&Value::from("op-s1-12"), &Value::from(true)));
@@ -457,6 +627,12 @@ mod tests {
             value_a: "1.6MPa".into(),
             value_b: "2.5MPa".into(),
             op_ids: vec!["op-a".into(), "op-b".into()],
+            user_a: None,
+            display_name_a: None,
+            user_b: None,
+            display_name_b: None,
+            previous_value: None,
+            revert_local: None,
         };
         assert_eq!(
             serde_json::to_value(&tied).expect("serialize")["op_ids"],
@@ -553,6 +729,8 @@ mod tests {
             session_id: "s-2".into(),
             user_id: "u2".into(),
             display_name: "工艺乙".into(),
+            status: None,
+            hold_until: None,
         });
         let value: Value = serde_json::to_value(&msg).expect("peer_joined must serialize");
         assert_eq!(value["type"], "peer_joined");
@@ -619,10 +797,59 @@ mod tests {
             tag: "V-1001".into(),
             holder: "s-1".into(),
             expires_at: 1_700_000_300,
+            holder_user_id: Some("u1".into()),
+            holder_display_name: Some("张工".into()),
         };
         let value: Value = serde_json::to_value(&msg).expect("claim_denied must serialize");
         assert_eq!(value["type"], "claim_denied");
         assert_eq!(value["holder"], "s-1");
         assert_eq!(value["expires_at"], 1_700_000_300_i64);
+        assert_eq!(value["holder_display_name"], "张工");
+    }
+
+    #[test]
+    fn format_user_label_omits_empty_parens_when_unregistered() {
+        assert_eq!(format_user_label("张工", "u1"), "张工（u1）");
+        assert_eq!(format_user_label("", "u1"), "u1");
+        assert_eq!(format_user_label("   ", "u1"), "u1");
+        assert_eq!(format_user_label("u1", "u1"), "u1");
+    }
+
+    #[test]
+    fn protocol_version_negotiation_round_trips_and_is_backward_compatible() {
+        // Legacy hello without protocol_version still parses.
+        let legacy: ClientMessage = serde_json::from_str(
+            r#"{"type":"hello","user_id":"u1","drawing_id":"PID-1101","mode":"协同编辑"}"#,
+        )
+        .expect("legacy hello");
+        let legacy_json = serde_json::to_value(&legacy).expect("serialize");
+        assert!(legacy_json.get("protocol_version").is_none());
+
+        // New hello with protocol_version preserves it on round-trip.
+        let modern: ClientMessage = serde_json::from_str(
+            r#"{"type":"hello","user_id":"u1","drawing_id":"PID-1101","mode":"协同编辑","protocol_version":2}"#,
+        )
+        .expect("modern hello");
+        let modern_json = serde_json::to_value(&modern).expect("serialize");
+        assert_eq!(modern_json["protocol_version"], 2);
+
+        // Welcome with protocol_version preserves it; legacy welcome without it still parses.
+        let legacy_welcome: ServerMessage = serde_json::from_str(
+            r#"{"type":"welcome","session_id":"s-1","base_revision":0,"peers":[],"claims":[]}"#,
+        )
+        .expect("legacy welcome");
+        assert!(serde_json::to_value(&legacy_welcome)
+            .expect("serialize")
+            .get("protocol_version")
+            .is_none());
+
+        let modern_welcome: ServerMessage = serde_json::from_str(
+            r#"{"type":"welcome","session_id":"s-1","base_revision":0,"peers":[],"claims":[],"protocol_version":2}"#,
+        )
+        .expect("modern welcome");
+        assert_eq!(
+            serde_json::to_value(&modern_welcome).expect("serialize")["protocol_version"],
+            2
+        );
     }
 }

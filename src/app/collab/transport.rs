@@ -1019,6 +1019,9 @@ fn run_session(
         repo_id: claim
             .map(|(repo_id, _)| repo_id)
             .filter(|repo_id| !repo_id.is_empty()),
+        protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+        resume_session_id: None,
+        credential: None,
     };
     let wire = send_json(&mut ws, &hello)?;
     log_frame(false, &wire, None);

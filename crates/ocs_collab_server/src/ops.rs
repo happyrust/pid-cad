@@ -253,6 +253,12 @@ fn taken_before(state: &AppState, session: &Session, op_id: &str) -> Option<Vec<
             value_a: row.value_a,
             value_b: row.value_b,
             op_ids,
+            user_a: row.user_a,
+            display_name_a: row.display_name_a,
+            user_b: row.user_b,
+            display_name_b: row.display_name_b,
+            previous_value: None,
+            revert_local: Some(true),
         })
         .collect();
     said.extend(logged.map(|op| ServerMessage::OpApplied {
@@ -343,7 +349,7 @@ pub fn receive(
         });
         if let Some(index) = tied {
             let first = drawing.held.remove(index);
-            return tie(state, drawing, first, &incoming, changes);
+            return tie(state, &mut drawings, first, &incoming, changes);
         }
         // Only what could tie waits: a deletion or a new symbol contends
         // for nothing and commits at once.
@@ -684,18 +690,27 @@ pub fn objects(
             let fields: serde_json::Map<String, Value> = object
                 .fields
                 .iter()
-                .map(|(field, state)| {
+                .map(|(field, field_state)| {
+                    let display_name = state.display_name_of(&field_state.user_id);
                     (
                         field.clone(),
                         serde_json::json!({
-                            "value": state.value,
-                            "revision": state.revision,
-                            "user_id": state.user_id,
+                            "value": field_state.value,
+                            "revision": field_state.revision,
+                            "user_id": field_state.user_id,
+                            "display_name": display_name,
                         }),
                     )
                 })
                 .collect();
-            serde_json::json!({ "object_ref": tag, "fields": fields })
+            let mut obj = serde_json::json!({ "object_ref": tag, "fields": fields });
+            if !object.overrides.is_empty() {
+                obj["overrides"] = serde_json::json!(object.overrides.iter().collect::<Vec<_>>());
+            }
+            if let Some(src) = &object.tag_source {
+                obj["tag_source"] = serde_json::json!(src);
+            }
+            obj
         })
         .collect();
     (drawing.model.revision(), items)
@@ -772,6 +787,9 @@ pub struct Resolved {
     pub revision: i64,
     /// The `op_applied` that told the room (it has gone out already).
     pub message: ServerMessage,
+    /// Any downstream `(drawing_id, revision)` pairs updated via off-page
+    /// connectors as a result of this ruling (#34).
+    pub downstream_revisions: Vec<(String, i64)>,
 }
 
 /// Why a ruling was not carried out.
@@ -927,6 +945,18 @@ pub fn resolve(
             .commit(change, name, revision, &session_id, resolved_by);
     }
     drawing.model.set_revision(revision);
+    state.metrics.record_applied_op(&row.drawing_id, now);
+    state.logger.emit(
+        "info",
+        "conflict_resolved",
+        serde_json::json!({
+            "drawing_id": row.drawing_id,
+            "conflict_id": conflict_id,
+            "resolved_by": resolved_by,
+            "resolution": resolution,
+            "revision": revision,
+        }),
+    );
 
     let custom_value = (resolution == RESOLUTION_MANUAL).then_some(final_value.as_str());
     match store.resolve_conflict(conflict_id, resolution, custom_value, resolved_by) {
@@ -940,25 +970,55 @@ pub fn resolve(
         "[ocs_collab_server] 裁决 conflict={conflict_id} by={resolved_by} resolution={resolution} object_ref={} field={} -> 广播 op_applied revision={revision} at={now}",
         row.object_ref, row.field
     );
+    let resolved_dn = state.display_name_of(resolved_by);
     let row = ConflictRow {
         status: STATUS_RESOLVED.to_owned(),
         resolution: Some(resolution.to_owned()),
         resolved_value: custom_value.map(str::to_owned),
         resolved_by: Some(resolved_by.to_owned()),
+        resolved_by_display_name: (!resolved_dn.is_empty()).then_some(resolved_dn),
         ..row
     };
     let message = ServerMessage::OpApplied {
         op_id,
         revision,
-        changes: broadcast,
+        changes: broadcast.clone(),
     };
     // A ruling is an op like any other, and is told to the room in its turn.
     announce(state, &row.drawing_id, &message);
+
+    // #34: Propagate resolved line-level attributes across paired off-page
+    // connectors, recording downstream audit rows citing the source drawing.
+    let resolver_session = Session {
+        session_id,
+        drawing_id: row.drawing_id.clone(),
+        user_id: resolved_by.to_owned(),
+        display_name: state.display_name_of(resolved_by),
+        mode: "协同编辑".to_owned(),
+        workspace: "默认工作区".to_owned(),
+        status: ocs_collab::SessionStatus::Active,
+        base_revision: revision,
+        last_heartbeat: now,
+        created_at: now,
+        disconnected_at: None,
+    };
+    let mut rooms = LinkedRooms {
+        state,
+        drawings: &mut drawings,
+        by: &resolver_session,
+        peer_addr: "127.0.0.1",
+        now,
+        told: Vec::new(),
+    };
+    ocs_collab::link::follow(&mut rooms, &row.drawing_id, revision, &broadcast);
+    let downstream_revisions = revisions_reached(&rooms.told);
+
     Ok(Resolved {
         row,
         final_value,
         revision,
         message,
+        downstream_revisions,
     })
 }
 
@@ -972,6 +1032,42 @@ pub fn topology(state: &AppState, drawing_id: &str) -> (i64, Value) {
         .entry(drawing_id.to_owned())
         .or_insert_with(|| DrawingOps::load(state, drawing_id));
     (drawing.model.revision(), drawing.model.topology())
+}
+
+/// #32: Unpaired off-page connectors on `drawing_id` with exact reason codes.
+pub fn unpaired_connectors(
+    state: &AppState,
+    drawing_id: &str,
+) -> (i64, Vec<ocs_collab::link::UnpairedConnector>) {
+    let mut drawings = state.drawings.lock().expect("drawings mutex poisoned");
+    let revision = drawings
+        .entry(drawing_id.to_owned())
+        .or_insert_with(|| DrawingOps::load(state, drawing_id))
+        .model
+        .revision();
+    let dummy_session = Session {
+        session_id: String::new(),
+        drawing_id: drawing_id.to_owned(),
+        user_id: String::new(),
+        display_name: String::new(),
+        mode: String::new(),
+        workspace: String::new(),
+        status: ocs_collab::SessionStatus::Active,
+        base_revision: revision,
+        last_heartbeat: 0,
+        created_at: 0,
+        disconnected_at: None,
+    };
+    let mut rooms = LinkedRooms {
+        state,
+        drawings: &mut drawings,
+        by: &dummy_session,
+        peer_addr: "127.0.0.1",
+        now: 0,
+        told: Vec::new(),
+    };
+    let items = ocs_collab::link::unpaired_connectors(&mut rooms, drawing_id);
+    (revision, items)
 }
 
 /// How often the flush loop looks, for a given window: often enough that an
@@ -1010,6 +1106,17 @@ fn stale(incoming: &Incoming<'_>, current: i64) -> Outcome {
 /// whose other changes may still take effect is not `rejected`; the caller
 /// that finds nothing took effect after all says so with [`reject_whole`].
 fn answer(incoming: &Incoming<'_>, code: &str, message: String, rejected: bool) -> ServerMessage {
+    answer_with_actor(incoming, code, message, rejected, None, None)
+}
+
+fn answer_with_actor(
+    incoming: &Incoming<'_>,
+    code: &str,
+    message: String,
+    rejected: bool,
+    actor_user_id: Option<String>,
+    actor_display_name: Option<String>,
+) -> ServerMessage {
     ServerMessage::Error {
         code: code.to_owned(),
         message,
@@ -1017,6 +1124,8 @@ fn answer(incoming: &Incoming<'_>, code: &str, message: String, rejected: bool) 
         holder: None,
         op_id: Some(incoming.op_id.to_owned()),
         rejected: rejected.then_some(true),
+        actor_user_id,
+        actor_display_name,
     }
 }
 
@@ -1135,20 +1244,27 @@ fn judge_and_commit(
                 deleted_revision,
                 deleted_by,
                 last_value,
-            } => reactions.push(refused(
-                state,
-                incoming,
-                codes::OBJECT_DELETED,
-                "change_rejected_deleted",
-                &object_ref,
-                format!(
-                    "{} {object_ref}.{}: 提交 {} 未生效，对象已在修订 {deleted_revision} 被 {deleted_by} 删除；删除前的值 {}",
-                    change.kind,
-                    change.field,
-                    change.value,
-                    last_value.as_deref().unwrap_or("(未知)")
-                ),
-            )),
+            } => {
+                let deleted_dn = state.display_name_of(&deleted_by);
+                let deleted_label =
+                    ocs_collab::protocol::format_user_label(&deleted_dn, &deleted_by);
+                reactions.push(refused_with_actor(
+                    state,
+                    incoming,
+                    codes::OBJECT_DELETED,
+                    "change_rejected_deleted",
+                    &object_ref,
+                    format!(
+                        "{} {object_ref}.{}: 提交 {} 未生效，对象已在修订 {deleted_revision} 被 {deleted_label} 删除；删除前的值 {}",
+                        change.kind,
+                        change.field,
+                        change.value,
+                        last_value.as_deref().unwrap_or("(未知)")
+                    ),
+                    Some(deleted_by),
+                    (!deleted_dn.is_empty()).then_some(deleted_dn),
+                ));
+            }
             Verdict::Referenced { object_ref, by } => reactions.push(refused(
                 state,
                 incoming,
@@ -1341,6 +1457,19 @@ fn commit(
         }
     };
     drawing.model.set_revision(revision);
+    state.metrics.record_applied_op(&session.drawing_id, incoming.now);
+    state.logger.emit(
+        "info",
+        "op_applied",
+        serde_json::json!({
+            "drawing_id": session.drawing_id,
+            "session_id": session.session_id,
+            "user_id": session.user_id,
+            "op_id": incoming.op_id,
+            "revision": revision,
+            "changes_count": changes.len(),
+        }),
+    );
     let message = ServerMessage::OpApplied {
         op_id: incoming.op_id.to_owned(),
         revision,
@@ -1386,7 +1515,34 @@ fn refused(
     object_ref: &str,
     text: String,
 ) -> Reaction {
+    refused_with_actor(state, incoming, code, action, object_ref, text, None, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refused_with_actor(
+    state: &AppState,
+    incoming: &Incoming<'_>,
+    code: &str,
+    action: &str,
+    object_ref: &str,
+    text: String,
+    actor_user_id: Option<String>,
+    actor_display_name: Option<String>,
+) -> Reaction {
     let session = incoming.session;
+    state.metrics.record_denied_write(&session.drawing_id);
+    state.logger.emit(
+        "warn",
+        action,
+        serde_json::json!({
+            "drawing_id": session.drawing_id,
+            "session_id": session.session_id,
+            "user_id": session.user_id,
+            "op_id": incoming.op_id,
+            "object_ref": object_ref,
+            "code": code,
+        }),
+    );
     if let Some(store) = &state.store {
         let row = ws::audit_row(
             Some(store),
@@ -1405,11 +1561,13 @@ fn refused(
         "[ocs_collab_server] 入站 op session={} user={} op_id={} base_revision={} object_ref={object_ref} -> error {code} at={}",
         session.session_id, session.user_id, incoming.op_id, incoming.base_revision, incoming.now
     );
-    Reaction::Send(answer(
+    Reaction::Send(answer_with_actor(
         incoming,
         code,
         format!("操作 {}：{text}", incoming.op_id),
         false,
+        actor_user_id,
+        actor_display_name,
     ))
 }
 
@@ -1423,9 +1581,12 @@ fn yielded(
     (winner, winner_revision, winner_user): (String, i64, String),
 ) -> Reaction {
     let session = incoming.session;
+    state.metrics.record_denied_write(&session.drawing_id);
+    let winner_dn = state.display_name_of(&winner_user);
+    let winner_label = ocs_collab::protocol::format_user_label(&winner_dn, &winner_user);
     let what = format!("{}.{}", object_ref, change.field);
     let text = format!(
-        "{} {what}: {} 让位于 {winner}（基线 {} 落后于修订 {winner_revision}，{winner_user} 先写入）",
+        "{} {what}: {} 让位于 {winner}（基线 {} 落后于修订 {winner_revision}，{winner_label} 先写入）",
         change.kind, change.value, incoming.base_revision
     );
     if let Some(store) = &state.store {
@@ -1458,14 +1619,16 @@ fn yielded(
         codes::OP_SUPERSEDED,
         incoming.now
     );
-    Reaction::Send(answer(
+    Reaction::Send(answer_with_actor(
         incoming,
         codes::OP_SUPERSEDED,
         format!(
-            "操作 {} 的基线 {} 落后：{what} 已在修订 {winner_revision} 被 {winner_user} 改为 {winner}，本次提交的 {} 未生效",
+            "操作 {} 的基线 {} 落后：{what} 已在修订 {winner_revision} 被 {winner_label} 改为 {winner}，本次提交的 {} 未生效",
             incoming.op_id, incoming.base_revision, change.value
         ),
         false,
+        Some(winner_user),
+        (!winner_dn.is_empty()).then_some(winner_dn),
     ))
 }
 
@@ -1475,12 +1638,15 @@ fn yielded(
 /// the two ops carry is unaffected and commits now.
 fn tie(
     state: &AppState,
-    drawing: &mut DrawingOps,
+    drawings: &mut HashMap<String, DrawingOps>,
     first: HeldOp,
     second: &Incoming<'_>,
     second_changes: Vec<Change>,
 ) -> Outcome {
     let drawing_id = second.session.drawing_id.clone();
+    let drawing = drawings
+        .entry(drawing_id.clone())
+        .or_insert_with(|| DrawingOps::load(state, &drawing_id));
     let first_incoming = Incoming {
         session: &first.session,
         peer_addr: &first.peer_addr,
@@ -1508,6 +1674,12 @@ fn tie(
             continue;
         };
         let conflict_id = new_conflict_id();
+        let user_a = first.session.user_id.clone();
+        let dn_a = state.display_name_of(&user_a);
+        let display_name_a = (!dn_a.is_empty()).then_some(dn_a);
+        let user_b = second.session.user_id.clone();
+        let dn_b = state.display_name_of(&user_b);
+        let display_name_b = (!dn_b.is_empty()).then_some(dn_b);
         if let Some(store) = &state.store {
             let row = ConflictRow {
                 conflict_id: conflict_id.clone(),
@@ -1521,6 +1693,11 @@ fn tie(
                 resolution: None,
                 resolved_value: None,
                 resolved_by: None,
+                user_a: Some(user_a.clone()),
+                display_name_a: display_name_a.clone(),
+                user_b: Some(user_b.clone()),
+                display_name_b: display_name_b.clone(),
+                resolved_by_display_name: None,
             };
             let held = [first.op_id.clone(), second.op_id.to_owned()];
             if let Err(err) = store.insert_conflict_holding(&row, &held) {
@@ -1562,6 +1739,12 @@ fn tie(
             first.op_id,
             second.now
         );
+        let previous_value = drawing
+            .model
+            .field(&object_ref, &field)
+            .map(|f| f.value.clone())
+            .or_else(|| ours.old_value.clone())
+            .or_else(|| theirs.old_value.clone());
         reactions.push(Reaction::Publish {
             drawing_id: drawing_id.clone(),
             message: ServerMessage::Conflict {
@@ -1572,6 +1755,12 @@ fn tie(
                 value_b,
                 // Neither op gets any other answer for this change.
                 op_ids: vec![first.op_id.clone(), second.op_id.to_owned()],
+                user_a: Some(user_a),
+                display_name_a,
+                user_b: Some(user_b),
+                display_name_b,
+                previous_value,
+                revert_local: Some(true),
             },
         });
     }
@@ -1581,7 +1770,15 @@ fn tie(
         if rest.is_empty() {
             continue;
         }
-        let mut outcome = judge_and_commit(state, drawing, who, rest);
+        let mut outcome = {
+            let drawing = drawings
+                .entry(drawing_id.clone())
+                .or_insert_with(|| DrawingOps::load(state, &drawing_id));
+            judge_and_commit(state, drawing, who, rest)
+        };
+        // #34: Non-conflicting parts of concurrent submissions also propagate
+        // across paired off-page connectors.
+        follow_connectors(state, drawings, who.session, who.peer_addr, who.now, &mut outcome);
         // `first` has no socket in this call; address its session.
         if std::ptr::eq(who, &first_incoming) {
             for reaction in &mut outcome.reactions {
@@ -1620,6 +1817,7 @@ mod tests {
             ":memory:",
             SessionConfig::default(),
         )
+        .with_open_mode(true)
     }
 
     /// A server started with `--tie-window-ms`.
@@ -1640,6 +1838,9 @@ mod tests {
             since: None,
             existing_tags: Vec::new(),
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
+            credential: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -1791,6 +1992,9 @@ mod tests {
             since: None,
             existing_tags: Vec::new(),
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
+            credential: None,
         };
         let welcome = handle_message(&state, &mut late, hello, T0).await;
         let told = welcome
@@ -2374,6 +2578,9 @@ mod tests {
             since,
             existing_tags: Vec::new(),
             repo_id: Some(state.repo_id.clone()),
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
+            credential: None,
         };
         handle_message(state, &mut conn, hello, T0 + 5).await
     }
@@ -2467,6 +2674,9 @@ mod tests {
             since: Some(0),
             existing_tags: Vec::new(),
             repo_id: Some(state.repo_id.clone()),
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
+            credential: None,
         };
         let reactions = handle_message(&state, &mut late, hello, T0 + 5).await;
         let (_, _, replayed) = welcomed(&reactions);
@@ -2621,6 +2831,9 @@ mod tests {
             since: None,
             existing_tags: Vec::new(),
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
+            credential: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -2909,6 +3122,9 @@ mod tests {
             since,
             existing_tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             repo_id: Some(state.repo_id.clone()),
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
+            credential: None,
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -3075,7 +3291,10 @@ mod tests {
         assert!(
             reactions.iter().any(|reaction| matches!(
                 reaction,
-                Reaction::Send(ServerMessage::ClaimGranted { .. })
+                Reaction::Publish {
+                    message: ServerMessage::ClaimGranted { .. },
+                    ..
+                }
             )),
             "{reactions:?}"
         );
@@ -3238,6 +3457,7 @@ mod tests {
                 path.display().to_string(),
                 SessionConfig::default(),
             )
+            .with_open_mode(true)
         };
 
         let before = started();
@@ -3337,6 +3557,248 @@ mod tests {
                 revision: 1,
                 changes,
             }]
+        );
+    }
+
+    /// #34: With tie window enabled, (1) non-conflicting fields inside a
+    /// concurrent tying submission still propagate across off-page connectors,
+    /// (2) conflict resolution writes propagate across off-page connectors to
+    /// downstream drawings, and (3) downstream audit cites the source drawing.
+    #[tokio::test]
+    async fn conflict_resolution_and_non_conflicting_tie_remainder_propagate_across_connectors() {
+        let mut state = state();
+        let mut a1 = join_on(&state, "u1", DRAWING).await;
+        let mut a2 = join_on(&state, "u2", DRAWING).await;
+        let mut b1 = join_on(&state, "u3", OTHER).await;
+
+        // Pair L-1001 from DRAWING -> OTHER before enabling the tie window.
+        let r = submit(&state, &mut a1, 0, "op-c1", outflow("L-1001", OTHER)).await;
+        assert!(applied(&r).is_some(), "{r:?}");
+        let r = submit(&state, &mut b1, 0, "op-c2", inflow("L-1001", 20.0)).await;
+        assert!(applied(&r).is_some(), "{r:?}");
+        let rev_a = crate::ws::current_revision(&state, DRAWING);
+        state.tie_window = Duration::from_secs(10);
+
+        // Concurrent ops against `rev_a`:
+        // - a1 writes 管道等级=A1A (ties) AND 公称直径=DN100 (non-conflicting!)
+        // - a2 writes 管道等级=B1B (ties)
+        let batch_a1 = json!({
+            "kind": "set_property",
+            "object_ref": "L-1001",
+            "field": "管道等级",
+            "value": "A1A",
+            "changes": [
+                {"kind": "set_property", "object_ref": "L-1001", "field": "公称直径", "value": "DN100"}
+            ]
+        });
+        let single_a2 = line_field("L-1001", "管道等级", "B1B");
+
+        let hold = submit(&state, &mut a1, rev_a, "op-tie-1", batch_a1).await;
+        assert!(hold.is_empty(), "held inside tie window");
+        let tied = submit(&state, &mut a2, rev_a, "op-tie-2", single_a2).await;
+
+        let conflict_id = tied
+            .iter()
+            .find_map(|r| match r {
+                Reaction::Publish {
+                    message: ServerMessage::Conflict { conflict_id, .. },
+                    ..
+                } => Some(conflict_id.clone()),
+                _ => None,
+            })
+            .expect("conflict created");
+
+        // Non-conflicting 公称直径=DN100 must already have propagated to OTHER!
+        let (_, other_objs) = objects(&state, OTHER, Some("L-1001"));
+        assert_eq!(
+            other_objs[0]["fields"]["公称直径"]["value"], "DN100",
+            "non-conflicting tie remainder must propagate downstream: {other_objs:?}"
+        );
+        // Conflicting 管道等级 is not yet set on OTHER.
+        assert!(other_objs[0]["fields"].get("管道等级").is_none());
+
+        // Resolve conflict picking 人工改值 = C2C -> propagates to OTHER!
+        let resolved = resolve(
+            &state,
+            &conflict_id,
+            RESOLUTION_MANUAL,
+            Some("C2C"),
+            "u-admin",
+            T0 + 50,
+        )
+        .expect("resolve");
+        assert!(
+            resolved
+                .downstream_revisions
+                .iter()
+                .any(|(d, _)| d == OTHER),
+            "downstream drawing must be reported: {:?}",
+            resolved.downstream_revisions
+        );
+
+        let (_, other_after) = objects(&state, OTHER, Some("L-1001"));
+        assert_eq!(
+            other_after[0]["fields"]["管道等级"]["value"], "C2C",
+            "resolved value must propagate downstream: {other_after:?}"
+        );
+
+        // Downstream audit records the propagation citing the source drawing.
+        let audit = state
+            .store
+            .as_ref()
+            .expect("store")
+            .audit_query(&AuditQuery {
+                object_ref: Some("L-1001".into()),
+                ..AuditQuery::default()
+            })
+            .expect("audit");
+        assert!(
+            audit
+                .items
+                .iter()
+                .any(|row| row.change_text.contains("C2C") && row.change_text.contains(DRAWING)),
+            "downstream audit must cite source drawing {DRAWING}: {:?}",
+            audit.items
+        );
+    }
+
+    /// #35: Overrides and `tag_source` persist through the op log and survive
+    /// server restart / model reload identically.
+    #[tokio::test]
+    async fn pipe_run_overrides_and_tag_source_survive_op_log_replay() {
+        let store = Store::open_in_memory().expect("memory store");
+        let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default())
+            .with_open_mode(true);
+        let mut a = join(&state, "u1").await;
+
+        let _ = submit(
+            &state,
+            &mut a,
+            0,
+            "op-ov-1",
+            json!({"kind": "create_pipe_line", "tag": "L-1001", "type": "PIPE_LINE", "tag_source": "auto"}),
+        )
+        .await;
+        let _ = submit(
+            &state,
+            &mut a,
+            1,
+            "op-ov-2",
+            json!({"kind": "add_pipe_run", "line_tag": "L-1001", "tag": "L-1001-01", "points": []}),
+        )
+        .await;
+        let _ = submit(
+            &state,
+            &mut a,
+            2,
+            "op-ov-3",
+            json!({"kind": "add_pipe_run", "line_tag": "L-1001", "tag": "L-1001-02", "points": []}),
+        )
+        .await;
+        let _ = submit(
+            &state,
+            &mut a,
+            3,
+            "op-ov-4",
+            json!({
+                "kind": "set_property",
+                "object_ref": "L-1001-01",
+                "field": "公称直径",
+                "value": "DN80",
+                "overrides": ["公称直径"]
+            }),
+        )
+        .await;
+        let _ = submit(
+            &state,
+            &mut a,
+            4,
+            "op-ov-5",
+            json!({"kind": "set_property", "object_ref": "L-1001", "field": "公称直径", "value": "DN150"}),
+        )
+        .await;
+        let _ = submit(
+            &state,
+            &mut a,
+            5,
+            "op-ov-6",
+            json!({"kind": "set_tag", "object_ref": "P-1001", "value": "P-1009", "tag_source": "auto"}),
+        )
+        .await;
+
+        // Clear in-memory cache to force full replay from SQLite `ops` table.
+        state.drawings.lock().expect("drawings").clear();
+
+        let (_, topo) = topology(&state, DRAWING);
+        let runs = topo["pipe_runs"].as_array().expect("runs");
+        let r1 = runs.iter().find(|r| r["tag"] == "L-1001-01").expect("r1");
+        let r2 = runs.iter().find(|r| r["tag"] == "L-1001-02").expect("r2");
+        assert_eq!(r1["props"]["公称直径"], "DN80");
+        assert_eq!(r1["overrides"], json!(["公称直径"]));
+        assert_eq!(r2["props"]["公称直径"], "DN150");
+        assert_eq!(r2["overrides"], json!([]));
+
+        let (_, objs) = objects(&state, DRAWING, Some("P-1009"));
+        assert_eq!(objs[0]["tag_source"], "auto");
+        let (_, run_objs) = objects(&state, DRAWING, Some("L-1001-01"));
+        assert_eq!(run_objs[0]["overrides"], json!(["公称直径"]));
+    }
+
+    /// #79: Parallel tie window defaults to off (0) where concurrent writes
+    /// resolve by arrival (`OP_SUPERSEDED`); when explicitly enabled, a tie
+    /// carries `previous_value` + `revert_local: true` and keeps the server
+    /// value at the pre-write value until adjudication.
+    #[tokio::test]
+    async fn tie_window_defaults_off_and_explicit_window_signals_local_revert() {
+        // 1. Default tie_window = 0 -> arrival order wins, no conflict entry.
+        let default_state = state();
+        assert!(default_state.tie_window.is_zero(), "tie_window must default to 0");
+        let mut a = join(&default_state, "u1").await;
+        let mut b = join(&default_state, "u2").await;
+        let r1 = submit(&default_state, &mut a, 0, "op-def-1", set("设计压力", "1.6MPa")).await;
+        assert!(applied(&r1).is_some());
+        let r2 = submit(&default_state, &mut b, 0, "op-def-2", set("设计压力", "2.5MPa")).await;
+        assert_eq!(errors(&r2).len(), 1);
+        assert_eq!(errors(&r2)[0].0, codes::OP_SUPERSEDED);
+        assert!(default_state
+            .store
+            .as_ref()
+            .expect("store")
+            .list_conflicts(Some(DRAWING), None)
+            .expect("list")
+            .is_empty());
+
+        // 2. Explicit tie_window > 0 -> Conflict carries previous_value & revert_local: true,
+        // and server keeps pre-write value ("1.0MPa") until resolution.
+        let mut win_state = state();
+        let mut wa = join(&win_state, "u1").await;
+        let mut wb = join(&win_state, "u2").await;
+        let _ = submit(&win_state, &mut wa, 0, "op-init", set("设计压力", "1.0MPa")).await;
+        win_state.tie_window = Duration::from_secs(10);
+
+        let _ = submit(&win_state, &mut wa, 1, "op-t1", set("设计压力", "1.6MPa")).await;
+        let tied = submit(&win_state, &mut wb, 1, "op-t2", set("设计压力", "2.5MPa")).await;
+        let (prev, revert) = tied
+            .iter()
+            .find_map(|r| match r {
+                Reaction::Publish {
+                    message:
+                        ServerMessage::Conflict {
+                            previous_value,
+                            revert_local,
+                            ..
+                        },
+                    ..
+                } => Some((previous_value.clone(), *revert_local)),
+                _ => None,
+            })
+            .expect("conflict frame");
+        assert_eq!(prev.as_deref(), Some("1.0MPa"));
+        assert_eq!(revert, Some(true));
+        assert_eq!(
+            value_of(&win_state, "设计压力").as_deref(),
+            Some("1.0MPa"),
+            "server keeps pre-write value before adjudication"
         );
     }
 }

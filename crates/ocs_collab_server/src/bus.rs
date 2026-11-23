@@ -134,6 +134,8 @@ mod tests {
             session_id: session_id.into(),
             user_id: user_id.into(),
             display_name: String::new(),
+            status: None,
+            hold_until: None,
         })
     }
 

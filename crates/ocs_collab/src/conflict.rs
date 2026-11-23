@@ -180,10 +180,13 @@ pub struct FieldState {
     pub user_id: String,
 }
 
-/// Every field the server has seen written on one object.
+/// Every field the server has seen written on one object, plus its manual
+/// property override markers and `tag_source` (#35).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectState {
     pub fields: BTreeMap<String, FieldState>,
+    pub overrides: BTreeSet<String>,
+    pub tag_source: Option<String>,
 }
 
 /// What the three steps say about one change.
@@ -251,6 +254,11 @@ pub struct Run {
     /// The run's segments as the last account of it listed them; `null`
     /// while no client has given one.
     pub segments: Value,
+    /// Effective property values on this run (#35).
+    pub props: BTreeMap<String, String>,
+    /// Property names manually overridden on this run so pipe-line updates do
+    /// not overwrite them (#35).
+    pub overrides: BTreeSet<String>,
 }
 
 /// The semantic state of one drawing: its objects by tag, the retags that
@@ -467,19 +475,80 @@ impl DrawingModel {
             // object has none.
             let mut moved = self.objects.remove(object_ref).unwrap_or_default();
             moved.fields.insert(FIELD_TAG.to_owned(), state);
+            if let Some(src) = change.text("tag_source") {
+                moved.tag_source = Some(src);
+            }
             let target = self.objects.entry(change.value.clone()).or_default();
             for (field, value) in moved.fields {
                 target.fields.insert(field, value);
+            }
+            for ov in moved.overrides {
+                target.overrides.insert(ov);
+            }
+            if moved.tag_source.is_some() {
+                target.tag_source = moved.tag_source;
             }
             self.renames
                 .push((object_ref.to_owned(), change.value.clone(), revision));
             return;
         }
-        self.objects
-            .entry(object_ref.to_owned())
-            .or_default()
-            .fields
-            .insert(change.field.clone(), state);
+        let overrides_key = change
+            .raw
+            .get("overrides")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<BTreeSet<String>>()
+            });
+        {
+            let obj = self.objects.entry(object_ref.to_owned()).or_default();
+            obj.fields.insert(change.field.clone(), state.clone());
+            if let Some(ref ovs) = overrides_key {
+                if ovs.contains(&change.field) {
+                    obj.overrides.insert(change.field.clone());
+                } else {
+                    obj.overrides.remove(&change.field);
+                }
+            }
+        }
+        // #35: Sync property + override markers on a pipe run.
+        if let Some(run) = self.runs.get_mut(object_ref) {
+            run.props.insert(change.field.clone(), change.value.clone());
+            if let Some(ref ovs) = overrides_key {
+                if ovs.contains(&change.field) {
+                    run.overrides.insert(change.field.clone());
+                } else {
+                    run.overrides.remove(&change.field);
+                }
+            }
+        }
+        // #35: Pipe line property change propagates to non-overridden runs of
+        // that line, while runs that manually overrode `change.field` keep
+        // their own value.
+        if crate::link::PIPE_FIELDS.contains(&change.field.as_str()) {
+            if let Some(run_tags) = self.lines.get(object_ref).cloned() {
+                for run_tag in run_tags {
+                    let overridden = self
+                        .runs
+                        .get(&run_tag)
+                        .is_some_and(|r| r.overrides.contains(&change.field))
+                        || self
+                            .objects
+                            .get(&run_tag)
+                            .is_some_and(|o| o.overrides.contains(&change.field));
+                    if !overridden {
+                        if let Some(run) = self.runs.get_mut(&run_tag) {
+                            run.props.insert(change.field.clone(), change.value.clone());
+                        }
+                        if let Some(obj) = self.objects.get_mut(&run_tag) {
+                            obj.fields.insert(change.field.clone(), state.clone());
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -684,6 +753,8 @@ impl DrawingModel {
                     "to": run.to,
                     "fittings": run.fittings,
                     "segments": run.segments,
+                    "props": run.props,
+                    "overrides": run.overrides.iter().collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -720,6 +791,19 @@ impl DrawingModel {
         if let Some(run) = self.runs.get_mut(run_tag) {
             run.fittings = fittings;
             run.segments = account.get("segments").cloned().unwrap_or(Value::Null);
+            if let Some(props) = account.get("props").and_then(Value::as_object) {
+                run.props.clear();
+                for (k, v) in props {
+                    run.props.insert(k.clone(), value_text(v));
+                }
+            }
+            if let Some(ovs) = account.get("overrides").and_then(Value::as_array) {
+                run.overrides = ovs
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+            }
         }
         true
     }
@@ -779,10 +863,18 @@ impl DrawingModel {
                         fitting.get("tag").and_then(Value::as_str) != Some(object_ref)
                     });
                 }
+                // #31: Connectors standing on a deleted pipe/signal line go with it.
+                self.connectors.retain(|known| {
+                    crate::link::Connector::read(known)
+                        .is_none_or(|c| c.line_tag != object_ref)
+                });
             }
             KIND_INSERT_SYMBOL | KIND_CREATE_PIPE_LINE => {
                 self.deleted.remove(object_ref);
                 let object = self.objects.entry(object_ref.to_owned()).or_default();
+                if let Some(src) = change.text("tag_source") {
+                    object.tag_source = Some(src);
+                }
                 if let Some(type_code) = change.text("type") {
                     object.fields.insert("type".to_owned(), stamp(&type_code));
                 }
@@ -816,6 +908,8 @@ impl DrawingModel {
                         to: change.text("to"),
                         fittings: Vec::new(),
                         segments: Value::Null,
+                        props: BTreeMap::new(),
+                        overrides: BTreeSet::new(),
                     },
                 );
                 self.take_run_account(&tag, change, state);
@@ -1514,5 +1608,60 @@ mod tests {
         let pipe = one(json!({"kind": KIND_CREATE_PIPE_LINE, "tag": "L-1001", "type": "PIPE_LINE", "points": []}));
         take(&mut model, &pipe, 1, 2, "s1");
         assert_eq!(model.topology()["pipe_lines"], json!([{"tag": "L-1001", "runs": []}]));
+    }
+
+    /// #35: Manual overrides on a pipe run survive subsequent pipe-line
+    /// property changes while non-overridden runs follow the line; `tag_source`
+    /// is preserved on retag instead of being forced to manual.
+    #[test]
+    fn pipe_run_overrides_and_tag_source_follow_modifications() {
+        let mut model = DrawingModel::default();
+        let line = one(json!({"kind": KIND_CREATE_PIPE_LINE, "tag": "L-1001", "type": "PIPE_LINE", "tag_source": "auto"}));
+        take(&mut model, &line, 0, 1, "s1");
+        let r1 = one(json!({"kind": KIND_ADD_PIPE_RUN, "line_tag": "L-1001", "tag": "L-1001-01", "points": []}));
+        let r2 = one(json!({"kind": KIND_ADD_PIPE_RUN, "line_tag": "L-1001", "tag": "L-1001-02", "points": []}));
+        take(&mut model, &r1, 1, 2, "s1");
+        take(&mut model, &r2, 2, 3, "s1");
+
+        // User manually overrides 公称直径 on run L-1001-01 to DN80.
+        let manual_override = one(json!({
+            "kind": KIND_SET_PROPERTY,
+            "object_ref": "L-1001-01",
+            "field": "公称直径",
+            "value": "DN80",
+            "overrides": ["公称直径"]
+        }));
+        take(&mut model, &manual_override, 3, 4, "s1");
+
+        // Line L-1001 updates 公称直径 to DN100 -> L-1001-01 stays DN80 (overridden), L-1001-02 becomes DN100.
+        let line_change = one(json!({
+            "kind": KIND_SET_PROPERTY,
+            "object_ref": "L-1001",
+            "field": "公称直径",
+            "value": "DN100"
+        }));
+        take(&mut model, &line_change, 4, 5, "s1");
+
+        let topo = model.topology();
+        let runs = topo["pipe_runs"].as_array().expect("runs");
+        let run1 = runs.iter().find(|r| r["tag"] == "L-1001-01").expect("r1");
+        let run2 = runs.iter().find(|r| r["tag"] == "L-1001-02").expect("r2");
+        assert_eq!(run1["props"]["公称直径"], "DN80");
+        assert_eq!(run1["overrides"], json!(["公称直径"]));
+        assert_eq!(run2["props"]["公称直径"], "DN100");
+        assert_eq!(run2["overrides"], json!([]));
+
+        // Retagging with tag_source="auto" preserves "auto" rather than forcing "manual".
+        let auto_retag = one(json!({
+            "kind": KIND_SET_TAG,
+            "object_ref": "P-1001",
+            "value": "P-1002",
+            "tag_source": "auto"
+        }));
+        take(&mut model, &auto_retag, 5, 6, "s2");
+        assert_eq!(
+            model.object("P-1002").and_then(|o| o.tag_source.as_deref()),
+            Some("auto")
+        );
     }
 }

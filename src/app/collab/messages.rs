@@ -70,6 +70,7 @@ pub(super) fn read(text: &str) -> Reading {
             repo_id,
             replay_from,
             align_refused,
+            ..
         } => {
             // Said first: the session is then taken as not aligned, or at
             // the revision its drawing has with what it missed still to
@@ -98,6 +99,9 @@ pub(super) fn read(text: &str) -> Reading {
             })
         }
         ServerMessage::PeerJoined(peer) => Frame::Event(CollabEvent::PeerJoined(peer_info(&peer))),
+        ServerMessage::PeerDisconnected(peer) => {
+            Frame::Event(CollabEvent::PeerJoined(peer_info(&peer)))
+        }
         ServerMessage::PeerLeft(peer) => Frame::Event(CollabEvent::PeerLeft {
             session_id: peer.session_id,
         }),
@@ -106,6 +110,7 @@ pub(super) fn read(text: &str) -> Reading {
             tag,
             holder,
             expires_at,
+            ..
         } => Frame::Event(CollabEvent::ClaimDenied {
             tag,
             holder,
@@ -134,6 +139,31 @@ pub(super) fn read(text: &str) -> Reading {
             level,
             code,
         }),
+        ServerMessage::WriteRestored { reason } => Frame::Event(CollabEvent::ServerError {
+            code: "WRITE_RESTORED".to_owned(),
+            message: reason,
+        }),
+        ServerMessage::WriteStatus {
+            writable,
+            reason,
+            level,
+            code,
+            holder,
+        } => {
+            if writable {
+                Frame::Event(CollabEvent::ServerError {
+                    code: "WRITE_RESTORED".to_owned(),
+                    message: reason,
+                })
+            } else {
+                Frame::Event(CollabEvent::ReadonlyDowngrade {
+                    reason,
+                    holder,
+                    level,
+                    code,
+                })
+            }
+        }
         ServerMessage::Error {
             code,
             message,
@@ -196,6 +226,7 @@ pub(super) fn read(text: &str) -> Reading {
             value_a,
             value_b,
             op_ids,
+            ..
         } => {
             // The ops that tied get no other answer.
             if !op_ids.is_empty() {

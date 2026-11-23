@@ -45,6 +45,31 @@ pub struct SeedUser {
     pub role: String,
     #[serde(default)]
     pub company: String,
+    /// Pre-hashed credential (`pbkdf2_sha256$...`, #68).
+    #[serde(default)]
+    pub credential_hash: Option<String>,
+    /// Plaintext credential in seed files — immediately hashed before storage,
+    /// NEVER persisted in plaintext (#68).
+    #[serde(default)]
+    pub credential: Option<String>,
+    /// Whether this account is active (`false` = disabled account rejected on join, #68).
+    #[serde(default = "default_active")]
+    pub active: bool,
+}
+
+fn default_active() -> bool {
+    true
+}
+
+/// User authentication record read from `users` (#67, #68).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAuthRecord {
+    pub user_id: String,
+    pub display_name: String,
+    pub role: String,
+    pub company: String,
+    pub credential_hash: String,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,7 +103,8 @@ fn default_lifecycle() -> String {
     "设计中".to_owned()
 }
 
-/// One audit row, in the 9-field shape the contract asserts.
+/// One audit row, in the 9-field shape the contract asserts, plus the
+/// registered `display_name` of `user_id` when available (#28).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditRow {
     pub seq: i64,
@@ -87,6 +113,8 @@ pub struct AuditRow {
     pub at: i64,
     pub object_ref: String,
     pub user_id: String,
+    #[serde(default)]
+    pub display_name: String,
     pub company: String,
     pub ip: String,
     pub workspace: String,
@@ -179,6 +207,26 @@ pub struct ConflictRow {
     pub resolution: Option<String>,
     pub resolved_value: Option<String>,
     pub resolved_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_a: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name_a: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_b: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name_b: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by_display_name: Option<String>,
+}
+
+/// Metadata returned by [`Store::backup_to`] / [`Store::backup_into_dir`] (#105).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupInfo {
+    pub path: String,
+    pub size_bytes: u64,
+    pub created_at: i64,
+    pub max_op_at: Option<i64>,
+    pub total_ops: i64,
 }
 
 /// The connection handle. One `Mutex<Connection>` is enough for a single
@@ -303,14 +351,33 @@ impl Store {
             .map_err(|err| format!("begin seed: {err}"))?;
 
         for user in &doc.users {
+            let hash = if let Some(h) = &user.credential_hash {
+                h.clone()
+            } else if let Some(secret) = &user.credential {
+                crate::auth::hash_credential(secret)
+            } else {
+                String::new()
+            };
             tx.execute(
-                "INSERT INTO users (user_id, display_name, role, company)
-                 VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO users (user_id, display_name, role, company, credential_hash, active)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(user_id) DO UPDATE SET
                    display_name = excluded.display_name,
                    role = excluded.role,
-                   company = excluded.company",
-                params![user.user_id, user.display_name, user.role, user.company],
+                   company = excluded.company,
+                   credential_hash = CASE
+                     WHEN excluded.credential_hash != '' THEN excluded.credential_hash
+                     ELSE users.credential_hash
+                   END,
+                   active = excluded.active",
+                params![
+                    user.user_id,
+                    user.display_name,
+                    user.role,
+                    user.company,
+                    hash,
+                    i64::from(user.active)
+                ],
             )
             .map_err(|err| format!("seed user {}: {err}", user.user_id))?;
         }
@@ -380,6 +447,40 @@ impl Store {
         )
         .optional()
         .map_err(|err| format!("lookup user {user_id}: {err}"))
+    }
+
+    /// Registered `display_name` of `user_id`, when the user exists in `users`.
+    pub fn user_display_name(&self, user_id: &str) -> Result<Option<String>, String> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT display_name FROM users WHERE user_id = ?1",
+            params![user_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|err| format!("lookup user display_name {user_id}: {err}"))
+    }
+
+    /// Full authentication & profile record for `user_id` (#67, #68).
+    pub fn user_auth(&self, user_id: &str) -> Result<Option<UserAuthRecord>, String> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT user_id, display_name, role, company, credential_hash, active
+             FROM users WHERE user_id = ?1",
+            params![user_id],
+            |row| {
+                Ok(UserAuthRecord {
+                    user_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    role: row.get(2)?,
+                    company: row.get(3)?,
+                    credential_hash: row.get(4)?,
+                    active: row.get::<_, i64>(5)? != 0,
+                })
+            },
+        )
+        .optional()
+        .map_err(|err| format!("lookup user auth {user_id}: {err}"))
     }
 
     /// `(pbs_node_id, state, revision)` for a drawing.
@@ -765,19 +866,19 @@ impl Store {
         let mut where_sql = String::from(" WHERE 1 = 1");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(object_ref) = &query.object_ref {
-            where_sql.push_str(" AND object_ref = ?");
+            where_sql.push_str(" AND a.object_ref = ?");
             args.push(rusqlite::types::Value::Text(object_ref.clone()));
         }
         if let Some(user_id) = &query.user_id {
-            where_sql.push_str(" AND user_id = ?");
+            where_sql.push_str(" AND a.user_id = ?");
             args.push(rusqlite::types::Value::Text(user_id.clone()));
         }
         if let Some(from) = query.from {
-            where_sql.push_str(" AND at >= ?");
+            where_sql.push_str(" AND a.at >= ?");
             args.push(rusqlite::types::Value::Integer(from));
         }
         if let Some(to) = query.to {
-            where_sql.push_str(" AND at <= ?");
+            where_sql.push_str(" AND a.at <= ?");
             args.push(rusqlite::types::Value::Integer(to));
         }
 
@@ -785,7 +886,7 @@ impl Store {
 
         let total: i64 = conn
             .query_row(
-                &format!("SELECT COUNT(*) FROM audit_log{where_sql}"),
+                &format!("SELECT COUNT(*) FROM audit_log a{where_sql}"),
                 params_ref.as_slice(),
                 |row| row.get(0),
             )
@@ -794,9 +895,11 @@ impl Store {
         let limit = query.limit.unwrap_or(100).clamp(1, 1000);
         let offset = query.offset.unwrap_or(0).max(0);
         let sql = format!(
-            "SELECT seq, module, action, at, object_ref, user_id, company, ip, workspace, change_text
-             FROM audit_log{where_sql}
-             ORDER BY at DESC, seq DESC
+            "SELECT a.seq, a.module, a.action, a.at, a.object_ref, a.user_id, a.company, a.ip, a.workspace, a.change_text, COALESCE(u.display_name, '')
+             FROM audit_log a
+             LEFT JOIN users u ON u.user_id = a.user_id
+             {where_sql}
+             ORDER BY a.at DESC, a.seq DESC
              LIMIT ? OFFSET ?"
         );
         let mut with_page: Vec<rusqlite::types::Value> = args.clone();
@@ -821,6 +924,7 @@ impl Store {
                     ip: row.get(7)?,
                     workspace: row.get(8)?,
                     change_text: row.get(9)?,
+                    display_name: row.get(10)?,
                 })
             })
             .map_err(|err| format!("query audit: {err}"))?
@@ -834,6 +938,102 @@ impl Store {
         let conn = self.lock()?;
         conn.query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
             .map_err(|err| format!("count audit: {err}"))
+    }
+
+    /// Number of `ops` log rows per drawing (#39).
+    pub fn ops_count_by_drawing(&self) -> Result<std::collections::HashMap<String, i64>, String> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT drawing_id, COUNT(*) FROM ops GROUP BY drawing_id")
+            .map_err(|err| format!("prepare ops count: {err}"))?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|err| format!("query ops count: {err}"))?;
+        for row in rows {
+            let (did, cnt) = row.map_err(|err| format!("read ops count: {err}"))?;
+            map.insert(did, cnt);
+        }
+        Ok(map)
+    }
+
+    /// Number of pending conflicts per drawing (#39).
+    pub fn pending_conflicts_by_drawing(
+        &self,
+    ) -> Result<std::collections::HashMap<String, i64>, String> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT drawing_id, COUNT(*) FROM conflicts WHERE status = '待裁决' GROUP BY drawing_id")
+            .map_err(|err| format!("prepare pending conflicts count: {err}"))?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|err| format!("query pending conflicts count: {err}"))?;
+        for row in rows {
+            let (did, cnt) = row.map_err(|err| format!("read pending conflicts count: {err}"))?;
+            map.insert(did, cnt);
+        }
+        Ok(map)
+    }
+
+    /// Total on-disk size in bytes of the database file plus `-wal` / `-shm`
+    /// sidecars (`0` for `:memory:`, #39).
+    pub fn db_size_bytes(&self) -> u64 {
+        if self.path == Path::new(":memory:") {
+            return 0;
+        }
+        let base = self.path.display().to_string();
+        ["", "-wal", "-shm"]
+            .iter()
+            .filter_map(|suffix| std::fs::metadata(format!("{base}{suffix}")).ok())
+            .map(|m| m.len())
+            .sum()
+    }
+
+    /// Creates an atomic online snapshot of this SQLite database at `dest_path`
+    /// using SQLite's `VACUUM INTO` (safe while WAL readers/writers are live,
+    /// #105).
+    pub fn backup_to(&self, dest_path: impl AsRef<Path>) -> Result<BackupInfo, String> {
+        let dest = dest_path.as_ref();
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|err| format!("create backup dir {}: {err}", parent.display()))?;
+            }
+        }
+        if dest.exists() {
+            std::fs::remove_file(dest)
+                .map_err(|err| format!("remove existing backup {}: {err}", dest.display()))?;
+        }
+        let dest_str = dest.to_string_lossy().into_owned();
+        let (max_op_at, total_ops) = {
+            let conn = self.lock()?;
+            let (max_at, count): (Option<i64>, i64) = conn
+                .query_row("SELECT MAX(at), COUNT(*) FROM ops", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .map_err(|err| format!("query ops stats before backup: {err}"))?;
+            conn.execute("VACUUM INTO ?1", params![dest_str])
+                .map_err(|err| format!("online backup VACUUM INTO {dest_str}: {err}"))?;
+            (max_at, count)
+        };
+        let size_bytes = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        Ok(BackupInfo {
+            path: dest_str,
+            size_bytes,
+            created_at: ocs_collab::now_unix(),
+            max_op_at,
+            total_ops,
+        })
+    }
+
+    /// Writes a timestamped online backup file into `dir` (#105).
+    pub fn backup_into_dir(&self, dir: impl AsRef<Path>, seq: u64) -> Result<BackupInfo, String> {
+        let ts = ocs_collab::now_unix();
+        let file = dir
+            .as_ref()
+            .join(format!("collab-backup-{ts}-{seq:04}.db"));
+        self.backup_to(file)
     }
 
     /// Inserts a conflict entry awaiting adjudication.
@@ -860,8 +1060,8 @@ impl Store {
             conn.execute(
                 "INSERT INTO conflicts
                    (conflict_id, drawing_id, object_ref, field, value_a, value_b,
-                    base_revision, status, resolution, resolved_value, resolved_by)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    base_revision, status, resolution, resolved_value, resolved_by, user_a, user_b)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     conflict.conflict_id,
                     conflict.drawing_id,
@@ -873,7 +1073,9 @@ impl Store {
                     conflict.status,
                     conflict.resolution,
                     conflict.resolved_value,
-                    conflict.resolved_by
+                    conflict.resolved_by,
+                    conflict.user_a,
+                    conflict.user_b
                 ],
             )
             .map_err(|err| format!("insert conflict: {err}"))?;
@@ -910,8 +1112,13 @@ impl Store {
         let mut entries = conn
             .prepare(
                 "SELECT c.conflict_id, c.drawing_id, c.object_ref, c.field, c.value_a, c.value_b,
-                        c.base_revision, c.status, c.resolution, c.resolved_value, c.resolved_by
-                 FROM conflicts c JOIN conflict_ops o ON o.conflict_id = c.conflict_id
+                        c.base_revision, c.status, c.resolution, c.resolved_value, c.resolved_by,
+                        c.user_a, ua.display_name, c.user_b, ub.display_name, ur.display_name
+                 FROM conflicts c
+                 JOIN conflict_ops o ON o.conflict_id = c.conflict_id
+                 LEFT JOIN users ua ON ua.user_id = c.user_a
+                 LEFT JOIN users ub ON ub.user_id = c.user_b
+                 LEFT JOIN users ur ON ur.user_id = c.resolved_by
                  WHERE o.op_id = ?1 AND c.drawing_id = ?2 AND c.status = '待裁决'
                  ORDER BY c.conflict_id",
             )
@@ -944,20 +1151,25 @@ impl Store {
         let mut where_sql = String::from(" WHERE 1 = 1");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(drawing_id) = drawing_id {
-            where_sql.push_str(" AND drawing_id = ?");
+            where_sql.push_str(" AND c.drawing_id = ?");
             args.push(rusqlite::types::Value::Text(drawing_id.to_owned()));
         }
         if let Some(status) = status {
-            where_sql.push_str(" AND status = ?");
+            where_sql.push_str(" AND c.status = ?");
             args.push(rusqlite::types::Value::Text(status.to_owned()));
         }
         let args_ref: Vec<&dyn rusqlite::ToSql> =
             args.iter().map(|arg| arg as &dyn rusqlite::ToSql).collect();
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT conflict_id, drawing_id, object_ref, field, value_a, value_b,
-                        base_revision, status, resolution, resolved_value, resolved_by
-                 FROM conflicts{where_sql} ORDER BY conflict_id"
+                "SELECT c.conflict_id, c.drawing_id, c.object_ref, c.field, c.value_a, c.value_b,
+                        c.base_revision, c.status, c.resolution, c.resolved_value, c.resolved_by,
+                        c.user_a, ua.display_name, c.user_b, ub.display_name, ur.display_name
+                 FROM conflicts c
+                 LEFT JOIN users ua ON ua.user_id = c.user_a
+                 LEFT JOIN users ub ON ub.user_id = c.user_b
+                 LEFT JOIN users ur ON ur.user_id = c.resolved_by
+                 {where_sql} ORDER BY c.conflict_id"
             ))
             .map_err(|err| format!("prepare conflicts: {err}"))?;
         let rows = stmt
@@ -1137,6 +1349,16 @@ impl Store {
         Ok(())
     }
 
+    /// Moves all claims held by `from_session` to `to_session` (#36).
+    pub fn transfer_claims(&self, from_session: &str, to_session: &str) -> Result<usize, String> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE claims SET session_id = ?2 WHERE session_id = ?1",
+            params![from_session, to_session],
+        )
+        .map_err(|err| format!("transfer claims {from_session} -> {to_session}: {err}"))
+    }
+
     pub fn delete_claims_of_session(&self, session_id: &str) -> Result<Vec<String>, String> {
         let conn = self.lock()?;
         let mut stmt = conn
@@ -1284,6 +1506,7 @@ fn stored_op(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredOp> {
 
 /// A row of `conflicts`, its columns in the order the table names them.
 fn conflict_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConflictRow> {
+    let non_empty = |v: Option<String>| v.filter(|s| !s.is_empty());
     Ok(ConflictRow {
         conflict_id: row.get(0)?,
         drawing_id: row.get(1)?,
@@ -1296,6 +1519,11 @@ fn conflict_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConflictRow> {
         resolution: row.get(8)?,
         resolved_value: row.get(9)?,
         resolved_by: row.get(10)?,
+        user_a: row.get(11)?,
+        display_name_a: non_empty(row.get(12)?),
+        user_b: row.get(13)?,
+        display_name_b: non_empty(row.get(14)?),
+        resolved_by_display_name: non_empty(row.get(15)?),
     })
 }
 
@@ -1303,10 +1531,12 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         r#"
 CREATE TABLE IF NOT EXISTS users (
-  user_id      TEXT PRIMARY KEY,
-  display_name TEXT NOT NULL,
-  role         TEXT NOT NULL,
-  company      TEXT NOT NULL DEFAULT ''
+  user_id         TEXT PRIMARY KEY,
+  display_name    TEXT NOT NULL,
+  role            TEXT NOT NULL,
+  company         TEXT NOT NULL DEFAULT '',
+  credential_hash TEXT NOT NULL DEFAULT '',
+  active          INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS pbs_nodes (
@@ -1364,7 +1594,9 @@ CREATE TABLE IF NOT EXISTS conflicts (
   status        TEXT NOT NULL,
   resolution    TEXT,
   resolved_value TEXT,
-  resolved_by   TEXT
+  resolved_by   TEXT,
+  user_a        TEXT,
+  user_b        TEXT
 );
 
 -- The ops each conflict entry holds, in the order `conflict.op_ids` names
@@ -1449,6 +1681,15 @@ END;
 "#,
     )
     .map_err(|err| format!("create schema: {err}"))?;
+    // Backward-compatible schema migrations for databases created by earlier builds.
+    for ddl in [
+        "ALTER TABLE conflicts ADD COLUMN user_a TEXT",
+        "ALTER TABLE conflicts ADD COLUMN user_b TEXT",
+        "ALTER TABLE users ADD COLUMN credential_hash TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+    ] {
+        let _ = conn.execute(ddl, []);
+    }
     Ok(())
 }
 
@@ -1856,6 +2097,11 @@ mod tests {
                 resolution: None,
                 resolved_value: None,
                 resolved_by: None,
+                user_a: None,
+                display_name_a: None,
+                user_b: None,
+                display_name_b: None,
+                resolved_by_display_name: None,
             })
             .expect("insert conflict");
 
@@ -1898,6 +2144,11 @@ mod tests {
                 resolution: None,
                 resolved_value: None,
                 resolved_by: None,
+                user_a: None,
+                display_name_a: None,
+                user_b: None,
+                display_name_b: None,
+                resolved_by_display_name: None,
             })
             .expect("insert");
         store
@@ -2453,6 +2704,11 @@ mod tests {
             resolution: None,
             resolved_value: None,
             resolved_by: None,
+            user_a: None,
+            display_name_a: None,
+            user_b: None,
+            display_name_b: None,
+            resolved_by_display_name: None,
         };
         let held = vec!["op-r-2-1".to_owned(), "op-r-1-1".to_owned()];
         store.insert_conflict_holding(&row, &held).expect("entry");

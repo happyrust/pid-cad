@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
@@ -27,6 +27,14 @@ use crate::AppState;
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route(
+            "/metrics",
+            get(metrics_snapshot)
+                .post(readonly_endpoint)
+                .put(readonly_endpoint)
+                .patch(readonly_endpoint)
+                .delete(readonly_endpoint),
+        )
         .route("/session", post(create_session))
         .route("/ws", get(ws::upgrade))
         .route(
@@ -41,24 +49,43 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/drawing/{id}/state", post(drawing_state))
         .route("/drawing/{id}/objects", get(drawing_objects))
         .route("/drawing/{id}/topology", get(drawing_topology))
+        .route(
+            "/drawing/{id}/unpaired-connectors",
+            get(drawing_unpaired_connectors),
+        )
         .route("/conflicts", get(conflict_list))
         .route("/conflicts/{id}/resolve", post(conflict_resolve))
+        .route("/admin/backup", post(admin_backup))
         .with_state(state)
 }
 
-/// `GET /health` → 200 `{"ok":true,"db":"ok","version":"..."}`, or 503 when the
-/// database is unusable (appendix A.1).
+/// `GET /health` → 200 `{"ok":true,"db":"ok","version":"...","open_mode":...,"auth_enabled":...,"tls_enabled":...}`,
+/// or 503 when the database is unusable (appendix A.1, #67, #68, #69).
 async fn health(State(state): State<Arc<AppState>>) -> Response {
     if state.db_healthy() {
         (
             StatusCode::OK,
-            Json(json!({ "ok": true, "db": "ok", "version": state.version })),
+            Json(json!({
+                "ok": true,
+                "db": "ok",
+                "version": state.version,
+                "open_mode": state.open_mode,
+                "auth_enabled": state.require_auth,
+                "tls_enabled": state.tls_enabled,
+            })),
         )
             .into_response()
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "ok": false, "db": "error", "version": state.version })),
+            Json(json!({
+                "ok": false,
+                "db": "error",
+                "version": state.version,
+                "open_mode": state.open_mode,
+                "auth_enabled": state.require_auth,
+                "tls_enabled": state.tls_enabled,
+            })),
         )
             .into_response()
     }
@@ -100,7 +127,46 @@ async fn create_session(
         return error_response(StatusCode::SERVICE_UNAVAILABLE, codes::SESSION_UNKNOWN, "数据库不可用");
     };
 
-    if let Err(err) = store.ensure_drawing(&body.drawing_id) {
+    // #67: In strict mode (default), reject unregistered users and drawings.
+    if !state.open_mode {
+        match store.user_auth(&body.user_id) {
+            Ok(Some(user)) if !user.active => {
+                return error_response(StatusCode::FORBIDDEN, codes::USER_DISABLED, "账号已停用");
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    codes::UNKNOWN_USER,
+                    "用户未登记",
+                );
+            }
+            Err(err) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    codes::INVALID_MESSAGE,
+                    &err,
+                );
+            }
+        }
+        match store.drawing(&body.drawing_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    codes::UNKNOWN_DRAWING,
+                    "图纸未登记",
+                );
+            }
+            Err(err) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    codes::UNKNOWN_DRAWING,
+                    &err,
+                );
+            }
+        }
+    } else if let Err(err) = store.ensure_drawing(&body.drawing_id) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::UNKNOWN_DRAWING, &err);
     }
 
@@ -243,6 +309,132 @@ async fn permission_check(
 struct DrawingStateBody {
     user_id: Option<String>,
     state: Option<String>,
+    #[serde(default)]
+    credential: Option<String>,
+}
+
+/// Extracts and verifies the HTTP caller's identity for privileged mutations
+/// (`POST /drawing/{id}/state`, `POST /conflicts/{id}/resolve`, #68).
+///
+/// Accepts credentials via:
+/// - `Authorization: Bearer <user_id>:<credential>`
+/// - `Authorization: Basic <base64(user_id:credential)>`
+/// - `X-Collab-User` + `X-Collab-Credential` headers
+/// - JSON body `credential` field alongside `user_id` / `resolved_by`
+///
+/// Returns the verified `user_id` so the operation actor always comes from the
+/// authenticated identity. Never logs credentials.
+#[allow(clippy::result_large_err)]
+fn authenticate_http_actor(
+    state: &AppState,
+    store: &crate::store::Store,
+    headers: &HeaderMap,
+    body_user: Option<String>,
+    body_credential: Option<String>,
+    missing_user_msg: &str,
+) -> Result<String, Response> {
+    let mut header_user: Option<String> = None;
+    let mut header_secret: Option<String> = None;
+
+    if let Some(auth_val) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(token) = auth_val.strip_prefix("Bearer ").map(str::trim) {
+            if let Some((u, s)) = token.split_once(':') {
+                header_user = Some(u.to_owned());
+                header_secret = Some(s.to_owned());
+            } else if !token.is_empty() {
+                header_secret = Some(token.to_owned());
+            }
+        } else if let Some(b64) = auth_val.strip_prefix("Basic ").map(str::trim) {
+            if let Some(raw) = crate::auth::base64_decode(b64) {
+                if let Ok(text) = String::from_utf8(raw) {
+                    if let Some((u, s)) = text.split_once(':') {
+                        header_user = Some(u.to_owned());
+                        header_secret = Some(s.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    if header_user.is_none() {
+        header_user = headers
+            .get("x-collab-user")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+    }
+    if header_secret.is_none() {
+        header_secret = headers
+            .get("x-collab-credential")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+    }
+
+    // If both header and body name a user and they disagree, reject as AUTH_FAILED.
+    if let (Some(hu), Some(bu)) = (&header_user, &body_user) {
+        if hu != bu {
+            return Err(error_response(
+                StatusCode::UNAUTHORIZED,
+                codes::AUTH_FAILED,
+                "身份核对失败：请求头身份与正文操作人不一致",
+            ));
+        }
+    }
+
+    let actor = match header_user.or(body_user) {
+        Some(u) if !u.is_empty() => u,
+        _ => {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                codes::INVALID_MESSAGE,
+                missing_user_msg,
+            ))
+        }
+    };
+    let secret = header_secret.or(body_credential);
+
+    match store.user_auth(&actor) {
+        Ok(Some(user)) => {
+            if !user.active {
+                return Err(error_response(
+                    StatusCode::FORBIDDEN,
+                    codes::USER_DISABLED,
+                    "账号已停用",
+                ));
+            }
+            if state.require_auth || !user.credential_hash.is_empty() {
+                let ok = secret
+                    .as_deref()
+                    .is_some_and(|s| crate::auth::verify_credential(s, &user.credential_hash));
+                if !ok {
+                    return Err(error_response(
+                        StatusCode::UNAUTHORIZED,
+                        codes::AUTH_FAILED,
+                        "身份核对失败",
+                    ));
+                }
+            }
+            Ok(user.user_id)
+        }
+        Ok(None) => {
+            if state.require_auth {
+                Err(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    codes::AUTH_FAILED,
+                    "身份核对失败：用户未登记",
+                ))
+            } else {
+                // Let downstream perm::evaluate return its contract 400 PERM_UNKNOWN_SUBJECT.
+                Ok(actor)
+            }
+        }
+        Err(err) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            codes::INVALID_MESSAGE,
+            &err,
+        )),
+    }
 }
 
 /// `POST /drawing/{id}/state` — gated on 授权配置. The requested state value
@@ -251,6 +443,7 @@ struct DrawingStateBody {
 async fn drawing_state(
     State(state): State<Arc<AppState>>,
     Path(drawing_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<DrawingStateBody>,
 ) -> Response {
     let Some(store) = state.store.clone() else {
@@ -260,12 +453,16 @@ async fn drawing_state(
             "数据库不可用",
         );
     };
-    let Some(user_id) = body.user_id else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            codes::INVALID_MESSAGE,
-            "缺少 user_id",
-        );
+    let user_id = match authenticate_http_actor(
+        &state,
+        &store,
+        &headers,
+        body.user_id,
+        body.credential,
+        "缺少 user_id",
+    ) {
+        Ok(uid) => uid,
+        Err(resp) => return resp,
     };
 
     // Switching state is 授权配置, judged without the state tier: a 只读
@@ -323,16 +520,37 @@ async fn drawing_state(
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err);
     }
 
-    if next_state == DrawingState::ReadOnly {
-        settle_readonly(&state, &drawing_id, &user_id).await;
-    } else {
-        // No longer 只读: there is no edit right to hold.
-        state
-            .holders
-            .lock()
-            .expect("holders mutex poisoned")
-            .remove(&drawing_id);
+    // #26: Audit entry for drawing state switch (who, from -> to, object = drawing_id).
+    {
+        let actor_dn = state.display_name_of(&user_id);
+        let actor_label = ocs_collab::protocol::format_user_label(&actor_dn, &user_id);
+        let company = store
+            .user_role(&user_id)
+            .ok()
+            .flatten()
+            .map(|(_, company)| company)
+            .filter(|company| !company.is_empty())
+            .unwrap_or_else(|| "未知".to_owned());
+        let audit_entry = crate::store::NewAuditRow {
+            module: "协同编辑".to_owned(),
+            action: "drawing_state_changed".to_owned(),
+            at: ocs_collab::now_unix(),
+            object_ref: drawing_id.clone(),
+            user_id: user_id.clone(),
+            company,
+            ip: "127.0.0.1".to_owned(),
+            workspace: "默认工作区".to_owned(),
+            change_text: format!(
+                "图纸状态切换：{actor_label} 将 {drawing_id} 从 {current_text} 切换为 {state_text}"
+            ),
+        };
+        if let Err(err) = store.audit_append(&audit_entry) {
+            eprintln!("[ocs_collab_server] 写入图纸状态切换审计失败：{err}");
+        }
     }
+
+    let prev_state = DrawingState::parse(&current_text);
+    settle_state_change(&state, &drawing_id, prev_state, next_state, &user_id).await;
 
     (
         StatusCode::OK,
@@ -341,78 +559,102 @@ async fn drawing_state(
         .into_response()
 }
 
-/// Settles who writes on a drawing that just became 只读, and tells every
-/// live session on it (`VAL-CLI-011`).
-///
-/// One session keeps the edit right and goes on writing: the editing session
-/// that has been on the drawing longest (`access::first_editor` — join
-/// order, live, editing, and with a socket to be told on). It is named by
-/// its session id, so the same user's second session is not mistaken for it.
-/// With nobody editing there is no holder, and nobody writes.
-///
-/// 契约未规定，待用户确认：`VAL-CLI-011` 只说「`u1`（编辑权持有者）」，没有
-/// 说以「把图纸状态改成只读」触发降级时谁算持有者。上面这条规则（切换那
-/// 一刻在图上时间最长的活跃编辑会话）是实现方的选择，见状态文档 §13.4 之 2
-/// 与 §14.3。
-///
-/// Choosing the holder, recording it and telling the sessions are one step,
-/// under the registry's lock. They used to be read at two moments — the
-/// editors before the permission check, the sessions to tell after the
-/// write — and a holder that left in between was still named, with nobody
-/// able to write.
-///
-/// Every session is told, the holder too: the message names the holder, and
-/// a session that finds its own id there knows the edit right is its own.
-/// (It used to be told nothing — and a session downgraded once, then made
-/// holder by a later switch, went on believing it could not write.) The
-/// message is about one session's access, so it goes out on each session's
-/// own channel rather than to the room.
-///
-/// The record of the holder is what the op gate reads (`access::write_access`)
-/// and what a session joining later is told.
-async fn settle_readonly(state: &AppState, drawing_id: &str, changed_by: &str) {
-    let registry = state.sessions.lock().await;
-    let direct = state.direct.lock().expect("direct mutex poisoned");
-    let holder = registry
-        .all()
-        .iter()
-        .find(|session| {
-            session.drawing_id == drawing_id
-                && session.is_active()
-                && session.is_editing()
-                && direct.contains_key(&session.session_id)
-        })
-        .map(|session| session.session_id.clone());
-    {
-        let mut holders = state.holders.lock().expect("holders mutex poisoned");
-        match &holder {
-            Some(holder) => holders.insert(drawing_id.to_owned(), holder.clone()),
-            None => holders.remove(drawing_id),
-        };
-    }
-    let message = crate::access::Denied {
-        level: ocs_collab::DenialLevel::State,
-        reason: "图纸已切换为只读".to_owned(),
-        holder: holder.clone(),
-    }
-    .downgrade();
-    let holder_text = holder.as_deref().unwrap_or("(无)");
-    let told = registry.active_peers(drawing_id);
-    println!(
-        "[ocs_collab_server] 图纸切只读 drawing={drawing_id} by={changed_by} holder={holder_text} -> 通知 {} 个会话 at={}",
-        told.len(),
-        chrono::Utc::now().timestamp()
-    );
-    for session in &told {
-        // A session with no socket (opened over HTTP, or just disconnected)
-        // has nobody to tell; it learns its access the next time it asks.
-        let delivered = direct
-            .get(&session.session_id)
-            .is_some_and(|sender| sender.send(message.clone()).is_ok());
-        println!(
-            "[ocs_collab_server] 单播 readonly_downgrade session={} user={} holder={holder_text} delivered={delivered}",
-            session.session_id, session.user_id
-        );
+/// Settles session write permissions whenever a drawing changes state (#70, #71, #73):
+/// - Switching to `只读` clears any holder (`#73`) and sends `ReadonlyDowngrade { holder: None }`
+///   to every active session on the drawing (nobody can write).
+/// - Switching to `单人编辑` keeps only the earliest active editor writable and
+///   downgrades all other active sessions naming that holder; if leaving `只读`,
+///   notifies the writable editor with `WriteRestored` (`#71`).
+/// - Switching to `协同编辑` notifies every active session that now has write
+///   access with `WriteRestored` (`#71`) so clients recover without reconnecting.
+async fn settle_state_change(
+    state: &AppState,
+    drawing_id: &str,
+    prev_state: Option<DrawingState>,
+    next_state: DrawingState,
+    changed_by: &str,
+) {
+    // #73: Read-only drawings never retain an edit holder.
+    state
+        .holders
+        .lock()
+        .expect("holders mutex poisoned")
+        .remove(drawing_id);
+
+    let active_sessions: Vec<ocs_collab::Session> = {
+        let registry = state.sessions.lock().await;
+        registry.active_peers(drawing_id)
+    };
+
+    match next_state {
+        DrawingState::ReadOnly => {
+            let message = crate::access::Denied {
+                level: ocs_collab::DenialLevel::State,
+                reason: "图纸已切换为只读".to_owned(),
+                holder: None,
+            }
+            .downgrade();
+            println!(
+                "[ocs_collab_server] 图纸切只读 drawing={drawing_id} by={changed_by} holder=(无) -> 通知 {} 个会话 at={}",
+                active_sessions.len(),
+                chrono::Utc::now().timestamp()
+            );
+            let direct = state.direct.lock().expect("direct mutex poisoned");
+            for session in &active_sessions {
+                let delivered = direct
+                    .get(&session.session_id)
+                    .is_some_and(|sender| sender.send(message.clone()).is_ok());
+                println!(
+                    "[ocs_collab_server] 单播 readonly_downgrade session={} user={} holder=(无) delivered={delivered}",
+                    session.session_id, session.user_id
+                );
+            }
+        }
+        DrawingState::SingleEditor => {
+            for session in &active_sessions {
+                let msg = match crate::access::write_access(state, session).await {
+                    Some(denied) => Some(denied.downgrade()),
+                    None if prev_state == Some(DrawingState::ReadOnly) => {
+                        Some(ocs_collab::ServerMessage::WriteRestored {
+                            reason: "图纸已切换为单人编辑，您已获得编辑权，写权限已恢复"
+                                .to_owned(),
+                        })
+                    }
+                    None => None,
+                };
+                if let Some(msg) = msg {
+                    let tx = state
+                        .direct
+                        .lock()
+                        .expect("direct mutex poisoned")
+                        .get(&session.session_id)
+                        .cloned();
+                    if let Some(tx) = tx {
+                        let _ = tx.send(msg);
+                    }
+                }
+            }
+        }
+        DrawingState::Collaborative => {
+            if prev_state == Some(DrawingState::Collaborative) {
+                return;
+            }
+            for session in &active_sessions {
+                if crate::access::write_access(state, session).await.is_none() {
+                    let tx = state
+                        .direct
+                        .lock()
+                        .expect("direct mutex poisoned")
+                        .get(&session.session_id)
+                        .cloned();
+                    if let Some(tx) = tx {
+                        let _ = tx.send(ocs_collab::ServerMessage::WriteRestored {
+                            reason: "图纸已切换为协同编辑，写权限已恢复".to_owned(),
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -563,9 +805,31 @@ async fn drawing_topology(
     Path(drawing_id): Path<String>,
 ) -> Response {
     let (revision, mut topology) = crate::ops::topology(&state, &drawing_id);
+    let (_, unpaired) = crate::ops::unpaired_connectors(&state, &drawing_id);
     topology["drawing_id"] = json!(drawing_id);
     topology["revision"] = json!(revision);
+    topology["unpaired_connectors"] = json!(unpaired);
     (StatusCode::OK, Json(topology)).into_response()
+}
+
+/// `GET /drawing/{id}/unpaired-connectors` → 200
+/// `{"drawing_id","revision","items":[…],"total":N}` (#32).
+async fn drawing_unpaired_connectors(
+    State(state): State<Arc<AppState>>,
+    Path(drawing_id): Path<String>,
+) -> Response {
+    let (revision, items) = crate::ops::unpaired_connectors(&state, &drawing_id);
+    let total = items.len();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "drawing_id": drawing_id,
+            "revision": revision,
+            "items": items,
+            "total": total,
+        })),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -603,6 +867,8 @@ struct ResolveBody {
     /// payload, `resolved_value` as appendix A.1 does.
     value: Option<String>,
     resolved_value: Option<String>,
+    #[serde(default)]
+    credential: Option<String>,
 }
 
 /// `POST /conflicts/{id}/resolve` — body `{resolution, resolved_by, value?}`
@@ -616,13 +882,22 @@ struct ResolveBody {
 async fn conflict_resolve(
     State(state): State<Arc<AppState>>,
     Path(conflict_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<ResolveBody>,
 ) -> Response {
     let Some(store) = state.store.clone() else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, codes::INVALID_MESSAGE, "数据库不可用");
     };
-    let Some(resolved_by) = body.resolved_by.or(body.user_id) else {
-        return error_response(StatusCode::BAD_REQUEST, codes::INVALID_MESSAGE, "缺少 resolved_by");
+    let resolved_by = match authenticate_http_actor(
+        &state,
+        &store,
+        &headers,
+        body.resolved_by.or(body.user_id),
+        body.credential,
+        "缺少 resolved_by",
+    ) {
+        Ok(uid) => uid,
+        Err(resp) => return resp,
     };
     let Some(resolution) = body.resolution else {
         return error_response(StatusCode::BAD_REQUEST, codes::INVALID_MESSAGE, "缺少 resolution");
@@ -694,12 +969,15 @@ async fn conflict_resolve(
 
     // The ruling took effect as an op: the room has heard it (`ops::resolve`
     // announces it in its turn), and the sessions' baseline follows the
-    // revision as it does for any op.
-    state
-        .sessions
-        .lock()
-        .await
-        .advance_base_revision(&resolved.row.drawing_id, resolved.revision);
+    // revision as it does for any op — including downstream drawings updated
+    // via off-page connectors (#34).
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.advance_base_revision(&resolved.row.drawing_id, resolved.revision);
+        for (downstream_id, downstream_rev) in &resolved.downstream_revisions {
+            sessions.advance_base_revision(downstream_id, *downstream_rev);
+        }
+    }
     (
         StatusCode::OK,
         Json(json!({
@@ -707,11 +985,210 @@ async fn conflict_resolve(
             "status": resolved.row.status,
             "resolution": resolved.row.resolution,
             "resolved_by": resolved.row.resolved_by,
+            "resolved_by_display_name": resolved.row.resolved_by_display_name,
             "resolved_value": resolved.row.resolved_value,
             "object_ref": resolved.row.object_ref,
             "field": resolved.row.field,
             "value": resolved.final_value,
             "revision": resolved.revision,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /metrics` → 200 read-only runtime observability snapshot (#39):
+/// per-drawing & total active editing sessions, claims, ops/min, denied writes,
+/// pending conflicts, op-log rows, and database size on disk.
+async fn metrics_snapshot(State(state): State<Arc<AppState>>) -> Response {
+    let now = ocs_collab::now_unix();
+    let mut drawing_ids = std::collections::BTreeSet::<String>::new();
+
+    // Active sessions per drawing.
+    let mut sessions_by_drawing: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+    {
+        let registry = state.sessions.lock().await;
+        for s in registry.all() {
+            if s.is_active() {
+                drawing_ids.insert(s.drawing_id.clone());
+                *sessions_by_drawing.entry(s.drawing_id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Active claims per drawing.
+    let mut claims_by_drawing: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+    {
+        let mut occ = state.occupancy.lock().await;
+        for c in occ.entries(now) {
+            drawing_ids.insert(c.drawing_id.clone());
+            *claims_by_drawing.entry(c.drawing_id.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let ops_per_min = state.metrics.ops_per_minute_by_drawing(now);
+    let denied_by_drawing = state.metrics.denied_writes_by_drawing();
+    for did in ops_per_min.keys().chain(denied_by_drawing.keys()) {
+        drawing_ids.insert(did.clone());
+    }
+
+    let (ops_rows_by_drawing, conflicts_by_drawing, db_size_bytes) = match &state.store {
+        Some(store) => {
+            if let Ok(ids) = store.drawing_ids() {
+                for id in ids {
+                    drawing_ids.insert(id);
+                }
+            }
+            (
+                store.ops_count_by_drawing().unwrap_or_default(),
+                store.pending_conflicts_by_drawing().unwrap_or_default(),
+                store.db_size_bytes(),
+            )
+        }
+        None => (Default::default(), Default::default(), 0),
+    };
+
+    let mut total_sessions = 0u64;
+    let mut total_claims = 0u64;
+    let mut total_ops_per_min = 0u64;
+    let mut total_pending_conflicts = 0i64;
+    let mut total_ops_rows = 0i64;
+
+    let drawings: Vec<serde_json::Value> = drawing_ids
+        .into_iter()
+        .map(|did| {
+            let active_sessions = sessions_by_drawing.get(&did).copied().unwrap_or(0);
+            let claims = claims_by_drawing.get(&did).copied().unwrap_or(0);
+            let opm = ops_per_min.get(&did).copied().unwrap_or(0);
+            let denied = denied_by_drawing.get(&did).copied().unwrap_or(0);
+            let pending_conflicts = conflicts_by_drawing.get(&did).copied().unwrap_or(0);
+            let ops_log_rows = ops_rows_by_drawing.get(&did).copied().unwrap_or(0);
+            total_sessions += active_sessions;
+            total_claims += claims;
+            total_ops_per_min += opm;
+            total_pending_conflicts += pending_conflicts;
+            total_ops_rows += ops_log_rows;
+            json!({
+                "drawing_id": did,
+                "active_sessions": active_sessions,
+                "claims": claims,
+                "ops_per_minute": opm,
+                "denied_writes": denied,
+                "pending_conflicts": pending_conflicts,
+                "ops_log_rows": ops_log_rows,
+            })
+        })
+        .collect();
+
+    let uptime_seconds = (now - state.metrics.started_at()).max(0);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "open_mode": state.open_mode,
+            "auth_enabled": state.require_auth,
+            "tls_enabled": state.tls_enabled,
+            "uptime_seconds": uptime_seconds,
+            "totals": {
+                "active_sessions": total_sessions,
+                "claims": total_claims,
+                "applied_ops_total": state.metrics.applied_ops_total(),
+                "ops_per_minute": total_ops_per_min,
+                "denied_writes_total": state.metrics.denied_writes_total(),
+                "pending_conflicts": total_pending_conflicts,
+                "ops_log_rows": total_ops_rows,
+                "db_size_bytes": db_size_bytes,
+            },
+            "drawings": drawings,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BackupBody {
+    user_id: Option<String>,
+    credential: Option<String>,
+    dest_dir: Option<String>,
+}
+
+/// `POST /admin/backup` → 200 `BackupInfo` (#105): triggers an immediate
+/// online SQLite snapshot into `dest_dir` or the configured `--backup-dir`.
+async fn admin_backup(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Option<Json<BackupBody>>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            codes::INVALID_MESSAGE,
+            "数据库不可用",
+        );
+    };
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    if state.require_auth || body.user_id.is_some() || headers.contains_key(axum::http::header::AUTHORIZATION) {
+        let actor = match authenticate_http_actor(
+            &state,
+            &store,
+            &headers,
+            body.user_id,
+            body.credential,
+            "缺少 user_id",
+        ) {
+            Ok(uid) => uid,
+            Err(resp) => return resp,
+        };
+        if let Ok(Some((role, _))) = store.user_role(&actor) {
+            if !matches!(
+                ocs_collab::Role::parse(&role),
+                Some(ocs_collab::Role::SystemAdmin | ocs_collab::Role::ProjectAdmin)
+            ) {
+                return error_response(
+                    StatusCode::FORBIDDEN,
+                    codes::PERM_DENIED_ROLE,
+                    "只有系统管理员或项目管理员可以触发在线备份",
+                );
+            }
+        }
+    }
+    let dir = body
+        .dest_dir
+        .map(std::path::PathBuf::from)
+        .or_else(|| state.backup_dir.clone());
+    let Some(dir) = dir else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            codes::INVALID_MESSAGE,
+            "未配置 --backup-dir 且请求未提供 dest_dir",
+        );
+    };
+    static BACKUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match store.backup_into_dir(&dir, seq) {
+        Ok(info) => {
+            state.logger.emit(
+                "info",
+                "backup_completed",
+                json!({
+                    "path": info.path,
+                    "size_bytes": info.size_bytes,
+                    "total_ops": info.total_ops,
+                    "max_op_at": info.max_op_at,
+                }),
+            );
+            (StatusCode::OK, Json(info)).into_response()
+        }
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, codes::INVALID_MESSAGE, &err),
+    }
+}
+
+async fn readonly_endpoint() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(json!({
+            "code": "READONLY_ENDPOINT",
+            "message": "该接口为只读接口",
         })),
     )
         .into_response()
@@ -745,12 +1222,15 @@ mod tests {
 
     fn state_with_memory_store() -> Arc<AppState> {
         let store = Store::open_in_memory().expect("memory store");
-        Arc::new(AppState::new(
-            Some(store),
-            None,
-            ":memory:",
-            SessionConfig::default(),
-        ))
+        Arc::new(
+            AppState::new(
+                Some(store),
+                None,
+                ":memory:",
+                SessionConfig::default(),
+            )
+            .with_open_mode(true),
+        )
     }
 
     fn state_without_store() -> Arc<AppState> {
@@ -1294,9 +1774,11 @@ mod tests {
         let response = drawing_state(
             State(state.clone()),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-admin".into()),
                 state: Some("只读".into()),
+                credential: None,
             }),
         )
         .await;
@@ -1315,9 +1797,11 @@ mod tests {
         let response = drawing_state(
             State(state.clone()),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-admin".into()),
                 state: Some("四态".into()),
+                credential: None,
             }),
         )
         .await;
@@ -1338,9 +1822,11 @@ mod tests {
         let response = drawing_state(
             State(state),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: None,
                 state: Some("只读".into()),
+                credential: None,
             }),
         )
         .await;
@@ -1354,9 +1840,11 @@ mod tests {
         let response = drawing_state(
             State(state),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-view".into()),
                 state: Some("只读".into()),
+                credential: None,
             }),
         )
         .await;
@@ -1411,9 +1899,11 @@ mod tests {
         let response = drawing_state(
             State(state),
             Path("d-missing".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-admin".into()),
                 state: Some("只读".into()),
+                credential: None,
             }),
         )
         .await;
@@ -1446,6 +1936,9 @@ mod tests {
                 existing_tags: Vec::new(),
 
                 repo_id: None,
+                protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+                resume_session_id: None,
+                credential: None,
             },
             now,
         )
@@ -1464,25 +1957,25 @@ mod tests {
         drawing_state(
             State(state.clone()),
             Path("d-a1-coop".into()),
+            HeaderMap::new(),
             Json(DrawingStateBody {
                 user_id: Some("u-admin".into()),
                 state: Some(next.into()),
+                credential: None,
             }),
         )
         .await
         .status()
     }
 
-    /// VAL-CLI-011: a drawing switched to 只读 downgrades every live session on
-    /// it except the one holding the edit right — the editing session that
-    /// has been on it longest — which goes on writing. Every session is told
-    /// who that is, the holder too: finding its own id there is how it knows.
+    /// #73: Switching a drawing to 只读 downgrades EVERY live session with
+    /// `holder = None` (read-only drawings no longer retain an edit holder).
     #[tokio::test]
-    async fn switching_to_readonly_downgrades_everyone_but_the_holder() {
+    async fn switching_to_readonly_downgrades_everyone_with_no_holder() {
         let state = seeded_state();
         let now = ocs_collab::now_unix();
         let (_viewer, mut viewer_rx) = live_session(&state, "u-view", "只读", now - 30).await;
-        let (holder, mut holder_rx) = live_session(&state, "u-proc", "协同编辑", now - 20).await;
+        let (_first, mut first_rx) = live_session(&state, "u-proc", "协同编辑", now - 20).await;
         let (_second, mut second_rx) =
             live_session(&state, "u-admin", "协同编辑", now - 10).await;
         let mut room = state.bus.subscribe("d-a1-coop");
@@ -1492,7 +1985,7 @@ mod tests {
         for (who, receiver) in [
             ("the second editor", &mut second_rx),
             ("the session that was read-only already", &mut viewer_rx),
-            ("the holder itself", &mut holder_rx),
+            ("the first editor", &mut first_rx),
         ] {
             match receiver.try_recv() {
                 Ok(ocs_collab::ServerMessage::ReadonlyDowngrade {
@@ -1502,7 +1995,7 @@ mod tests {
                     code,
                 }) => {
                     assert!(!reason.is_empty(), "{who}: the reason is stated");
-                    assert_eq!(named.as_deref(), Some(holder.as_str()), "{who}");
+                    assert_eq!(named, None, "{who}: readonly has no holder (#73)");
                     assert_eq!(level.as_deref(), Some("state"), "{who}");
                     assert_eq!(code.as_deref(), Some(codes::PERM_DENIED_STATE), "{who}");
                 }
@@ -1511,9 +2004,9 @@ mod tests {
             assert!(receiver.try_recv().is_err(), "{who} is told once");
         }
         assert_eq!(
-            crate::access::holder_of(&state, "d-a1-coop").as_deref(),
-            Some(holder.as_str()),
-            "and the server remembers who holds it"
+            crate::access::holder_of(&state, "d-a1-coop"),
+            None,
+            "readonly drawing retains no edit holder (#73)"
         );
         assert!(
             room.try_recv().is_none(),
@@ -1542,6 +2035,9 @@ mod tests {
                 existing_tags: Vec::new(),
 
                 repo_id: None,
+                protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+                resume_session_id: None,
+                credential: None,
             },
             now,
         )
@@ -1724,7 +2220,10 @@ mod tests {
         assert!(
             granted.iter().any(|reaction| matches!(
                 reaction,
-                crate::ws::Reaction::Send(ocs_collab::ServerMessage::ClaimGranted { .. })
+                crate::ws::Reaction::Publish {
+                    message: ocs_collab::ServerMessage::ClaimGranted { .. },
+                    ..
+                }
             )),
             "{granted:?}"
         );
@@ -1940,6 +2439,9 @@ mod tests {
             existing_tags: vec!["V-1002".into(), "P-2001".into()],
 
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
+            credential: None,
         };
         crate::ws::handle_message(&state, &mut conn, hello, ocs_collab::now_unix()).await;
 
@@ -1974,33 +2476,33 @@ mod tests {
     }
 
     /// 只读 has one writer: the holder goes on writing, everybody else is
-    /// refused at the state tier and told who holds it. A session that joins
-    /// afterwards is told the same as it comes in (it used to be told
-    /// nothing, and to write). Out of 只读 again, everybody writes.
+    /// #73: On a 只读 drawing NOBODY may write (including the editor who was
+    /// active at the moment of the switch), and `holder` is always `None`.
     #[tokio::test]
-    async fn on_a_readonly_drawing_only_the_holder_writes() {
+    async fn on_a_readonly_drawing_nobody_writes_and_no_holder_is_retained() {
         let state = seeded_state();
         let now = ocs_collab::now_unix();
-        let (mut holder, _) = live_conn(&state, "u-proc", now - 20).await;
+        let (mut first, _) = live_conn(&state, "u-proc", now - 20).await;
         let (mut second, _) = live_conn(&state, "u-admin", now - 10).await;
-        let holder_id = holder.session.as_ref().expect("session").session_id.clone();
         assert_eq!(switch_state(&state, "只读").await, StatusCode::OK);
 
-        assert!(applied_in(&write(&state, &mut holder, "op-h", "1.6MPa").await));
-        let refused = write(&state, &mut second, "op-s", "2.5MPa").await;
-        assert_eq!(
-            refusal_in(&refused),
-            Some((codes::PERM_DENIED_STATE.to_owned(), Some("state".to_owned()))),
-            "{refused:?}"
-        );
+        for (who, conn) in [("first", &mut first), ("second", &mut second)] {
+            let refused = write(&state, conn, &format!("op-{who}"), "1.6MPa").await;
+            assert_eq!(
+                refusal_in(&refused),
+                Some((codes::PERM_DENIED_STATE.to_owned(), Some("state".to_owned()))),
+                "{who}: {refused:?}"
+            );
+        }
+        assert_eq!(denied_rows(&state, "u-proc").len(), 1);
         assert_eq!(denied_rows(&state, "u-admin").len(), 1);
 
-        // A second session of a user who does edit, joining afterwards.
+        // A session joining afterwards gets ReadonlyDowngrade with holder = None.
         let (mut late, reactions) = live_conn(&state, "u-admin", now).await;
         assert_eq!(
             downgrade_in(&reactions),
             Some((
-                Some(holder_id),
+                None,
                 Some("state".to_owned()),
                 Some(codes::PERM_DENIED_STATE.to_owned())
             )),
@@ -2009,12 +2511,10 @@ mod tests {
         assert!(refusal_in(&write(&state, &mut late, "op-l", "4.0MPa").await).is_some());
     }
 
-    /// The holder is a session somebody is behind: one opened over HTTP has
-    /// no socket and is passed over, however early it was. And among those
-    /// with a socket it is the one that joined first — two sessions opened
-    /// in the same second used to be told apart by their random ids.
+    /// #73: On a 单人编辑 drawing, the edit holder is the earliest active
+    /// editing session with a socket (skipping HTTP-only sessions).
     #[tokio::test]
-    async fn the_holder_is_the_first_to_have_joined_among_sessions_with_a_socket() {
+    async fn single_editor_holder_is_first_editor_with_a_socket() {
         let state = seeded_state();
         let now = ocs_collab::now_unix();
         // An editing session with no socket, earlier than everybody.
@@ -2032,15 +2532,17 @@ mod tests {
             });
         }
         // Two with a socket, in the same second.
-        let (first, _) = live_conn(&state, "u-proc", now).await;
-        let (_second, _) = live_conn(&state, "u-admin", now).await;
+        let (mut first, _) = live_conn(&state, "u-proc", now).await;
+        let (mut second, _) = live_conn(&state, "u-admin", now).await;
         let first_id = first.session.as_ref().expect("session").session_id.clone();
 
-        assert_eq!(switch_state(&state, "只读").await, StatusCode::OK);
+        assert_eq!(switch_state(&state, "单人编辑").await, StatusCode::OK);
         assert_eq!(
-            crate::access::holder_of(&state, "d-a1-coop").as_deref(),
+            crate::access::first_editor(&state, "d-a1-coop").await.as_deref(),
             Some(first_id.as_str())
         );
+        assert!(applied_in(&write(&state, &mut first, "op-s1", "1.6MPa").await));
+        assert!(refusal_in(&write(&state, &mut second, "op-s2", "2.5MPa").await).is_some());
     }
 
     /// An `attempt` is a client saying it turned a write away itself. Nothing
@@ -2146,20 +2648,26 @@ mod tests {
         }
     }
 
-    /// Only 只读 takes write access away; any other state leaves every session
-    /// as it was.
+    /// #73: Switching to 单人编辑 leaves the earliest editor writable and
+    /// downgrades the second editor naming the first as holder.
     #[tokio::test]
-    async fn a_state_other_than_readonly_downgrades_nobody() {
+    async fn switching_to_single_editor_downgrades_second_editor_naming_first_holder() {
         let state = seeded_state();
         let now = ocs_collab::now_unix();
-        let (_first, mut first_rx) = live_session(&state, "u-proc", "协同编辑", now - 20).await;
+        let (first, mut first_rx) = live_session(&state, "u-proc", "协同编辑", now - 20).await;
         let (_second, mut second_rx) =
             live_session(&state, "u-admin", "协同编辑", now - 10).await;
 
         assert_eq!(switch_state(&state, "单人编辑").await, StatusCode::OK);
 
-        assert!(first_rx.try_recv().is_err());
-        assert!(second_rx.try_recv().is_err());
+        assert!(first_rx.try_recv().is_err(), "first editor remains writable");
+        match second_rx.try_recv() {
+            Ok(ocs_collab::ServerMessage::ReadonlyDowngrade { holder, code, .. }) => {
+                assert_eq!(holder.as_deref(), Some(first.as_str()));
+                assert_eq!(code.as_deref(), Some(codes::PERM_DENIED_STATE));
+            }
+            other => panic!("second editor must be downgraded naming first holder: {other:?}"),
+        }
     }
 
     // ── Conflict adjudication (`VAL-CONF-010` … `016`) ──────────────────
@@ -2208,6 +2716,9 @@ mod tests {
                 existing_tags: Vec::new(),
 
                 repo_id: None,
+                protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+                resume_session_id: None,
+                credential: None,
             };
             ws::handle_message(&state, &mut conn, hello, 1_700_000_000).await;
             sessions.push(conn);
@@ -2271,12 +2782,14 @@ mod tests {
         let response = conflict_resolve(
             State(state.clone()),
             Path(conflict_id.to_owned()),
+            HeaderMap::new(),
             Json(ResolveBody {
                 resolution: Some(resolution.into()),
                 resolved_by: Some(by.into()),
                 user_id: None,
                 value: value.map(str::to_owned),
                 resolved_value: None,
+                credential: None,
             }),
         )
         .await;
@@ -2548,6 +3061,9 @@ mod tests {
             existing_tags: Vec::new(),
 
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
+            credential: None,
         };
         crate::ws::handle_message(state, &mut conn, hello, now).await;
         assert!(conn.session.is_some(), "{user_id} is let in");
@@ -2811,5 +3327,998 @@ mod tests {
         assert_eq!(row["ip"], "10.0.0.7", "{row}");
         assert_eq!(row["company"], COMPANY, "{row}");
         assert_eq!(row["workspace"], "默认工作区", "{row}");
+    }
+
+    /// #25: ClaimGranted is broadcast to all editing sessions on the drawing with `expires_at`.
+    #[tokio::test]
+    async fn claim_granted_broadcasts_to_all_sessions_with_expiry() {
+        let state = seeded_state();
+        let now = ocs_collab::now_unix();
+        let (mut editor_a, _) = live_conn(&state, "u-proc", now).await;
+        let (mut editor_b, _) = live_conn(&state, "u-admin", now + 1).await;
+        let mut sub_b = editor_b.joined.take().expect("b subscribed");
+        let a_sid = editor_a.session.as_ref().expect("a session").session_id.clone();
+
+        let reactions = claim_frame(&state, &mut editor_a, "P-1001", true).await;
+        // Apply publish reactions to the bus as the WS loop does.
+        for reaction in &reactions {
+            if let crate::ws::Reaction::Publish { drawing_id, message } = reaction {
+                state.bus.publish(drawing_id, message);
+            }
+        }
+        // Peer B receives ClaimGranted with holder and expires_at.
+        let mut heard_grant = None;
+        while let Some(msg) = sub_b.try_recv() {
+            if let ocs_collab::ServerMessage::ClaimGranted { .. } = msg {
+                heard_grant = Some(msg);
+            }
+        }
+        match heard_grant.expect("peer B must receive ClaimGranted broadcast") {
+            ocs_collab::ServerMessage::ClaimGranted {
+                tag,
+                session_id,
+                user_id,
+                expires_at,
+                ..
+            } => {
+                assert_eq!(tag, "P-1001");
+                assert_eq!(session_id, a_sid);
+                assert_eq!(user_id.as_deref(), Some("u-proc"));
+                assert!(expires_at.expect("expires_at must be present") > now);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// #29: Read-only sessions (denied at role, PBS, or state tier) cannot claim a tag;
+    /// an editable designer can then claim the same tag.
+    #[tokio::test]
+    async fn readonly_sessions_cannot_claim_tag_at_any_tier() {
+        let state = audited_state();
+        // Add a designer with no PBS ACL (`u-nobody`) and a read-only drawing (`d-b1-ro`).
+        let extra: crate::store::SeedDoc = serde_json::from_value(json!({
+            "users": [
+                {"user_id": "u-nobody", "display_name": "无节点权限甲", "role": "工艺设计人员"}
+            ],
+            "drawings": [
+                {"drawing_id": "d-b1-ro", "file_name": "d-b1-ro.dwg", "pbs_node_id": "n-cell-a1", "state": "只读"}
+            ]
+        }))
+        .expect("extra seed");
+        state.store.as_ref().expect("store").seed(&extra).expect("seed extra");
+        let now = ocs_collab::now_unix();
+
+        // 1. Role tier denial: proofreader (`u-check`) joins and tries to claim P-1001.
+        let (mut proofreader, _) = live_conn(&state, "u-check", now).await;
+        let reactions = claim_frame(&state, &mut proofreader, "P-1001", true).await;
+        let err = reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, level, .. }) => {
+                    Some((code.clone(), level.clone()))
+                }
+                _ => None,
+            })
+            .expect("proofreader claim must be denied");
+        assert_eq!(err.0, codes::PERM_DENIED_ROLE);
+        assert_eq!(err.1.as_deref(), Some("role"));
+        assert!(
+            state.occupancy.lock().await.is_empty(),
+            "occupancy must remain empty after denied claim"
+        );
+
+        // 2. PBS tier denial: `u-nobody` (ProcessDesigner with no PBS ACL) tries to claim P-1001.
+        let (mut no_pbs, _) = live_conn(&state, "u-nobody", now + 1).await;
+        let reactions = claim_frame(&state, &mut no_pbs, "P-1001", true).await;
+        let err = reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, level, .. }) => {
+                    Some((code.clone(), level.clone()))
+                }
+                _ => None,
+            })
+            .expect("no-PBS user claim must be denied");
+        assert_eq!(err.0, codes::PERM_DENIED_PBS);
+        assert_eq!(err.1.as_deref(), Some("pbs"));
+        assert!(state.occupancy.lock().await.is_empty());
+
+        // 3. State tier denial: designer joins read-only drawing `d-b1-ro` and tries to claim.
+        let mut ro_conn = crate::ws::Connection::new("127.0.0.1");
+        let ro_hello = off_the_wire(json!({
+            "type": "hello", "user_id": "u-proc", "drawing_id": "d-b1-ro", "mode": "协同编辑"
+        }));
+        crate::ws::handle_message(&state, &mut ro_conn, ro_hello, now + 2).await;
+        let reactions = claim_frame(&state, &mut ro_conn, "P-1001", true).await;
+        let err = reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, level, .. }) => {
+                    Some((code.clone(), level.clone()))
+                }
+                _ => None,
+            })
+            .expect("readonly drawing claim must be denied");
+        assert_eq!(err.0, codes::PERM_DENIED_STATE);
+        assert_eq!(err.1.as_deref(), Some("state"));
+        assert!(state.occupancy.lock().await.is_empty());
+
+        // 4. Designer with write access claims P-1001 cleanly.
+        let (mut designer, _) = live_conn(&state, "u-proc", now + 3).await;
+        let granted = claim_frame(&state, &mut designer, "P-1001", true).await;
+        assert!(
+            granted.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::Publish {
+                    message: ocs_collab::ServerMessage::ClaimGranted { tag, .. },
+                    ..
+                } if tag == "P-1001"
+            )),
+            "designer must succeed claiming P-1001: {granted:?}"
+        );
+    }
+
+    /// #27 + #28: `display_name` is resolved from `users` and carried across
+    /// welcome, peers, claims, yield/delete errors, conflicts, audit, and objects.
+    #[tokio::test]
+    async fn display_name_flows_through_members_claims_errors_conflicts_audit_and_objects() {
+        let state = audited_state();
+        let port = serve(&state).await;
+        let now = ocs_collab::now_unix();
+
+        // 1. u-proc ("工艺甲") joins and claims P-1001.
+        let (mut a, a_reactions) = live_conn(&state, "u-proc", now).await;
+        let a_welcome = a_reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Welcome { display_name, .. }) => {
+                    Some(display_name.clone())
+                }
+                _ => None,
+            })
+            .expect("a welcome");
+        assert_eq!(a_welcome, "工艺甲");
+
+        let claim_a = claim_frame(&state, &mut a, "P-1001", true).await;
+        assert!(claim_a.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Publish {
+                message: ocs_collab::ServerMessage::ClaimGranted { display_name: Some(dn), .. },
+                ..
+            } if dn == "工艺甲"
+        )));
+
+        // 2. u-admin ("管理员") joins and sees u-proc's display_name in peers & claims, and own display_name in welcome.
+        let (mut b, b_reactions) = live_conn(&state, "u-admin", now + 1).await;
+        let (b_dn, b_peers, b_claims) = b_reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Welcome {
+                    display_name,
+                    peers,
+                    claims,
+                    ..
+                }) => Some((display_name.clone(), peers.clone(), claims.clone())),
+                _ => None,
+            })
+            .expect("b welcome");
+        assert_eq!(b_dn, "管理员");
+        assert_eq!(b_peers.len(), 1);
+        assert_eq!(b_peers[0].display_name, "工艺甲");
+        assert_eq!(b_claims.len(), 1);
+        assert_eq!(b_claims[0].display_name, "工艺甲");
+
+        // 3. u-admin tries to claim P-1001 -> ClaimDenied includes holder_display_name = "工艺甲".
+        let denied_claim = claim_frame(&state, &mut b, "P-1001", true).await;
+        assert!(denied_claim.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::ClaimDenied {
+                holder_user_id: Some(uid),
+                holder_display_name: Some(dn),
+                ..
+            }) if uid == "u-proc" && dn == "工艺甲"
+        )));
+
+        // Release P-1001 so both can write.
+        let _ = claim_frame(&state, &mut a, "P-1001", false).await;
+
+        // 4. u-proc writes P-1001.设计压力 = 1.6MPa (rev 0 -> 1); u-admin writes stale rev 0 -> OP_SUPERSEDED carries "工艺甲（u-proc）".
+        let a_sid = a.session.as_ref().expect("a").session_id.clone();
+        let b_sid = b.session.as_ref().expect("b").session_id.clone();
+        let _ = crate::ws::handle_message(
+            &state,
+            &mut a,
+            ocs_collab::ClientMessage::Op {
+                session_id: a_sid.clone(),
+                base_revision: 0,
+                op_id: "op-dn-1".into(),
+                payload: json!({"kind": "set_property", "object_ref": "P-1001", "field": "设计压力", "value": "1.6MPa"}),
+            },
+            now + 2,
+        )
+        .await;
+        let yielded = crate::ws::handle_message(
+            &state,
+            &mut b,
+            ocs_collab::ClientMessage::Op {
+                session_id: b_sid.clone(),
+                base_revision: 0,
+                op_id: "op-dn-2".into(),
+                payload: json!({"kind": "set_property", "object_ref": "P-1001", "field": "设计压力", "value": "2.5MPa"}),
+            },
+            now + 3,
+        )
+        .await;
+        assert!(
+            yielded.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error {
+                    code,
+                    message,
+                    actor_user_id: Some(uid),
+                    actor_display_name: Some(dn),
+                    ..
+                }) if code == codes::OP_SUPERSEDED
+                    && uid == "u-proc"
+                    && dn == "工艺甲"
+                    && message.contains("工艺甲（u-proc）")
+            )),
+            "yield error must include display_name: {yielded:?}"
+        );
+
+        // 5. u-proc deletes P-1001 (rev 1 -> 2); u-admin writes stale rev 1 -> OBJECT_DELETED carries "工艺甲（u-proc）".
+        let _ = crate::ws::handle_message(
+            &state,
+            &mut a,
+            ocs_collab::ClientMessage::Op {
+                session_id: a_sid.clone(),
+                base_revision: 1,
+                op_id: "op-dn-3".into(),
+                payload: json!({"kind": "delete_object", "object_ref": "P-1001"}),
+            },
+            now + 4,
+        )
+        .await;
+        let deleted_err = crate::ws::handle_message(
+            &state,
+            &mut b,
+            ocs_collab::ClientMessage::Op {
+                session_id: b_sid.clone(),
+                base_revision: 1,
+                op_id: "op-dn-4".into(),
+                payload: json!({"kind": "set_property", "object_ref": "P-1001", "field": "公称直径", "value": "DN80"}),
+            },
+            now + 5,
+        )
+        .await;
+        assert!(
+            deleted_err.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error {
+                    code,
+                    message,
+                    actor_user_id: Some(uid),
+                    actor_display_name: Some(dn),
+                    ..
+                }) if code == codes::OBJECT_DELETED
+                    && uid == "u-proc"
+                    && dn == "工艺甲"
+                    && message.contains("工艺甲（u-proc）")
+            )),
+            "deleted error must include display_name: {deleted_err:?}"
+        );
+
+        // 6. u-proc writes P-2001 -> GET /drawing/{id}/objects & GET /audit both include display_name = "工艺甲".
+        let _ = crate::ws::handle_message(
+            &state,
+            &mut a,
+            ocs_collab::ClientMessage::Op {
+                session_id: a_sid,
+                base_revision: 2,
+                op_id: "op-dn-5".into(),
+                payload: json!({"kind": "set_property", "object_ref": "P-2001", "field": "公称直径", "value": "DN50"}),
+            },
+            now + 6,
+        )
+        .await;
+        let objs = objects_listing(&state, "d-a1-coop", Some("P-2001")).await;
+        assert_eq!(objs["items"][0]["fields"]["公称直径"]["display_name"], "工艺甲");
+
+        let rows = audit_rows(port, "tag=P-2001").await;
+        assert_eq!(rows[0]["display_name"], "工艺甲");
+
+        // 7. Unregistered user in open mode gets empty display_name (never empty parentheses).
+        let open_state = AppState::new(
+            Some(Store::open_in_memory().expect("store")),
+            None,
+            ":memory:",
+            SessionConfig::default(),
+        )
+        .with_open_mode(true);
+        let (unreg, unreg_reactions) = live_conn(&open_state, "u-unregistered", now + 7).await;
+        let unreg_dn = unreg_reactions
+            .iter()
+            .find_map(|r| match r {
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::Welcome { display_name, .. }) => {
+                    Some(display_name.clone())
+                }
+                _ => None,
+            })
+            .expect("unreg welcome");
+        assert_eq!(unreg_dn, "");
+        assert_eq!(unreg.session.as_ref().expect("s").display_name, "");
+        assert_eq!(ocs_collab::protocol::format_user_label(&unreg_dn, "u-unregistered"), "u-unregistered");
+    }
+
+    /// #26: Audit entries are written for claim expiry, session takeover, and
+    /// drawing state switch; HTTP `/audit` and direct store reads match 100%.
+    #[tokio::test]
+    async fn audit_records_claim_expiry_session_takeover_and_drawing_state_switch() {
+        let state = audited_state();
+        let port = serve(&state).await;
+        let t0 = 1_700_000_000_i64;
+
+        // 1. Claim expiry audit row (object_ref = P-9001).
+        let (mut editor, _) = live_conn(&state, "u-proc", t0).await;
+        let sid = editor.session.as_ref().expect("session").session_id.clone();
+        let _ = crate::ws::handle_message(
+            &state,
+            &mut editor,
+            ocs_collab::ClientMessage::Claim {
+                session_id: sid.clone(),
+                tag: "P-9001".into(),
+            },
+            t0,
+        )
+        .await;
+        // Sweep after claim TTL (300s) -> claim expires and writes `claim_expired` audit.
+        let _ = crate::ws::sweep_expired(&state, t0 + 301).await;
+
+        let store_claim_rows = state
+            .store
+            .as_ref()
+            .expect("store")
+            .audit_query(&AuditQuery {
+                object_ref: Some("P-9001".into()),
+                ..AuditQuery::default()
+            })
+            .expect("store audit query");
+        let http_claim_rows = audit_rows(port, "tag=P-9001").await;
+        assert_eq!(store_claim_rows.items.len(), 1);
+        assert_eq!(http_claim_rows.len(), 1);
+        assert_eq!(store_claim_rows.items[0].action, "claim_expired");
+        assert_eq!(http_claim_rows[0]["action"], "claim_expired");
+        assert!(store_claim_rows.items[0].change_text.contains("工艺甲（u-proc）"));
+        assert!(store_claim_rows.items[0]
+            .change_text
+            .contains(&(t0 + 300).to_string()));
+
+        // 2. Session takeover audit row (object_ref = d-a1-coop): `editor` became stale above;
+        // a new session on `d-a1-coop` takes it over.
+        let (_new_editor, _) = live_conn(&state, "u-admin", t0 + 302).await;
+
+        // 3. Drawing state switch audit row (object_ref = d-a1-coop).
+        assert_eq!(switch_state(&state, "只读").await, StatusCode::OK);
+
+        let store_drawing_rows = state
+            .store
+            .as_ref()
+            .expect("store")
+            .audit_query(&AuditQuery {
+                object_ref: Some("d-a1-coop".into()),
+                ..AuditQuery::default()
+            })
+            .expect("store drawing audit");
+        let http_drawing_rows = audit_rows(port, "object_ref=d-a1-coop").await;
+        assert_eq!(store_drawing_rows.items.len(), http_drawing_rows.len());
+
+        let takeover = store_drawing_rows
+            .items
+            .iter()
+            .find(|r| r.action == "session_taken_over")
+            .expect("session_taken_over audit row must exist");
+        assert!(takeover.change_text.contains(&sid));
+        assert!(takeover.change_text.contains("工艺甲（u-proc）"));
+
+        let switched = store_drawing_rows
+            .items
+            .iter()
+            .find(|r| r.action == "drawing_state_changed")
+            .expect("drawing_state_changed audit row must exist");
+        assert_eq!(switched.user_id, "u-admin");
+        assert!(switched.change_text.contains("管理员（u-admin）"));
+        assert!(switched.change_text.contains("协同编辑"));
+        assert!(switched.change_text.contains("只读"));
+    }
+
+    /// #31 + #32 over HTTP: deleting a pipe line unpairs the downstream
+    /// connector, and `GET /drawing/{id}/unpaired-connectors` reports all 3
+    /// reasons and clears paired connectors.
+    #[tokio::test]
+    async fn http_unpaired_connectors_endpoint_and_line_deletion_unpair() {
+        let state = audited_state();
+        let extra: crate::store::SeedDoc = serde_json::from_value(json!({
+            "drawings": [
+                {"drawing_id": "d-a2", "file_name": "d-a2.dwg", "pbs_node_id": "n-cell-a1", "state": "协同编辑"},
+                {"drawing_id": "d-a3", "file_name": "d-a3.dwg", "pbs_node_id": "n-cell-a1", "state": "协同编辑"}
+            ]
+        }))
+        .expect("extra seed");
+        state.store.as_ref().expect("store").seed(&extra).expect("seed");
+        let port = serve(&state).await;
+        let now = ocs_collab::now_unix();
+
+        let join_drawing = |drawing_id: &'static str, user_id: &'static str| {
+            let state = state.clone();
+            async move {
+                let mut conn = crate::ws::Connection::new("127.0.0.1");
+                let h = off_the_wire(json!({
+                    "type": "hello", "user_id": user_id, "drawing_id": drawing_id, "mode": "协同编辑"
+                }));
+                crate::ws::handle_message(&state, &mut conn, h, now).await;
+                conn
+            }
+        };
+
+        let mut c1 = join_drawing("d-a1-coop", "u-proc").await;
+        let mut c2 = join_drawing("d-a2", "u-admin").await;
+        let mut c3 = join_drawing("d-a3", "u-proc").await;
+
+        async fn send_op(
+            state: &AppState,
+            conn: &mut crate::ws::Connection,
+            op_id: &str,
+            payload: serde_json::Value,
+            now: i64,
+        ) {
+            let sid = conn.session.as_ref().expect("s").session_id.clone();
+            let did = conn.session.as_ref().expect("s").drawing_id.clone();
+            let rev = crate::ws::current_revision(state, &did);
+            let _ = crate::ws::handle_message(
+                state,
+                conn,
+                ocs_collab::ClientMessage::Op {
+                    session_id: sid,
+                    base_revision: rev,
+                    op_id: op_id.into(),
+                    payload,
+                },
+                now + 1,
+            )
+            .await;
+        }
+
+        // 1. Unregistered target drawing
+        send_op(
+            &state,
+            &mut c1,
+            "op-u1",
+            json!({"kind": "create_connector", "line_tag": "L-UNREG", "connector": "pipe_out", "at": [10, 0], "target_drawing": "d-ghost"}),
+            now,
+        )
+        .await;
+        // 2. Registered target drawing d-a2, no matching inflow yet
+        send_op(
+            &state,
+            &mut c1,
+            "op-u2",
+            json!({"kind": "create_connector", "line_tag": "L-MISS", "connector": "pipe_out", "at": [20, 0], "target_drawing": "d-a2"}),
+            now,
+        )
+        .await;
+        // 3. Registered target drawing d-a2 already paired with d-a3 on L-TAKEN
+        send_op(
+            &state,
+            &mut c3,
+            "op-u3",
+            json!({"kind": "create_connector", "line_tag": "L-TAKEN", "connector": "pipe_out", "at": [30, 0], "target_drawing": "d-a2"}),
+            now,
+        )
+        .await;
+        send_op(
+            &state,
+            &mut c2,
+            "op-u4",
+            json!({"kind": "create_connector", "line_tag": "L-TAKEN", "connector": "pipe_in", "at": [5, 0]}),
+            now,
+        )
+        .await;
+        send_op(
+            &state,
+            &mut c1,
+            "op-u5",
+            json!({"kind": "create_connector", "line_tag": "L-TAKEN", "connector": "pipe_out", "at": [40, 0], "target_drawing": "d-a2"}),
+            now,
+        )
+        .await;
+
+        let (status, body) = http_exchange(port, "GET", "/drawing/d-a1-coop/unpaired-connectors").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["total"], 3, "{body}");
+        let items = body["items"].as_array().expect("items array");
+        let reason_of = |tag: &str| {
+            items
+                .iter()
+                .find(|i| i["line_tag"] == tag)
+                .and_then(|i| i["reason_code"].as_str())
+        };
+        assert_eq!(reason_of("L-UNREG"), Some("target_drawing_unregistered"));
+        assert_eq!(reason_of("L-MISS"), Some("no_matching_connector"));
+        assert_eq!(reason_of("L-TAKEN"), Some("target_already_paired"));
+
+        // Pair L-MISS -> disappears from unpaired-connectors.
+        send_op(
+            &state,
+            &mut c2,
+            "op-u6",
+            json!({"kind": "create_connector", "line_tag": "L-MISS", "connector": "pipe_in", "at": [15, 0]}),
+            now,
+        )
+        .await;
+        let (_, body_after) = http_exchange(port, "GET", "/drawing/d-a1-coop/unpaired-connectors").await;
+        assert_eq!(body_after["total"], 2, "{body_after}");
+
+        // Delete entire line L-MISS on d-a1-coop -> d-a2's inflow returns to unpaired (#31)!
+        send_op(
+            &state,
+            &mut c1,
+            "op-u7",
+            json!({"kind": "delete_object", "object_ref": "L-MISS"}),
+            now,
+        )
+        .await;
+        let (_, topo_b) = http_exchange(port, "GET", "/drawing/d-a2/topology").await;
+        let miss_in = topo_b["connectors"]
+            .as_array()
+            .expect("connectors")
+            .iter()
+            .find(|c| c["line_tag"] == "L-MISS")
+            .expect("L-MISS inflow on d-a2");
+        assert!(miss_in["peer_drawing"].is_null(), "peer must be cleared: {miss_in}");
+    }
+
+    /// #70 + #71 + #72: Read-only drawing switches back to 协同编辑, downgraded
+    /// sessions automatically receive `WriteRestored` without reconnecting,
+    /// `RequestWrite` answers immediately with `WriteStatus`, and single-editor
+    /// handoff restores write access when the prior holder expires.
+    #[tokio::test]
+    async fn readonly_restore_request_write_and_single_editor_handoff() {
+        let state = seeded_state();
+        let now = ocs_collab::now_unix();
+
+        let (mut editor_a, _) = live_conn(&state, "u-proc", now - 20).await;
+        let a_sid = editor_a.session.as_ref().expect("a").session_id.clone();
+        let (a_tx, mut a_rx) = tokio::sync::mpsc::unbounded_channel();
+        state.direct.lock().expect("direct").insert(a_sid.clone(), a_tx);
+
+        let (_viewer, mut viewer_rx) = live_session(&state, "u-view", "只读", now - 15).await;
+
+        // Switch to 只读 -> editor_a gets ReadonlyDowngrade(holder=None), write refused, RequestWrite -> writable=false.
+        assert_eq!(switch_state(&state, "只读").await, StatusCode::OK);
+        assert!(matches!(
+            a_rx.try_recv(),
+            Ok(ocs_collab::ServerMessage::ReadonlyDowngrade { holder: None, .. })
+        ));
+        let _ = viewer_rx.try_recv();
+        assert!(refusal_in(&write(&state, &mut editor_a, "op-ro", "1.0MPa").await).is_some());
+
+        // #72: RequestWrite while 只读 -> writable: false with state tier reason.
+        let req_denied = crate::ws::handle_message(
+            &state,
+            &mut editor_a,
+            ocs_collab::ClientMessage::RequestWrite {
+                session_id: a_sid.clone(),
+            },
+            now,
+        )
+        .await;
+        assert!(
+            req_denied.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::WriteStatus {
+                    writable: false,
+                    level: Some(lvl),
+                    code: Some(code),
+                    ..
+                }) if lvl == "state" && code == codes::PERM_DENIED_STATE
+            )),
+            "{req_denied:?}"
+        );
+
+        // #70: Designer cannot switch state back (role tier), admin can!
+        let denied_switch = drawing_state(
+            State(state.clone()),
+            Path("d-a1-coop".into()),
+            HeaderMap::new(),
+            Json(DrawingStateBody {
+                user_id: Some("u-proc".into()),
+                state: Some("协同编辑".into()),
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(denied_switch.status(), StatusCode::FORBIDDEN);
+        assert_eq!(switch_state(&state, "协同编辑").await, StatusCode::OK);
+
+        // #71: editor_a automatically receives WriteRestored; viewer does NOT.
+        assert!(matches!(
+            a_rx.try_recv(),
+            Ok(ocs_collab::ServerMessage::WriteRestored { .. })
+        ));
+        assert!(viewer_rx.try_recv().is_err(), "viewer must not get WriteRestored");
+
+        // #72: RequestWrite now returns writable: true immediately!
+        let req_ok = crate::ws::handle_message(
+            &state,
+            &mut editor_a,
+            ocs_collab::ClientMessage::RequestWrite {
+                session_id: a_sid.clone(),
+            },
+            now + 1,
+        )
+        .await;
+        assert!(
+            req_ok.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::Send(ocs_collab::ServerMessage::WriteStatus {
+                    writable: true,
+                    ..
+                })
+            )),
+            "{req_ok:?}"
+        );
+        // And editor_a can write immediately without reconnecting!
+        assert!(applied_in(&write(&state, &mut editor_a, "op-back", "1.6MPa").await));
+
+        // #71 part 2: Single-editor handoff on holder expiry!
+        let (mut editor_b, _) = live_conn(&state, "u-admin", now + 2).await;
+        let b_sid = editor_b.session.as_ref().expect("b").session_id.clone();
+        let (b_tx, mut b_rx) = tokio::sync::mpsc::unbounded_channel();
+        state.direct.lock().expect("direct").insert(b_sid.clone(), b_tx);
+
+        assert_eq!(switch_state(&state, "单人编辑").await, StatusCode::OK);
+        assert!(matches!(
+            b_rx.try_recv(),
+            Ok(ocs_collab::ServerMessage::ReadonlyDowngrade { holder: Some(ref h), .. }) if h == &a_sid
+        ));
+
+        // Keep b alive with heartbeat, let a expire -> sweep emits SendTo(b, WriteRestored)!
+        let _ = crate::ws::handle_message(
+            &state,
+            &mut editor_b,
+            ocs_collab::ClientMessage::Heartbeat {
+                session_id: b_sid.clone(),
+            },
+            now + 50,
+        )
+        .await;
+        let swept = crate::ws::sweep_expired(&state, now + 100).await;
+        assert!(
+            swept.iter().any(|r| matches!(
+                r,
+                crate::ws::Reaction::SendTo {
+                    session_id,
+                    message: ocs_collab::ServerMessage::WriteRestored { .. }
+                } if session_id == &b_sid
+            )),
+            "second editor must receive WriteRestored when first holder expires: {swept:?}"
+        );
+        assert!(applied_in(&write(&state, &mut editor_b, "op-handoff", "2.0MPa").await));
+    }
+
+    /// #67: Strict mode is default: unregistered users get `UNKNOWN_USER` and
+    /// unregistered drawings get `UNKNOWN_DRAWING`, with no session or drawing
+    /// row created. `--open-mode` explicitly enables open access and is
+    /// reported in both `Welcome.open_mode` and `GET /health`.
+    #[tokio::test]
+    async fn strict_mode_rejects_unregistered_users_and_drawings_and_open_mode_reports_status() {
+        let state = seeded_state();
+        assert!(!state.open_mode, "strict mode must be default");
+        let port = serve(&state).await;
+        let now = ocs_collab::now_unix();
+
+        let (status, health) = http_exchange(port, "GET", "/health").await;
+        assert_eq!(status, 200);
+        assert_eq!(health["open_mode"], false);
+
+        let before_drawings = state
+            .store
+            .as_ref()
+            .expect("store")
+            .drawing_ids()
+            .expect("ids")
+            .len();
+
+        // Unregistered user -> UNKNOWN_USER + Close, no session.
+        let mut c1 = crate::ws::Connection::new("127.0.0.1");
+        let r1 = crate::ws::handle_message(
+            &state,
+            &mut c1,
+            off_the_wire(json!({
+                "type": "hello", "user_id": "u-stranger", "drawing_id": "d-a1-coop", "mode": "协同编辑"
+            })),
+            now,
+        )
+        .await;
+        assert!(c1.session.is_none());
+        assert!(r1.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, .. })
+                if code == codes::UNKNOWN_USER
+        )));
+        assert!(r1.iter().any(|r| matches!(r, crate::ws::Reaction::Close)));
+
+        // Registered user + unregistered drawing -> UNKNOWN_DRAWING + Close, no drawing auto-created.
+        let mut c2 = crate::ws::Connection::new("127.0.0.1");
+        let r2 = crate::ws::handle_message(
+            &state,
+            &mut c2,
+            off_the_wire(json!({
+                "type": "hello", "user_id": "u-proc", "drawing_id": "d-unregistered", "mode": "协同编辑"
+            })),
+            now,
+        )
+        .await;
+        assert!(c2.session.is_none());
+        assert!(r2.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, .. })
+                if code == codes::UNKNOWN_DRAWING
+        )));
+        assert_eq!(
+            state
+                .store
+                .as_ref()
+                .expect("store")
+                .drawing_ids()
+                .expect("ids")
+                .len(),
+            before_drawings,
+            "strict mode must not insert unregistered drawing rows"
+        );
+
+        // Registered user + registered drawing -> Welcome with open_mode = Some(false).
+        let (c3, r3) = live_conn(&state, "u-proc", now).await;
+        assert!(c3.session.is_some());
+        assert!(r3.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Welcome {
+                open_mode: Some(false),
+                ..
+            })
+        )));
+
+        // Explicit open_mode -> Welcome & /health report open_mode = true.
+        let open = Arc::new(
+            AppState::new(
+                Some(Store::open_in_memory().expect("store")),
+                None,
+                ":memory:",
+                SessionConfig::default(),
+            )
+            .with_open_mode(true),
+        );
+        let open_port = serve(&open).await;
+        let (_, open_health) = http_exchange(open_port, "GET", "/health").await;
+        assert_eq!(open_health["open_mode"], true);
+        let (c4, r4) = live_conn(&open, "u-anyone", now).await;
+        assert!(c4.session.is_some());
+        assert!(r4.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Welcome {
+                open_mode: Some(true),
+                ..
+            })
+        )));
+    }
+
+    /// #68: Credential authentication on WS join and HTTP privileged endpoints
+    /// (`/drawing/{id}/state`, `/conflicts/{id}/resolve`), disabled account
+    /// rejection, hash-only SQLite storage, and verified identity derivation.
+    #[tokio::test]
+    async fn credential_authentication_guards_ws_and_privileged_http_endpoints() {
+        let store = Store::open_in_memory().expect("store");
+        let seed: crate::store::SeedDoc = serde_json::from_value(json!({
+            "users": [
+                {"user_id": "u-admin", "display_name": "管理员", "role": "系统管理员", "credential": "admin-secret-42", "active": true},
+                {"user_id": "u-proc", "display_name": "工艺甲", "role": "工艺设计人员", "credential": "proc-secret-99", "active": true},
+                {"user_id": "u-disabled", "display_name": "离职员工", "role": "工艺设计人员", "credential": "old-secret", "active": false}
+            ],
+            "pbs_nodes": [{"node_id": "n-plant", "name": "全厂", "node_type": "项目"}],
+            "pbs_acl": [
+                {"node_id": "n-plant", "subject": "u-admin", "permission": "编辑", "allowed": true},
+                {"node_id": "n-plant", "subject": "u-proc", "permission": "编辑", "allowed": true}
+            ],
+            "drawings": [
+                {"drawing_id": "d-a1-coop", "file_name": "d-a1-coop.dwg", "pbs_node_id": "n-plant", "state": "协同编辑"}
+            ]
+        }))
+        .expect("seed");
+        store.seed(&seed).expect("apply seed");
+
+        // Verify SQLite stores ONLY hash, never plaintext secret!
+        let rec = store.user_auth("u-admin").expect("auth").expect("exists");
+        assert!(rec.credential_hash.starts_with("pbkdf2_sha256$"));
+        assert!(!rec.credential_hash.contains("admin-secret-42"));
+
+        let state = Arc::new(
+            AppState::new(Some(store), None, ":memory:", SessionConfig::default())
+                .with_require_auth(true),
+        );
+        let now = ocs_collab::now_unix();
+
+        // 1. Wrong credential -> AUTH_FAILED + Close.
+        let mut bad = crate::ws::Connection::new("127.0.0.1");
+        let r_bad = crate::ws::handle_message(
+            &state,
+            &mut bad,
+            off_the_wire(json!({
+                "type": "hello", "user_id": "u-proc", "drawing_id": "d-a1-coop",
+                "mode": "协同编辑", "credential": "wrong-pass"
+            })),
+            now,
+        )
+        .await;
+        assert!(bad.session.is_none());
+        assert!(r_bad.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, .. })
+                if code == codes::AUTH_FAILED
+        )));
+        assert!(r_bad.iter().any(|r| matches!(r, crate::ws::Reaction::Close)));
+
+        // 2. Disabled account -> USER_DISABLED + Close (even with valid credential!).
+        let mut dis = crate::ws::Connection::new("127.0.0.1");
+        let r_dis = crate::ws::handle_message(
+            &state,
+            &mut dis,
+            off_the_wire(json!({
+                "type": "hello", "user_id": "u-disabled", "drawing_id": "d-a1-coop",
+                "mode": "协同编辑", "credential": "old-secret"
+            })),
+            now,
+        )
+        .await;
+        assert!(dis.session.is_none());
+        assert!(r_dis.iter().any(|r| matches!(
+            r,
+            crate::ws::Reaction::Send(ocs_collab::ServerMessage::Error { code, .. })
+                if code == codes::USER_DISABLED
+        )));
+
+        // 3. Valid credential -> Welcome!
+        let mut ok_conn = crate::ws::Connection::new("127.0.0.1");
+        let r_ok = crate::ws::handle_message(
+            &state,
+            &mut ok_conn,
+            off_the_wire(json!({
+                "type": "hello", "user_id": "u-proc", "drawing_id": "d-a1-coop",
+                "mode": "协同编辑", "credential": "proc-secret-99"
+            })),
+            now,
+        )
+        .await;
+        assert!(ok_conn.session.is_some(), "{r_ok:?}");
+
+        // 4. HTTP /drawing/{id}/state without credential -> 401 AUTH_FAILED.
+        let unauth = drawing_state(
+            State(state.clone()),
+            Path("d-a1-coop".into()),
+            HeaderMap::new(),
+            Json(DrawingStateBody {
+                user_id: Some("u-admin".into()),
+                state: Some("只读".into()),
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // 5. HTTP /drawing/{id}/state with Bearer <user>:<secret> (no user_id in body!) -> 200,
+        // and audit actor is derived from verified Bearer identity ("u-admin")!
+        let mut auth_headers = HeaderMap::new();
+        auth_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer u-admin:admin-secret-42".parse().expect("hdr"),
+        );
+        let authed = drawing_state(
+            State(state.clone()),
+            Path("d-a1-coop".into()),
+            auth_headers.clone(),
+            Json(DrawingStateBody {
+                user_id: None,
+                state: Some("只读".into()),
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(authed.status(), StatusCode::OK);
+        let audit = state
+            .store
+            .as_ref()
+            .expect("store")
+            .audit_query(&AuditQuery {
+                object_ref: Some("d-a1-coop".into()),
+                ..AuditQuery::default()
+            })
+            .expect("audit");
+        assert_eq!(audit.items[0].user_id, "u-admin");
+        assert!(!audit.items[0].change_text.contains("admin-secret-42"));
+
+        // 6. HTTP /conflicts/{id}/resolve without credential -> 401 AUTH_FAILED.
+        let unauth_resolve = conflict_resolve(
+            State(state.clone()),
+            Path("c-nonexistent".into()),
+            HeaderMap::new(),
+            Json(ResolveBody {
+                resolution: Some("采用甲方".into()),
+                resolved_by: Some("u-admin".into()),
+                user_id: None,
+                value: None,
+                resolved_value: None,
+                credential: None,
+            }),
+        )
+        .await;
+        assert_eq!(unauth_resolve.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// #39: Read-only `GET /metrics` reports per-drawing & total sessions,
+    /// claims, ops/min, denied writes, pending conflicts, op-log rows, and DB
+    /// size; 1 edit + 1 denied write increments each by 1; structured log file
+    /// writes one JSON object per line without secrets.
+    #[tokio::test]
+    async fn metrics_endpoint_and_structured_log_file_track_ops_and_denials() {
+        let state = seeded_state();
+        let log_path = std::env::temp_dir().join(format!("ocs-log-{}.jsonl", uuid::Uuid::new_v4()));
+        state.logger.set_file(&log_path).expect("attach log file");
+        let port = serve(&state).await;
+        let now = ocs_collab::now_unix();
+
+        // Read-only check: POST /metrics -> 405.
+        let (method_status, _) = http_exchange(port, "POST", "/metrics").await;
+        assert_eq!(method_status, 405);
+
+        let (mut editor, _) = live_conn(&state, "u-proc", now).await;
+        let (mut viewer, _) = live_conn(&state, "u-view", now).await;
+        let _ = claim_frame(&state, &mut editor, "P-1001", true).await;
+
+        let (status0, m0) = http_exchange(port, "GET", "/metrics").await;
+        assert_eq!(status0, 200, "{m0}");
+        let applied_before = m0["totals"]["applied_ops_total"].as_u64().unwrap();
+        let denied_before = m0["totals"]["denied_writes_total"].as_u64().unwrap();
+        assert_eq!(m0["totals"]["active_sessions"], 2);
+        assert_eq!(m0["totals"]["claims"], 1);
+
+        // 1 successful property edit + 1 denied write.
+        assert!(applied_in(&write(&state, &mut editor, "op-m1", "1.6MPa").await));
+        assert!(refusal_in(&write(&state, &mut viewer, "op-m2", "9.9MPa").await).is_some());
+
+        let (status1, m1) = http_exchange(port, "GET", "/metrics").await;
+        assert_eq!(status1, 200, "{m1}");
+        assert_eq!(m1["totals"]["applied_ops_total"], applied_before + 1);
+        assert_eq!(m1["totals"]["denied_writes_total"], denied_before + 1);
+        assert_eq!(m1["totals"]["ops_log_rows"], 1);
+        assert!(m1["totals"]["db_size_bytes"].is_number());
+        let d_entry = m1["drawings"]
+            .as_array()
+            .expect("drawings")
+            .iter()
+            .find(|d| d["drawing_id"] == "d-a1-coop")
+            .expect("d-a1-coop row");
+        assert_eq!(d_entry["ops_per_minute"], 1);
+        assert_eq!(d_entry["denied_writes"], 1);
+        assert_eq!(d_entry["ops_log_rows"], 1);
+        assert_eq!(d_entry["pending_conflicts"], 0);
+
+        // Structured log file has one JSON line per event.
+        let log_content = std::fs::read_to_string(&log_path).expect("read log file");
+        let lines: Vec<serde_json::Value> = log_content
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("valid JSON line"))
+            .collect();
+        assert!(lines.iter().any(|l| l["event"] == "op_applied"), "{lines:?}");
+        assert!(lines.iter().any(|l| l["event"] == "write_denied"), "{lines:?}");
+        let _ = std::fs::remove_file(&log_path);
     }
 }

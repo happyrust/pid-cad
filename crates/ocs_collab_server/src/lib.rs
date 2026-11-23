@@ -4,11 +4,15 @@
 //! lives here so integration tests can build the same router the binary serves.
 
 pub mod access;
+pub mod auth;
 pub mod bus;
 pub mod http;
+pub mod metrics;
 pub mod ops;
 pub mod perm;
+pub mod proxy;
 pub mod store;
+pub mod tls;
 pub mod ws;
 
 use std::collections::HashMap;
@@ -72,6 +76,25 @@ pub struct AppState {
     /// replaces it; without one it is generated fresh each start, so an
     /// in-memory run never stands in for a previous one.
     pub repo_id: String,
+    /// Minimum wire protocol version accepted by this server.
+    pub min_protocol_version: u32,
+    /// Current wire protocol version spoken by this server.
+    pub protocol_version: u32,
+    /// When `false` (default, #67), unregistered users get `UNKNOWN_USER` and
+    /// unregistered drawings get `UNKNOWN_DRAWING`. Pass `--open-mode` to
+    /// enable the legacy open demo/test behavior.
+    pub open_mode: bool,
+    /// When `true` (#68), every session join and privileged HTTP mutation must
+    /// present valid credentials verified against `users.credential_hash`.
+    pub require_auth: bool,
+    /// Whether TLS is active on the server listener (#69).
+    pub tls_enabled: bool,
+    /// Runtime metrics counters (#39).
+    pub metrics: Arc<metrics::Metrics>,
+    /// Structured single-line JSON logger with optional file sink (#39).
+    pub logger: Arc<metrics::StructuredLogger>,
+    /// Optional directory where periodic/on-demand online backups are written (#105).
+    pub backup_dir: Option<std::path::PathBuf>,
     pub version: &'static str,
 }
 
@@ -101,13 +124,44 @@ impl AppState {
             holders: Arc::new(Mutex::new(HashMap::new())),
             tie_window: Duration::ZERO,
             repo_id,
+            min_protocol_version: ocs_collab::protocol::MIN_PROTOCOL_VERSION,
+            protocol_version: ocs_collab::protocol::PROTOCOL_VERSION,
+            open_mode: false,
+            require_auth: false,
+            tls_enabled: false,
+            metrics: Arc::new(metrics::Metrics::default()),
+            logger: Arc::new(metrics::StructuredLogger::default()),
+            backup_dir: None,
             version: env!("CARGO_PKG_VERSION"),
         }
+    }
+
+    /// Builder helper to explicitly enable or disable `--open-mode` (#67).
+    pub fn with_open_mode(mut self, open_mode: bool) -> Self {
+        self.open_mode = open_mode;
+        self
+    }
+
+    /// Builder helper to explicitly enable or disable `--require-auth` (#68).
+    pub fn with_require_auth(mut self, require_auth: bool) -> Self {
+        self.require_auth = require_auth;
+        self
     }
 
     /// Whether the database answered a trivial query just now.
     pub fn db_healthy(&self) -> bool {
         self.store.as_ref().is_some_and(|store| store.health_check())
+    }
+
+    /// Registered display name of `user_id` from `users`, or empty when not
+    /// registered (or no database is attached). Never falls back to `user_id`
+    /// so callers can render plain `user_id` without empty parentheses (#27).
+    pub fn display_name_of(&self, user_id: &str) -> String {
+        self.store
+            .as_ref()
+            .and_then(|store| store.user_display_name(user_id).ok().flatten())
+            .map(|name| name.trim().to_owned())
+            .unwrap_or_default()
     }
 }
 

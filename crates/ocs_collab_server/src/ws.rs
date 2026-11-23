@@ -50,10 +50,18 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 /// `into_make_service_with_connect_info` so `ConnectInfo` is always present.
 pub async fn upgrade(
     State(state): State<Arc<AppState>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    extensions: axum::http::Extensions,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let peer_addr = addr.ip().to_string();
+    let peer_addr = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(a)| a.ip().to_string())
+        .or_else(|| {
+            extensions
+                .get::<ConnectInfo<crate::tls::PeerAddr>>()
+                .map(|ConnectInfo(crate::tls::PeerAddr(a))| a.ip().to_string())
+        })
+        .unwrap_or_else(|| "127.0.0.1".to_owned());
     ws.on_upgrade(move |socket| handle_socket(socket, state, peer_addr))
 }
 
@@ -180,7 +188,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, peer_addr: S
                         match classify(&message) {
                             Incoming::Message(client_message) => {
                                 let reactions =
-                                    handle_message(&state, &mut conn, client_message, now_unix())
+                                    handle_message(&state, &mut conn, *client_message, now_unix())
                                         .await;
                                 if let Some(joined) = conn.joined.take() {
                                     subscription = Some(joined);
@@ -286,16 +294,37 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, peer_addr: S
     }
 
     // The session and its claims survive a dropped socket: the heartbeat
-    // timeout, not the socket close, owns teardown (VAL-SRV-027). A session
-    // already retired by an explicit `Close` frame needs neither step again —
-    // `close_session` wrote the row and told the room.
+    // timeout, not the socket close, owns teardown (VAL-SRV-027, #37).
+    // Broadcast `peer_disconnected` (NOT `peer_left`) with `hold_until` so
+    // peers show "连接中断" while claims remain held; `peer_left` is only
+    // sent when the session expires or exits via an explicit Close frame.
     if !retired {
-        if let Some(session) = &conn.session {
-            state.bus.publish(
-                &session.drawing_id,
-                &ServerMessage::PeerLeft(peer_of(session)),
-            );
-        }
+        disconnect_session(&state, &conn, now_unix()).await;
+    }
+}
+
+/// Marks a dropped connection's session as network-disconnected (#37) and
+/// notifies peers with `PeerDisconnected` + `hold_until` without releasing its
+/// claims.
+pub async fn disconnect_session(state: &AppState, conn: &Connection, now: i64) {
+    let Some(session) = &conn.session else {
+        return;
+    };
+    let marked = {
+        let mut sessions = state.sessions.lock().await;
+        sessions.mark_disconnected(&session.session_id, now)
+    };
+    if let Some((session, hold_until)) = marked {
+        let mut peer = peer_of(&session, state.session_config.heartbeat_timeout);
+        peer.status = Some("disconnected".to_owned());
+        peer.hold_until = Some(hold_until);
+        state
+            .bus
+            .publish(&session.drawing_id, &ServerMessage::PeerDisconnected(peer));
+        println!(
+            "[ocs_collab_server] 广播 peer_disconnected session={} user={} drawing={} hold_until={hold_until}",
+            session.session_id, session.user_id, session.drawing_id
+        );
     }
 }
 
@@ -344,14 +373,58 @@ async fn close_session(state: &AppState, conn: &Connection) -> bool {
             },
         );
     }
-    state
-        .bus
-        .publish(&retired.drawing_id, &ServerMessage::PeerLeft(peer_of(&retired)));
+    state.bus.publish(
+        &retired.drawing_id,
+        &ServerMessage::PeerLeft(peer_of(&retired, state.session_config.heartbeat_timeout)),
+    );
     println!(
         "[ocs_collab_server] 广播 peer_left session={} user={} drawing={} reason=close-frame",
         retired.session_id, retired.user_id, retired.drawing_id
     );
+    // #71: If the retired session was editing a 单人编辑 drawing, the next
+    // earliest active editing session immediately receives write restoration.
+    if retired.is_editing() {
+        if let Some((next_sid, msg)) =
+            single_editor_handoff_notification(state, &retired.drawing_id).await
+        {
+            let tx = state
+                .direct
+                .lock()
+                .expect("direct mutex poisoned")
+                .get(&next_sid)
+                .cloned();
+            if let Some(tx) = tx {
+                let _ = tx.send(msg);
+            }
+        }
+    }
     true
+}
+
+/// #71: When a 单人编辑 drawing's current editor exits or expires, checks
+/// whether the next earliest active editor can now write and returns the
+/// `(session_id, WriteRestored)` notification to unicast.
+async fn single_editor_handoff_notification(
+    state: &AppState,
+    drawing_id: &str,
+) -> Option<(String, ServerMessage)> {
+    let store = state.store.as_ref()?;
+    let (_, state_text, _) = store.drawing(drawing_id).ok().flatten()?;
+    if ocs_collab::DrawingState::parse(&state_text) != Some(ocs_collab::DrawingState::SingleEditor) {
+        return None;
+    }
+    let next_sid = crate::access::first_editor(state, drawing_id).await?;
+    let next_session = state.sessions.lock().await.get(&next_sid).cloned()?;
+    if crate::access::write_access(state, &next_session).await.is_none() {
+        Some((
+            next_sid,
+            ServerMessage::WriteRestored {
+                reason: "原编辑权持有者已离开，您已获得单人编辑权，写权限已恢复".to_owned(),
+            },
+        ))
+    } else {
+        None
+    }
 }
 
 /// Reads frames until `hello` establishes a session. Returns `false` when the
@@ -372,7 +445,7 @@ async fn wait_for_hello(
         }
         match classify(&message) {
             Incoming::Message(client_message) => {
-                let reactions = handle_message(state, conn, client_message, now_unix()).await;
+                let reactions = handle_message(state, conn, *client_message, now_unix()).await;
                 let opened = conn.session.is_some();
                 if let Some(joined) = conn.joined.take() {
                     *subscription = Some(joined);
@@ -398,7 +471,7 @@ async fn wait_for_hello(
 
 /// One inbound frame, classified for the two read loops.
 enum Incoming {
-    Message(ClientMessage),
+    Message(Box<ClientMessage>),
     /// A text/binary frame that is not a `ClientMessage`.
     Bad,
     Close,
@@ -409,11 +482,11 @@ enum Incoming {
 fn classify(message: &Message) -> Incoming {
     match message {
         Message::Text(text) => match serde_json::from_str::<ClientMessage>(text) {
-            Ok(client_message) => Incoming::Message(client_message),
+            Ok(client_message) => Incoming::Message(Box::new(client_message)),
             Err(_) => Incoming::Bad,
         },
         Message::Binary(bytes) => match serde_json::from_slice::<ClientMessage>(bytes) {
-            Ok(client_message) => Incoming::Message(client_message),
+            Ok(client_message) => Incoming::Message(Box::new(client_message)),
             Err(_) => Incoming::Bad,
         },
         Message::Close(_) => Incoming::Close,
@@ -506,9 +579,9 @@ async fn send_message(socket: &mut WebSocket, message: &ServerMessage) -> bool {
 /// (`op_applied`, `claim_released`, errors) reaches the originator too.
 pub fn should_forward(own_session_id: &str, message: &ServerMessage) -> bool {
     match message {
-        ServerMessage::PeerJoined(peer) | ServerMessage::PeerLeft(peer) => {
-            peer.session_id != own_session_id
-        }
+        ServerMessage::PeerJoined(peer)
+        | ServerMessage::PeerDisconnected(peer)
+        | ServerMessage::PeerLeft(peer) => peer.session_id != own_session_id,
         _ => true,
     }
 }
@@ -544,6 +617,9 @@ pub async fn handle_message(
         since,
         existing_tags,
         repo_id,
+        protocol_version,
+        resume_session_id,
+        credential,
         ..
     } = &message
     {
@@ -565,6 +641,23 @@ pub async fn handle_message(
                 "会话已完成 hello，重复的 hello 被拒绝",
             ))];
         }
+        let client_proto = protocol_version.unwrap_or(1);
+        if client_proto < state.min_protocol_version || client_proto > state.protocol_version {
+            println!(
+                "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：协议版本不兼容 client={client_proto} server={}..={}",
+                state.min_protocol_version, state.protocol_version
+            );
+            return vec![
+                Reaction::Send(error_message(
+                    codes::PROTOCOL_VERSION_UNSUPPORTED,
+                    &format!(
+                        "协议版本不兼容，需要升级：客户端版本 {client_proto}，服务器支持 {}..={}（当前 {}）",
+                        state.min_protocol_version, state.protocol_version, state.protocol_version
+                    ),
+                )),
+                Reaction::Close,
+            ];
+        }
         return hello(
             state,
             conn,
@@ -575,6 +668,8 @@ pub async fn handle_message(
             repo_id.as_deref(),
             *since,
             existing_tags,
+            resume_session_id.as_deref(),
+            credential.as_deref(),
             now,
         )
         .await;
@@ -611,8 +706,34 @@ pub async fn handle_message(
         ClientMessage::Attempt {
             object_ref, text, ..
         } => attempt(state, &session, &conn.peer_addr, &object_ref, &text, now).await,
+        ClientMessage::RequestWrite { .. } => request_write(state, &session).await,
         ClientMessage::Hello { .. } => unreachable!("hello is handled before the session check"),
     }
+}
+
+/// #72: Re-evaluates whether `session` may write right now and answers
+/// immediately with `WriteStatus` (no approval queue).
+async fn request_write(state: &AppState, session: &Session) -> Vec<Reaction> {
+    if let Some(code) = session_unavailable(state, &session.session_id).await {
+        return vec![Reaction::Send(error_message(&code, "会话已失效，无法申请写权限"))];
+    }
+    let status = match crate::access::write_access(state, session).await {
+        None => ServerMessage::WriteStatus {
+            writable: true,
+            reason: "写权限已恢复，当前可以编辑".to_owned(),
+            level: None,
+            code: None,
+            holder: None,
+        },
+        Some(denied) => ServerMessage::WriteStatus {
+            writable: false,
+            reason: denied.reason.clone(),
+            level: Some(denied.level.as_str().to_owned()),
+            code: Some(denied.code().to_owned()),
+            holder: denied.holder,
+        },
+    };
+    vec![Reaction::Send(status)]
 }
 
 /// Answers an `op` from a connection whose `welcome` refused its alignment.
@@ -630,6 +751,8 @@ fn not_aligned(session: &Session, op_id: String) -> Vec<Reaction> {
         holder: None,
         op_id: Some(op_id),
         rejected: None,
+        actor_user_id: None,
+        actor_display_name: None,
     })]
 }
 
@@ -683,13 +806,104 @@ async fn hello(
     repo_id: Option<&str>,
     since: Option<i64>,
     existing_tags: &[String],
+    resume_session_id: Option<&str>,
+    credential: Option<&str>,
     now: i64,
 ) -> Vec<Reaction> {
     if let Some(store) = &state.store {
-        // A failed ensure must not block the handshake (appendix A.1); only
-        // the audit writer truly needs the row.
-        if let Err(err) = store.ensure_drawing(drawing_id) {
-            eprintln!("[ocs_collab_server] ensure_drawing({drawing_id}) 失败：{err}");
+        // #67 + #68: Strict registration check (default) and credential check.
+        // Credentials are never logged.
+        let user_record = match store.user_auth(user_id) {
+            Ok(rec) => rec,
+            Err(err) => {
+                eprintln!("[ocs_collab_server] 查询用户 {user_id} 失败：{err}");
+                return vec![
+                    Reaction::Send(error_message(codes::INVALID_MESSAGE, "查询用户登记失败")),
+                    Reaction::Close,
+                ];
+            }
+        };
+        if let Some(ref user) = user_record {
+            if !user.active {
+                println!(
+                    "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：账号已停用"
+                );
+                return vec![
+                    Reaction::Send(error_message(
+                        codes::USER_DISABLED,
+                        "账号已停用，拒绝建立会话",
+                    )),
+                    Reaction::Close,
+                ];
+            }
+            if state.require_auth || !user.credential_hash.is_empty() {
+                let ok = credential
+                    .is_some_and(|secret| crate::auth::verify_credential(secret, &user.credential_hash));
+                if !ok {
+                    println!(
+                        "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：身份核对失败"
+                    );
+                    return vec![
+                        Reaction::Send(error_message(
+                            codes::AUTH_FAILED,
+                            "身份核对失败，请检查凭据",
+                        )),
+                        Reaction::Close,
+                    ];
+                }
+            }
+        } else if !state.open_mode {
+            println!(
+                "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：用户未登记"
+            );
+            return vec![
+                Reaction::Send(error_message(
+                    codes::UNKNOWN_USER,
+                    "用户未登记，拒绝建立会话",
+                )),
+                Reaction::Close,
+            ];
+        } else if state.require_auth {
+            println!(
+                "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：启用了身份核对，未登记用户无法核对凭据"
+            );
+            return vec![
+                Reaction::Send(error_message(
+                    codes::AUTH_FAILED,
+                    "身份核对失败：用户未登记",
+                )),
+                Reaction::Close,
+            ];
+        }
+
+        if !state.open_mode {
+            match store.drawing(drawing_id) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    println!(
+                        "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：图纸未登记"
+                    );
+                    return vec![
+                        Reaction::Send(error_message(
+                            codes::UNKNOWN_DRAWING,
+                            "图纸未登记，拒绝建立会话",
+                        )),
+                        Reaction::Close,
+                    ];
+                }
+                Err(err) => {
+                    eprintln!("[ocs_collab_server] 查询图纸 {drawing_id} 失败：{err}");
+                    return vec![
+                        Reaction::Send(error_message(codes::UNKNOWN_DRAWING, "查询图纸登记失败")),
+                        Reaction::Close,
+                    ];
+                }
+            }
+        } else {
+            // Open mode: auto-register unknown drawings on demand.
+            if let Err(err) = store.ensure_drawing(drawing_id) {
+                eprintln!("[ocs_collab_server] ensure_drawing({drawing_id}) 失败：{err}");
+            }
         }
     }
     // Join the room and read its revision as one step, with the drawing
@@ -782,13 +996,27 @@ async fn hello(
     } else {
         mode
     };
+    let display_name = state.display_name_of(user_id);
+    // #36: If the client reconnects with `resume_session_id` naming its own
+    // previous session on this drawing, take it over immediately before
+    // `sessions.open` so claims can transfer seamlessly and single-editor mode
+    // does not self-reject.
+    let resumed_old = if let Some(old_id) = resume_session_id {
+        state
+            .sessions
+            .lock()
+            .await
+            .resume(old_id, user_id, drawing_id)
+    } else {
+        None
+    };
     let outcome = {
         let mut sessions = state.sessions.lock().await;
         sessions.open(OpenRequest {
             session_id: &session_id,
             drawing_id,
             user_id,
-            display_name: user_id,
+            display_name: &display_name,
             mode,
             workspace,
             base_revision,
@@ -809,6 +1037,8 @@ async fn hello(
                     holder: Some(holder),
                     op_id: None,
                     rejected: None,
+                    actor_user_id: None,
+                    actor_display_name: None,
                 }),
                 Reaction::Close,
             ]
@@ -843,6 +1073,28 @@ async fn hello(
                     if let Err(err) = store.upsert_session(&session_row(old)) {
                         eprintln!("[ocs_collab_server] 更新被接管会话失败：{err}");
                     }
+                    // #26: Audit entry for session takeover.
+                    let new_label = ocs_collab::protocol::format_user_label(
+                        &session.display_name,
+                        &session.user_id,
+                    );
+                    let old_dn = state.display_name_of(&old.user_id);
+                    let old_label = ocs_collab::protocol::format_user_label(&old_dn, &old.user_id);
+                    let row = audit_row(
+                        Some(store),
+                        &session,
+                        "session_taken_over",
+                        drawing_id,
+                        format!(
+                            "会话接管：{new_label}（会话 {}）接管了原会话 {old_session_id}（原持有者 {old_label}）",
+                            session.session_id
+                        ),
+                        &conn.peer_addr,
+                        now,
+                    );
+                    if let Err(err) = store.audit_append(&row) {
+                        eprintln!("[ocs_collab_server] 写入会话接管审计失败：{err}");
+                    }
                 }
                 // The displaced connection learns it was taken over; actually
                 // dropping that socket is driven by its own heartbeat failure.
@@ -857,6 +1109,8 @@ async fn hello(
                         holder: None,
                         op_id: None,
                         rejected: None,
+                        actor_user_id: None,
+                        actor_display_name: None,
                     },
                 });
             }
@@ -864,6 +1118,83 @@ async fn hello(
             if let Some(store) = &state.store {
                 if let Err(err) = store.upsert_session(&session_row(&session)) {
                     eprintln!("[ocs_collab_server] 写入会话失败：{err}");
+                }
+            }
+
+            // #36: Complete explicit session resume after the new session row
+            // exists in SQLite (satisfies `claims.session_id` FK): transfer
+            // live claims to the new session, persist old session as TakenOver,
+            // write `session_taken_over` audit, notify old socket, remove old
+            // peer row (`PeerLeft`), and broadcast updated `ClaimGranted`.
+            if let Some(old) = resumed_old {
+                let (transferred, expired_during_transfer) = state
+                    .occupancy
+                    .lock()
+                    .await
+                    .transfer_session(&old.session_id, &session.session_id, now);
+                reactions.extend(expired_release_reactions(state, expired_during_transfer, now));
+                if let Some(store) = &state.store {
+                    if let Err(err) = store.transfer_claims(&old.session_id, &session.session_id) {
+                        eprintln!("[ocs_collab_server] 迁移续接会话占用失败：{err}");
+                    }
+                    if let Err(err) = store.upsert_session(&session_row(&old)) {
+                        eprintln!("[ocs_collab_server] 更新被续接会话失败：{err}");
+                    }
+                    let label = ocs_collab::protocol::format_user_label(
+                        &session.display_name,
+                        &session.user_id,
+                    );
+                    let row = audit_row(
+                        Some(store),
+                        &session,
+                        "session_taken_over",
+                        drawing_id,
+                        format!(
+                            "会话接管：{label} 重连续接，新会话 {} 接管原会话 {}（保留 {} 项占用）",
+                            session.session_id,
+                            old.session_id,
+                            transferred.len()
+                        ),
+                        &conn.peer_addr,
+                        now,
+                    );
+                    if let Err(err) = store.audit_append(&row) {
+                        eprintln!("[ocs_collab_server] 写入重连接管审计失败：{err}");
+                    }
+                }
+                reactions.push(Reaction::SendTo {
+                    session_id: old.session_id.clone(),
+                    message: ServerMessage::Error {
+                        code: codes::SESSION_TAKEN_OVER.to_owned(),
+                        message: "会话已被重连的新连接接续".to_owned(),
+                        level: None,
+                        holder: None,
+                        op_id: None,
+                        rejected: None,
+                        actor_user_id: None,
+                        actor_display_name: None,
+                    },
+                });
+                reactions.push(Reaction::Publish {
+                    drawing_id: drawing_id.to_owned(),
+                    message: ServerMessage::PeerLeft(peer_of(
+                        &old,
+                        state.session_config.heartbeat_timeout,
+                    )),
+                });
+                for claim in transferred {
+                    let dn = (!session.display_name.is_empty())
+                        .then(|| session.display_name.clone());
+                    reactions.push(Reaction::Publish {
+                        drawing_id: claim.drawing_id,
+                        message: ServerMessage::ClaimGranted {
+                            tag: claim.tag,
+                            session_id: claim.session_id,
+                            user_id: Some(claim.user_id),
+                            display_name: dn,
+                            expires_at: Some(claim.expires_at),
+                        },
+                    });
                 }
             }
 
@@ -877,7 +1208,7 @@ async fn hello(
                     .active_peers(drawing_id)
                     .iter()
                     .filter(|peer| peer.session_id != session.session_id)
-                    .map(peer_of)
+                    .map(|p| peer_of(p, state.session_config.heartbeat_timeout))
                     .collect()
             };
             let (claims, expired) = {
@@ -887,8 +1218,11 @@ async fn hello(
             // A listing request may be the first thing to notice an expired
             // claim; the room still owes a `claim_released` for it, exactly as
             // `sweep_expired` would have sent.
-            reactions.extend(expired_release_reactions(state, expired));
-            let claims: Vec<ClaimInfo> = claims.iter().map(claim_info_of).collect();
+            reactions.extend(expired_release_reactions(state, expired, now));
+            let claims: Vec<ClaimInfo> = claims
+                .iter()
+                .map(|c| claim_info_of(state, c))
+                .collect();
             println!(
                 "[ocs_collab_server] 入站 hello user={user_id} drawing={drawing_id} mode={mode} -> welcome session={session_id} base_revision={base_revision} peers={} claims={} at={now}",
                 peers.len(),
@@ -932,6 +1266,9 @@ async fn hello(
                         code: code.to_owned(),
                         message,
                     }),
+                    protocol_version: Some(state.protocol_version),
+                    display_name: session.display_name.clone(),
+                    open_mode: Some(state.open_mode),
                 }),
             ]);
             // What the session missed, each op as the room first heard it,
@@ -945,7 +1282,10 @@ async fn hello(
             }));
             reactions.push(Reaction::Publish {
                 drawing_id: drawing_id.to_owned(),
-                message: ServerMessage::PeerJoined(peer_of(&session)),
+                message: ServerMessage::PeerJoined(peer_of(
+                    &session,
+                    state.session_config.heartbeat_timeout,
+                )),
             });
             // A session that may not write is told so as it comes in: its
             // user's role does not edit, or the drawing is 只读 already (a
@@ -997,6 +1337,18 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
     if let Some(code) = session_unavailable(state, &session.session_id).await {
         return vec![Reaction::Send(error_message(&code, "会话已失效，无法占用位号"))];
     }
+    // #29: A session that may not write (denied at role, PBS, or state tier)
+    // cannot claim a tag; otherwise a read-only viewer could block designers.
+    if let Some(denied) = crate::access::write_access(state, session).await {
+        println!(
+            "[ocs_collab_server] 入站 claim session={} user={} tag={tag} -> 拒绝 {} level={} at={now}",
+            session.session_id,
+            session.user_id,
+            denied.code(),
+            denied.level.as_str()
+        );
+        return vec![Reaction::Send(denied.error(&format!("占用位号 {tag} ")))];
+    }
     let ttl = state.session_config.claim_ttl;
     let (outcome, expired) = state.occupancy.lock().await.claim(
         &tag,
@@ -1009,7 +1361,7 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
     // Serving this request reclaimed whatever had already timed out; announce
     // each of them so a claim request cannot silently swallow an expiry that
     // the housekeeping sweep would have broadcast.
-    let mut reactions = expired_release_reactions(state, expired);
+    let mut reactions = expired_release_reactions(state, expired, now);
     match outcome {
         ClaimOutcome::Granted(occupancy) => {
             if let Some(store) = &state.store {
@@ -1024,16 +1376,34 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
                 }
             }
             println!(
-                "[ocs_collab_server] 入站 claim session={} user={} tag={tag} -> claim_granted expires_at={} at={now}",
+                "[ocs_collab_server] 入站 claim session={} user={} tag={tag} -> 广播 claim_granted expires_at={} at={now}",
                 session.session_id, session.user_id, occupancy.expires_at
             );
-            reactions.push(Reaction::Send(ServerMessage::ClaimGranted {
-                tag,
-                session_id: session.session_id.clone(),
-            }));
+            let display_name = (!session.display_name.is_empty()).then(|| session.display_name.clone());
+            // #25: Broadcast ClaimGranted to every editing session on the drawing with expiry.
+            reactions.push(Reaction::Publish {
+                drawing_id: session.drawing_id.clone(),
+                message: ServerMessage::ClaimGranted {
+                    tag,
+                    session_id: session.session_id.clone(),
+                    user_id: Some(session.user_id.clone()),
+                    display_name,
+                    expires_at: Some(occupancy.expires_at),
+                },
+            });
             reactions
         }
         ClaimOutcome::Denied { holder, expires_at } => {
+            let holder_user_id = state
+                .occupancy
+                .lock()
+                .await
+                .get(&tag)
+                .map(|c| c.user_id.clone());
+            let holder_display_name = holder_user_id
+                .as_deref()
+                .map(|uid| state.display_name_of(uid))
+                .filter(|name| !name.is_empty());
             println!(
                 "[ocs_collab_server] 入站 claim session={} user={} tag={tag} -> claim_denied holder={holder} expires_at={expires_at} at={now}",
                 session.session_id, session.user_id
@@ -1042,6 +1412,8 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
                 tag,
                 holder,
                 expires_at,
+                holder_user_id,
+                holder_display_name,
             }));
             reactions
         }
@@ -1052,13 +1424,14 @@ async fn claim(state: &AppState, session: &Session, tag: String, now: i64) -> Ve
 /// owes them, mirroring the store first. Shared by every path that can notice
 /// an expiry (`claim`, `welcome`'s listing) so the reason string and the mirror
 /// write cannot drift apart.
-fn expired_release_reactions(state: &AppState, expired: Vec<Occupancy>) -> Vec<Reaction> {
+fn expired_release_reactions(state: &AppState, expired: Vec<Occupancy>, now: i64) -> Vec<Reaction> {
     let mut reactions = Vec::with_capacity(expired.len());
     for occupancy in expired {
         if let Some(store) = &state.store {
             if let Err(err) = store.delete_claim(&occupancy.tag) {
                 eprintln!("[ocs_collab_server] 清理过期占用失败：{err}");
             }
+            record_claim_expired_audit(state, store, &occupancy, now);
         }
         log_claim_expired(&occupancy);
         reactions.push(Reaction::Publish {
@@ -1070,6 +1443,41 @@ fn expired_release_reactions(state: &AppState, expired: Vec<Occupancy>) -> Vec<R
         });
     }
     reactions
+}
+
+/// #26: Append an audit row when a tag claim expires so querying by tag explains
+/// why the claim disappeared (includes claimant + expiry time).
+fn record_claim_expired_audit(state: &AppState, store: &Store, occupancy: &Occupancy, now: i64) {
+    let dn = state.display_name_of(&occupancy.user_id);
+    let label = ocs_collab::protocol::format_user_label(&dn, &occupancy.user_id);
+    let company = store
+        .user_role(&occupancy.user_id)
+        .ok()
+        .flatten()
+        .map(|(_, company)| company)
+        .filter(|company| !company.is_empty())
+        .unwrap_or_else(|| "未知".to_owned());
+    let row = NewAuditRow {
+        module: "协同编辑".to_owned(),
+        action: "claim_expired".to_owned(),
+        at: now,
+        object_ref: occupancy.tag.clone(),
+        user_id: if occupancy.user_id.is_empty() {
+            "未知用户".to_owned()
+        } else {
+            occupancy.user_id.clone()
+        },
+        company,
+        ip: "127.0.0.1".to_owned(),
+        workspace: "默认工作区".to_owned(),
+        change_text: format!(
+            "占用到期释放：位号 {}，原占用者 {label}（会话 {}），到期时间 {}",
+            occupancy.tag, occupancy.session_id, occupancy.expires_at
+        ),
+    };
+    if let Err(err) = store.audit_append(&row) {
+        eprintln!("[ocs_collab_server] 写入占用到期审计失败：{err}");
+    }
 }
 
 /// The line a claim's TTL running out leaves in the log, whichever path
@@ -1167,11 +1575,25 @@ async fn op(
     // believes: the client's own gate is a courtesy, and is not there at all
     // in a client that reconnected before it heard, or is another program.
     if let Some(denied) = crate::access::write_access(state, session).await {
+        state.metrics.record_denied_write(&session.drawing_id);
         let first = op_changes(&payload).into_iter().next().unwrap_or(Value::Null);
         let kind = first["kind"].as_str().unwrap_or("op").to_owned();
         let object_ref = first["object_ref"].as_str().unwrap_or_default().to_owned();
         let tried = describe_change(&kind, &object_ref, &first);
         record_denied_write(state, session, peer_addr, &object_ref, &tried, &denied, now);
+        state.logger.emit(
+            "warn",
+            "write_denied",
+            serde_json::json!({
+                "drawing_id": session.drawing_id,
+                "session_id": session.session_id,
+                "user_id": session.user_id,
+                "op_id": op_id,
+                "object_ref": object_ref,
+                "code": denied.code(),
+                "level": denied.level.as_str(),
+            }),
+        );
         println!(
             "[ocs_collab_server] 入站 op session={} user={} op_id={op_id} base_revision={base_revision} object_ref={object_ref} -> error {} level={} at={now}",
             session.session_id,
@@ -1190,10 +1612,25 @@ async fn op(
     // other refusal: an op is one step of somebody's, and half a step is
     // not something they made.
     if let Some((change, held)) = held_by_another(state, session, &payload, now).await {
+        state.metrics.record_denied_write(&session.drawing_id);
+        let holder_dn = state.display_name_of(&held.user_id);
+        state.logger.emit(
+            "warn",
+            "claim_held",
+            serde_json::json!({
+                "drawing_id": session.drawing_id,
+                "session_id": session.session_id,
+                "user_id": session.user_id,
+                "op_id": op_id,
+                "tag": held.tag,
+                "holder": held.session_id,
+            }),
+        );
+        let holder_label = ocs_collab::protocol::format_user_label(&holder_dn, &held.user_id);
         let tried = describe_change(&change.kind, &change.subject(), &change.raw);
         let text = format!(
-            "{tried} 被拒绝（位号 {} 由 {} 占用，到期 {}）",
-            held.tag, held.user_id, held.expires_at
+            "{tried} 被拒绝（位号 {} 由 {holder_label} 占用，到期 {}）",
+            held.tag, held.expires_at
         );
         record_refused_write(state, session, peer_addr, &held.tag, text, now);
         println!(
@@ -1208,13 +1645,15 @@ async fn op(
         return vec![Reaction::Send(ServerMessage::Error {
             code: codes::CLAIM_HELD.to_owned(),
             message: format!(
-                "操作 {op_id}：位号 {} 已被 {} 占用，到期 {}",
-                held.tag, held.user_id, held.expires_at
+                "操作 {op_id}：位号 {} 已被 {holder_label} 占用，到期 {}",
+                held.tag, held.expires_at
             ),
             level: None,
             holder: Some(held.session_id),
             op_id: Some(op_id),
             rejected: Some(true),
+            actor_user_id: Some(held.user_id),
+            actor_display_name: (!holder_dn.is_empty()).then_some(holder_dn),
         })];
     }
 
@@ -1443,6 +1882,7 @@ pub async fn sweep_expired(state: &AppState, now: i64) -> Vec<Reaction> {
                 if let Err(err) = store.delete_claim(&occupancy.tag) {
                     eprintln!("[ocs_collab_server] 清理失效会话的占用失败：{err}");
                 }
+                record_claim_expired_audit(state, store, &occupancy, now);
             }
             reactions.push(Reaction::Publish {
                 drawing_id: occupancy.drawing_id.clone(),
@@ -1454,12 +1894,26 @@ pub async fn sweep_expired(state: &AppState, now: i64) -> Vec<Reaction> {
         }
         reactions.push(Reaction::Publish {
             drawing_id: session.drawing_id.clone(),
-            message: ServerMessage::PeerLeft(peer_of(&session)),
+            message: ServerMessage::PeerLeft(peer_of(
+                &session,
+                state.session_config.heartbeat_timeout,
+            )),
         });
         println!(
             "[ocs_collab_server] 广播 peer_left session={} user={} drawing={} reason=heartbeat-timeout",
             session.session_id, session.user_id, session.drawing_id
         );
+        // #71: Single-editor handoff when the previous holder expires.
+        if session.is_editing() {
+            if let Some((next_sid, msg)) =
+                single_editor_handoff_notification(state, &session.drawing_id).await
+            {
+                reactions.push(Reaction::SendTo {
+                    session_id: next_sid,
+                    message: msg,
+                });
+            }
+        }
     }
 
     let expired = state.occupancy.lock().await.expire(now);
@@ -1468,6 +1922,7 @@ pub async fn sweep_expired(state: &AppState, now: i64) -> Vec<Reaction> {
             if let Err(err) = store.delete_claim(&occupancy.tag) {
                 eprintln!("[ocs_collab_server] 清理过期占用失败：{err}");
             }
+            record_claim_expired_audit(state, store, &occupancy, now);
         }
         log_claim_expired(&occupancy);
         reactions.push(Reaction::Publish {
@@ -1539,6 +1994,8 @@ fn error_message(code: &str, message: &str) -> ServerMessage {
         holder: None,
         op_id: None,
         rejected: None,
+        actor_user_id: None,
+        actor_display_name: None,
     }
 }
 
@@ -1551,6 +2008,8 @@ fn refusing(error: ServerMessage, op_id: &str) -> ServerMessage {
             message,
             level,
             holder,
+            actor_user_id,
+            actor_display_name,
             ..
         } => ServerMessage::Error {
             code,
@@ -1559,6 +2018,8 @@ fn refusing(error: ServerMessage, op_id: &str) -> ServerMessage {
             holder,
             op_id: Some(op_id.to_owned()),
             rejected: Some(true),
+            actor_user_id,
+            actor_display_name,
         },
         other => other,
     }
@@ -1575,24 +2036,36 @@ fn message_session_id(message: &ClientMessage) -> &str {
         | ClientMessage::Claim { session_id, .. }
         | ClientMessage::Release { session_id, .. }
         | ClientMessage::Op { session_id, .. }
-        | ClientMessage::Attempt { session_id, .. } => session_id,
+        | ClientMessage::Attempt { session_id, .. }
+        | ClientMessage::RequestWrite { session_id } => session_id,
         ClientMessage::Hello { .. } => "",
     }
 }
 
-fn peer_of(session: &Session) -> Peer {
+fn peer_of(session: &Session, heartbeat_timeout: i64) -> Peer {
+    let (status, hold_until) = if session.disconnected_at.is_some() {
+        (
+            Some("disconnected".to_owned()),
+            Some(session.last_heartbeat + heartbeat_timeout),
+        )
+    } else {
+        (None, None)
+    };
     Peer {
         session_id: session.session_id.clone(),
         user_id: session.user_id.clone(),
         display_name: session.display_name.clone(),
+        status,
+        hold_until,
     }
 }
 
-fn claim_info_of(occupancy: &Occupancy) -> ClaimInfo {
+fn claim_info_of(state: &AppState, occupancy: &Occupancy) -> ClaimInfo {
     ClaimInfo {
         tag: occupancy.tag.clone(),
         session_id: occupancy.session_id.clone(),
         user_id: occupancy.user_id.clone(),
+        display_name: state.display_name_of(&occupancy.user_id),
         expires_at: occupancy.expires_at,
     }
 }
@@ -1742,6 +2215,7 @@ mod tests {
             ":memory:",
             SessionConfig::default(),
         )
+        .with_open_mode(true)
     }
 
     fn storeless_state() -> AppState {
@@ -1771,6 +2245,9 @@ mod tests {
             since: None,
             existing_tags: Vec::new(),
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+            resume_session_id: None,
+            credential: None,
         }
     }
 
@@ -2145,6 +2622,8 @@ mod tests {
                     holder: Some(a_id),
                     op_id: None,
                     rejected: None,
+                    actor_user_id: None,
+                    actor_display_name: None,
                 }),
                 Reaction::Close,
             ],
@@ -2207,10 +2686,13 @@ mod tests {
         )
         .await;
         assert_eq!(
-            sends(&reactions),
+            publishes(&reactions),
             vec![ServerMessage::ClaimGranted {
                 tag: "V-1001".into(),
                 session_id: session_id.clone(),
+                user_id: Some("u1".into()),
+                display_name: None,
+                expires_at: Some(T0 + 300),
             }]
         );
         let rows = store_of(&state)
@@ -2255,6 +2737,8 @@ mod tests {
                 tag: "V-1001".into(),
                 holder: a_id,
                 expires_at: T0 + 300,
+                holder_user_id: Some("u1".into()),
+                holder_display_name: None,
             }]
         );
     }
@@ -2486,6 +2970,9 @@ mod tests {
                 since: None,
                 existing_tags: Vec::new(),
                 repo_id: None,
+                protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
+                resume_session_id: None,
+                credential: None,
             },
             T0 + 2,
         )
@@ -2827,11 +3314,15 @@ mod tests {
             session_id: "s-1".into(),
             user_id: "u1".into(),
             display_name: "u1".into(),
+            status: None,
+            hold_until: None,
         };
         let other = Peer {
             session_id: "s-2".into(),
             user_id: "u2".into(),
             display_name: "u2".into(),
+            status: None,
+            hold_until: None,
         };
         assert!(!should_forward("s-1", &ServerMessage::PeerJoined(own.clone())));
         assert!(!should_forward("s-1", &ServerMessage::PeerLeft(own)));
@@ -2871,6 +3362,8 @@ mod tests {
             session_id: "s-1".into(),
             user_id: "u1".into(),
             display_name: "u1".into(),
+            status: None,
+            hold_until: None,
         };
         bus.publish("PID-1101", &applied(1));
         bus.publish("PID-1101", &ServerMessage::PeerJoined(me));
@@ -3169,7 +3662,8 @@ mod tests {
         let store = Store::open_in_memory().expect("memory store");
         let old = store.repo_id().expect("repo id");
         let renewed = store.renew_repo_id().expect("renewed");
-        let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default());
+        let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default())
+            .with_open_mode(true);
         assert_eq!(state.repo_id, renewed);
 
         let mut first = conn();
@@ -3200,5 +3694,98 @@ mod tests {
         let hello_now = hello_back(&state, "u3", Some(1));
         let reactions = handle_message(&state, &mut current, hello_now, T0 + 3).await;
         assert_eq!(refused(&reactions), None, "{reactions:?}");
+    }
+
+    #[tokio::test]
+    async fn protocol_version_negotiation_accepts_compatible_and_rejects_incompatible() {
+        let state = state();
+
+        // 1. Legacy client without protocol_version is treated as v1 (compatible) and welcomed with server protocol_version.
+        let mut legacy_conn = conn();
+        let legacy_hello: ClientMessage = serde_json::from_str(
+            r#"{"type":"hello","user_id":"u1","drawing_id":"PID-1101","mode":"协同编辑"}"#,
+        )
+        .expect("legacy hello");
+        let reactions = handle_message(&state, &mut legacy_conn, legacy_hello, T0).await;
+        let welcome_val = reactions
+            .iter()
+            .find_map(|r| match r {
+                Reaction::Send(m @ ServerMessage::Welcome { .. }) => serde_json::to_value(m).ok(),
+                _ => None,
+            })
+            .expect("legacy client gets welcome");
+        assert!(
+            welcome_val["protocol_version"].as_u64().unwrap_or(0) >= 2,
+            "welcome must report server protocol_version: {welcome_val}"
+        );
+        assert!(legacy_conn.session.is_some());
+
+        // 1b. Mixed-version collaboration: legacy v1 client and v2 client both edit and claim normally.
+        let legacy_sid = session_id(&legacy_conn);
+        let mut modern_conn = conn();
+        let modern_hello = hello("u_modern", "协同编辑", "");
+        let modern_reactions = handle_message(&state, &mut modern_conn, modern_hello, T0).await;
+        assert!(modern_conn.session.is_some(), "{modern_reactions:?}");
+        let claim_reactions = handle_message(
+            &state,
+            &mut legacy_conn,
+            ClientMessage::Claim {
+                session_id: legacy_sid.clone(),
+                tag: "P-1001".into(),
+            },
+            T0 + 1,
+        )
+        .await;
+        assert!(
+            claim_reactions
+                .iter()
+                .any(|r| matches!(r, Reaction::Send(ServerMessage::ClaimGranted { tag, .. }) | Reaction::Publish { message: ServerMessage::ClaimGranted { tag, .. }, .. } if tag == "P-1001")),
+            "legacy v1 client claim must succeed: {claim_reactions:?}"
+        );
+        let op_reactions = handle_message(
+            &state,
+            &mut legacy_conn,
+            ClientMessage::Op {
+                session_id: legacy_sid,
+                base_revision: 0,
+                op_id: "op-v1-1".into(),
+                payload: json!({"kind": "set_property", "object_ref": "P-1001", "field": "设计压力", "value": "1.6MPa"}),
+            },
+            T0 + 2,
+        )
+        .await;
+        assert!(
+            op_reactions.iter().any(|r| matches!(
+                r,
+                Reaction::Published { message: ServerMessage::OpApplied { revision: 1, .. }, .. }
+            )),
+            "legacy v1 client op must succeed: {op_reactions:?}"
+        );
+
+        // 2. Incompatible client (version 99 or 0) is rejected with PROTOCOL_VERSION_UNSUPPORTED and no session created.
+        for bad_ver in [0_u32, 99_u32] {
+            let mut bad_conn = conn();
+            let raw = format!(
+                r#"{{"type":"hello","user_id":"u2","drawing_id":"PID-1101","mode":"协同编辑","protocol_version":{bad_ver}}}"#
+            );
+            let bad_hello: ClientMessage = serde_json::from_str(&raw).expect("bad hello");
+            let reactions = handle_message(&state, &mut bad_conn, bad_hello, T0 + 1).await;
+            assert!(
+                bad_conn.session.is_none(),
+                "incompatible client v{bad_ver} must not establish a session"
+            );
+            let err = reactions
+                .iter()
+                .find_map(|r| match r {
+                    Reaction::Send(ServerMessage::Error { code, message, .. }) => {
+                        Some((code.clone(), message.clone()))
+                    }
+                    _ => None,
+                })
+                .expect("incompatible client gets error");
+            assert_eq!(err.0, "PROTOCOL_VERSION_UNSUPPORTED");
+            assert!(err.1.contains("升级"), "message should mention upgrade: {}", err.1);
+            assert!(reactions.iter().any(|r| matches!(r, Reaction::Close)));
+        }
     }
 }

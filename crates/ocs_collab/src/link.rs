@@ -13,11 +13,12 @@
 
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::conflict::{
-    Change, DrawingModel, KIND_CREATE_CONNECTOR, KIND_DELETE_CONNECTOR, KIND_PAIR_CONNECTOR,
-    KIND_SET_PROPERTY,
+    Change, DrawingModel, KIND_CREATE_CONNECTOR, KIND_DELETE_CONNECTOR, KIND_DELETE_OBJECT,
+    KIND_PAIR_CONNECTOR, KIND_SET_PROPERTY,
 };
 
 /// The fields of a pipe line that go along a pipe connector.
@@ -185,6 +186,9 @@ pub fn follow(
         match change.kind.as_str() {
             KIND_CREATE_CONNECTOR => pair(rooms, drawing_id, &stem, &change.raw, &mut moved),
             KIND_DELETE_CONNECTOR => unpair(rooms, drawing_id, &stem, &change.raw, &mut moved),
+            KIND_DELETE_OBJECT => {
+                unpair_line(rooms, drawing_id, &stem, &change.object_ref, &mut moved)
+            }
             KIND_SET_PROPERTY => {
                 written.push((change.object_ref.clone(), change.field.clone(), change.value.clone()))
             }
@@ -224,16 +228,18 @@ fn pair(
     else {
         return;
     };
+    let known_drawings: BTreeSet<String> = rooms.drawings().into_iter().collect();
     let candidates: Vec<String> = match (&mine.target_drawing, mine.is_inflow()) {
-        (Some(target), _) => vec![target.clone()],
+        (Some(target), _) => {
+            if known_drawings.contains(target) {
+                vec![target.clone()]
+            } else {
+                Vec::new()
+            }
+        }
         // An inflow that does not say where it comes from is looked for
         // from every drawing; the lowest id that flows out to here has it.
-        (None, true) => {
-            let mut all = rooms.drawings();
-            all.sort();
-            all.dedup();
-            all
-        }
+        (None, true) => known_drawings.into_iter().collect(),
         // An outflow to nowhere in particular pairs with nothing.
         (None, false) => Vec::new(),
     };
@@ -352,6 +358,181 @@ fn unpair(
             moved.extend(at.map(|revision| (other.clone(), revision)));
         }
     }
+}
+
+/// #31: An entire pipe/signal line was deleted on `drawing_id`: every connector
+/// on another drawing that was paired with any connector on `line_tag` of
+/// `drawing_id` returns to unpaired.
+fn unpair_line(
+    rooms: &mut dyn Rooms,
+    drawing_id: &str,
+    stem: &str,
+    line_tag: &str,
+    moved: &mut Vec<(String, i64)>,
+) {
+    if line_tag.is_empty() {
+        return;
+    }
+    let mut all = rooms.drawings();
+    all.sort();
+    all.dedup();
+    for other in all {
+        if other == drawing_id {
+            continue;
+        }
+        let affected: Vec<Connector> = rooms
+            .model(&other)
+            .connectors()
+            .into_iter()
+            .filter(|known| {
+                known.peer.as_ref().is_some_and(|peer| {
+                    peer.drawing == drawing_id && peer.line_tag == line_tag
+                })
+            })
+            .collect();
+        if !affected.is_empty() {
+            let changes: Vec<Value> = affected.iter().map(|c| c.paired_with(None)).collect();
+            let op_id = format!("pair-{stem}");
+            let at = rooms.commit(&other, &op_id, drawing_id, changes);
+            moved.extend(at.map(|revision| (other.clone(), revision)));
+        }
+    }
+}
+
+/// Why an off-page connector is currently unpaired (#32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnpairedReason {
+    /// Target drawing is not registered on the server.
+    TargetDrawingUnregistered,
+    /// Target drawing exists, but has no opposite-direction same-family
+    /// connector on the same line tag.
+    NoMatchingConnector,
+    /// Target drawing has matching opposite-direction connector(s) on the same
+    /// line tag, but all of them are already paired with another connector.
+    TargetAlreadyPaired,
+}
+
+impl UnpairedReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UnpairedReason::TargetDrawingUnregistered => "target_drawing_unregistered",
+            UnpairedReason::NoMatchingConnector => "no_matching_connector",
+            UnpairedReason::TargetAlreadyPaired => "target_already_paired",
+        }
+    }
+
+    pub fn message(self, is_inflow: bool) -> &'static str {
+        match self {
+            UnpairedReason::TargetDrawingUnregistered => "目标图纸没有登记",
+            UnpairedReason::NoMatchingConnector => {
+                if is_inflow {
+                    "目标图纸上没有同一线号的流出连接符"
+                } else {
+                    "目标图纸上没有同一线号的流入连接符"
+                }
+            }
+            UnpairedReason::TargetAlreadyPaired => {
+                if is_inflow {
+                    "目标图纸上同一线号的流出连接符已经另有配对"
+                } else {
+                    "目标图纸上同一线号的流入连接符已经另有配对"
+                }
+            }
+        }
+    }
+}
+
+/// One unpaired off-page connector on a drawing, with the reason it failed to
+/// pair (#32).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnpairedConnector {
+    pub line_tag: String,
+    pub connector: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_drawing: Option<String>,
+    pub reason_code: UnpairedReason,
+    pub reason: String,
+}
+
+/// Lists every unpaired off-page connector on `drawing_id` along with the exact
+/// reason it has not paired (#32). Paired connectors do not appear.
+pub fn unpaired_connectors(rooms: &mut dyn Rooms, drawing_id: &str) -> Vec<UnpairedConnector> {
+    let known_drawings: BTreeSet<String> = rooms.drawings().into_iter().collect();
+    let mine: Vec<Connector> = rooms
+        .model(drawing_id)
+        .connectors()
+        .into_iter()
+        .filter(|c| c.peer.is_none())
+        .collect();
+    let mut out = Vec::with_capacity(mine.len());
+    for conn in mine {
+        let reason_code = match &conn.target_drawing {
+            Some(target) => {
+                if !known_drawings.contains(target) {
+                    UnpairedReason::TargetDrawingUnregistered
+                } else {
+                    let matches: Vec<Connector> = rooms
+                        .model(target)
+                        .connectors()
+                        .into_iter()
+                        .filter(|other| {
+                            other.family() == conn.family()
+                                && other.is_inflow() != conn.is_inflow()
+                                && other.line_tag == conn.line_tag
+                        })
+                        .collect();
+                    if matches.is_empty() {
+                        UnpairedReason::NoMatchingConnector
+                    } else if matches.iter().all(|m| m.peer.is_some()) {
+                        UnpairedReason::TargetAlreadyPaired
+                    } else {
+                        UnpairedReason::NoMatchingConnector
+                    }
+                }
+            }
+            None => {
+                if conn.is_inflow() {
+                    // An inflow without explicit target_drawing scans all other known drawings.
+                    let mut saw_paired = false;
+                    for other in &known_drawings {
+                        if other == drawing_id {
+                            continue;
+                        }
+                        for candidate in rooms.model(other).connectors() {
+                            if candidate.family() == conn.family()
+                                && !candidate.is_inflow()
+                                && candidate.line_tag == conn.line_tag
+                                && candidate.target_drawing.as_deref() == Some(drawing_id)
+                                && candidate.peer.is_some()
+                            {
+                                saw_paired = true;
+                            }
+                        }
+                    }
+                    if saw_paired {
+                        UnpairedReason::TargetAlreadyPaired
+                    } else {
+                        UnpairedReason::NoMatchingConnector
+                    }
+                } else {
+                    UnpairedReason::TargetDrawingUnregistered
+                }
+            }
+        };
+        let is_inflow = conn.is_inflow();
+        out.push(UnpairedConnector {
+            line_tag: conn.line_tag,
+            connector: conn.connector,
+            at: conn.at,
+            target_drawing: conn.target_drawing,
+            reason_code,
+            reason: reason_code.message(is_inflow).to_owned(),
+        });
+    }
+    out
 }
 
 /// A field written on a line: `(line, field, value)`.
@@ -696,5 +877,77 @@ mod tests {
         ));
         let out = Change::list(&outflow("L-1001", "PID-1102")).remove(0);
         assert!(matches!(model.judge(&out, 1, "s-1"), crate::conflict::Verdict::Apply { .. }));
+    }
+
+    /// #31: Deleting an entire pipe line on A removes its connectors and
+    /// unpairs the downstream inflow connector on B; recreating the line +
+    /// outflow connector re-pairs cleanly.
+    #[test]
+    fn deleting_pipe_line_unpairs_downstream_connector_and_allows_repairing() {
+        let mut desk = Desk::default();
+        desk.take(
+            "PID-A",
+            "s-1",
+            vec![json!({"kind": "create_pipe_line", "tag": "L-1001", "type": "PIPE_LINE"})],
+        );
+        desk.take("PID-A", "s-1", vec![outflow("L-1001", "PID-B")]);
+        desk.take("PID-B", "s-2", vec![inflow("L-1001")]);
+        assert!(desk.connector("PID-B", 0).peer.is_some());
+
+        // Delete entire pipe line L-1001 on PID-A.
+        let moved = desk.take(
+            "PID-A",
+            "s-1",
+            vec![json!({"kind": KIND_DELETE_OBJECT, "object_ref": "L-1001"})],
+        );
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].0, "PID-B");
+        assert!(desk.models["PID-A"].connectors().is_empty());
+        assert_eq!(desk.connector("PID-B", 0).peer, None);
+
+        // Recreate L-1001 and outflow connector on PID-A -> pairs again!
+        desk.take(
+            "PID-A",
+            "s-1",
+            vec![json!({"kind": "create_pipe_line", "tag": "L-1001", "type": "PIPE_LINE"})],
+        );
+        let repaired = desk.take("PID-A", "s-1", vec![outflow("L-1001", "PID-B")]);
+        assert_eq!(repaired.len(), 2);
+        assert!(desk.connector("PID-B", 0).peer.is_some());
+    }
+
+    /// #32: Unpaired connectors report each of the 3 reasons and disappear once paired.
+    #[test]
+    fn unpaired_connectors_report_all_three_reasons_and_clear_when_paired() {
+        let mut desk = Desk::default();
+        // Register PID-A, PID-B, PID-C in models; PID-MISSING is unregistered.
+        desk.models.entry("PID-B".into()).or_default();
+        desk.models.entry("PID-C".into()).or_default();
+
+        // 1. Target drawing not registered.
+        desk.take("PID-A", "s-1", vec![outflow("L-UNREG", "PID-MISSING")]);
+        // 2. Target drawing registered (PID-B), but has no inflow connector on L-NO-MATCH.
+        desk.take("PID-A", "s-1", vec![outflow("L-NO-MATCH", "PID-B")]);
+        // 3. Target drawing PID-B has inflow on L-TAKEN already paired with PID-C.
+        desk.take("PID-C", "s-3", vec![outflow("L-TAKEN", "PID-B")]);
+        desk.take("PID-B", "s-2", vec![inflow("L-TAKEN")]);
+        desk.take("PID-A", "s-1", vec![outflow("L-TAKEN", "PID-B")]);
+
+        let list = unpaired_connectors(&mut desk, "PID-A");
+        assert_eq!(list.len(), 3, "{list:?}");
+        let reason_of = |line: &str| {
+            list.iter()
+                .find(|u| u.line_tag == line)
+                .map(|u| u.reason_code)
+        };
+        assert_eq!(reason_of("L-UNREG"), Some(UnpairedReason::TargetDrawingUnregistered));
+        assert_eq!(reason_of("L-NO-MATCH"), Some(UnpairedReason::NoMatchingConnector));
+        assert_eq!(reason_of("L-TAKEN"), Some(UnpairedReason::TargetAlreadyPaired));
+
+        // Once L-NO-MATCH gets its inflow on PID-B, it pairs and disappears from unpaired list!
+        desk.take("PID-B", "s-2", vec![inflow("L-NO-MATCH")]);
+        let after = unpaired_connectors(&mut desk, "PID-A");
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().all(|u| u.line_tag != "L-NO-MATCH"));
     }
 }
