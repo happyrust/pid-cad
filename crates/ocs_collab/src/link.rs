@@ -278,6 +278,11 @@ fn pair(
         } else {
             (drawing_id, mine.line_tag.as_str(), theirs.line_tag.as_str())
         };
+        let target_drawing = if mine.is_inflow() {
+            drawing_id
+        } else {
+            other.as_str()
+        };
         let carried: Vec<Written> = {
             let model = rooms.model(source);
             mine.carried_fields()
@@ -288,10 +293,23 @@ fn pair(
                 })
                 .collect()
         };
-        let values: Vec<Value> = carried
-            .iter()
-            .map(|(line, field, value)| set_property(line, field, value))
-            .collect();
+        // #90: outflow still wins, but a different value already on the
+        // inflow line is named on the change so the audit can keep it.
+        let values: Vec<Value> = {
+            let model = rooms.model(target_drawing);
+            carried
+                .iter()
+                .map(|(line, field, value)| {
+                    let mut entry = set_property(line, field, value);
+                    if let Some(old) = model.field(line, field).map(|known| known.value.clone()) {
+                        if !old.is_empty() && old != *value {
+                            entry["replaced"] = json!(old);
+                        }
+                    }
+                    entry
+                })
+                .collect()
+        };
         let mut here = vec![mine.paired_with(Some(&to_them))];
         let mut there = vec![theirs.paired_with(Some(&to_me))];
         if mine.is_inflow() {
@@ -734,6 +752,25 @@ mod tests {
                     && changes[0]["kind"] == KIND_PAIR_CONNECTOR
             }));
         }
+    }
+
+    /// #90: pairing still copies the outflow onto the inflow, and names the
+    /// inflow value it replaced.
+    #[test]
+    fn pairing_names_the_inflow_value_it_replaces() {
+        let mut desk = Desk::default();
+        desk.take("PID-1102", "s-2", vec![write("L-1001", "公称直径", "DN80")]);
+        desk.take("PID-1101", "s-1", vec![write("L-1001", "公称直径", "DN50")]);
+        desk.take("PID-1101", "s-1", vec![outflow("L-1001", "PID-1102")]);
+        desk.take("PID-1102", "s-2", vec![inflow("L-1001")]);
+        assert_eq!(desk.value("PID-1102", "L-1001", "公称直径").as_deref(), Some("DN50"));
+        let replaced = desk.made.iter().find_map(|(_, _, _, changes)| {
+            changes.iter().find(|change| change.get("replaced").is_some()).cloned()
+        });
+        let replaced = replaced.expect("the carried change names what it replaced");
+        assert_eq!(replaced["replaced"], "DN80");
+        assert_eq!(replaced["value"], "DN50");
+        assert_eq!(replaced["object_ref"], "L-1001");
     }
 
     /// What the line flowing out carries when the two are paired goes to

@@ -468,10 +468,13 @@ impl Rooms for LinkedRooms<'_> {
                     } else {
                         change.object_ref.clone()
                     };
-                    let text = format!(
-                        "{}（沿连接符，起因在 {cause}）",
-                        ws::describe_change(&change.kind, &name, &change.raw)
-                    );
+                    let described = ws::describe_change(&change.kind, &name, &change.raw);
+                    let text = match change.raw.get("replaced").and_then(Value::as_str) {
+                        Some(old) => format!(
+                            "{described}（沿连接符，起因在 {cause}，覆盖流入侧原值 {old}）"
+                        ),
+                        None => format!("{described}（沿连接符，起因在 {cause}）"),
+                    };
                     ws::audit_row(
                         Some(store),
                         &session,
