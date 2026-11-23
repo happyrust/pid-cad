@@ -674,6 +674,13 @@ fn publish_outcome_banner<'a>(
                 outcome.elapsed.as_secs_f64()
             );
             let mut sub_parts = vec![format!("清单：{}", outcome.index_path.display())];
+            let gaps = &outcome.codelist_gaps;
+            sub_parts.push(format!(
+                "分级表外 {}，枚举表外 {}，厂加仪表跳过 {}",
+                gaps.unmapped_leaf_total(),
+                gaps.unmapped_specialty_total(),
+                gaps.plant_added_instruments_skipped(),
+            ));
             if outcome.without_drawing_no > 0 {
                 sub_parts.push(format!("无 DrawingNo {} 张", outcome.without_drawing_no));
             }

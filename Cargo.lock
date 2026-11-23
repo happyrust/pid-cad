@@ -3763,7 +3763,7 @@ dependencies = [
 [[package]]
 name = "hayro"
 version = "0.7.1"
-source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
+source = "git+https://github.com/happyrust/pid-parse?rev=7cb03e48a564311d6b83cbde5bc1af9dc79e8e51#7cb03e48a564311d6b83cbde5bc1af9dc79e8e51"
 dependencies = [
  "bytemuck",
  "hayro-interpret",
@@ -3793,7 +3793,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
+source = "git+https://github.com/happyrust/pid-parse?rev=7cb03e48a564311d6b83cbde5bc1af9dc79e8e51#7cb03e48a564311d6b83cbde5bc1af9dc79e8e51"
 dependencies = [
  "bitflags 2.13.1",
  "hayro-cmap",
@@ -3836,7 +3836,7 @@ checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
+source = "git+https://github.com/happyrust/pid-parse?rev=7cb03e48a564311d6b83cbde5bc1af9dc79e8e51#7cb03e48a564311d6b83cbde5bc1af9dc79e8e51"
 dependencies = [
  "flate2",
  "hayro-ccitt",
@@ -4062,7 +4062,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -5160,7 +5160,7 @@ dependencies = [
 [[package]]
 name = "lopdf"
 version = "0.45.0"
-source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
+source = "git+https://github.com/happyrust/pid-parse?rev=7cb03e48a564311d6b83cbde5bc1af9dc79e8e51#7cb03e48a564311d6b83cbde5bc1af9dc79e8e51"
 dependencies = [
  "aes 0.9.3",
  "bitflags 2.13.1",
@@ -6364,7 +6364,7 @@ dependencies = [
 [[package]]
 name = "oxidized-mdf"
 version = "0.3.1"
-source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
+source = "git+https://github.com/happyrust/pid-parse?rev=7cb03e48a564311d6b83cbde5bc1af9dc79e8e51#7cb03e48a564311d6b83cbde5bc1af9dc79e8e51"
 dependencies = [
  "bitvec",
  "chrono",
@@ -6612,7 +6612,7 @@ checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 [[package]]
 name = "pid-parse"
 version = "0.11.7"
-source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
+source = "git+https://github.com/happyrust/pid-parse?rev=7cb03e48a564311d6b83cbde5bc1af9dc79e8e51#7cb03e48a564311d6b83cbde5bc1af9dc79e8e51"
 dependencies = [
  "base64",
  "cfb",
@@ -6635,7 +6635,7 @@ dependencies = [
 [[package]]
 name = "pid-plot"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/pid-parse?rev=a85fa10285cc5379953495fa391f374981b9e587#a85fa10285cc5379953495fa391f374981b9e587"
+source = "git+https://github.com/happyrust/pid-parse?rev=7cb03e48a564311d6b83cbde5bc1af9dc79e8e51#7cb03e48a564311d6b83cbde5bc1af9dc79e8e51"
 dependencies = [
  "fontcull-klippa",
  "fontcull-read-fonts",

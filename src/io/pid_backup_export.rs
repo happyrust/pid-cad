@@ -17,6 +17,7 @@ use pid_parse::publish::backup_package::{
     publish_backup_package, BackupPublishError, BackupPublishReport, PackageChainFault,
     PackageDrawingShortfalls, PackageDuplicateUids,
 };
+use pid_parse::publish::codelist_values::CodelistGaps;
 use serde_json::Value;
 
 use crate::io::pid_backup_pdf::{full, lies_in, panic_text, resolved};
@@ -128,6 +129,9 @@ pub struct ExportOutcome {
     pub index_path: PathBuf,
     /// How long the export took.
     pub elapsed: Duration,
+    /// Codelist values the built-in tables did not hold. The three counts
+    /// are here, and in [`summary_lines`], even when every one is zero.
+    pub codelist_gaps: CodelistGaps,
 }
 
 impl ExportOutcome {
@@ -485,6 +489,7 @@ fn outcome_of(
         files: files + 1,
         index_path: report.index_path,
         elapsed,
+        codelist_gaps: report.codelist_gaps,
     })
 }
 
@@ -589,7 +594,9 @@ where
 /// four lists, each the first twenty of its kind under how many there are:
 /// the drawings that were not written, each with the reason; the ones
 /// written with notes; the other problems the index lists; the warnings
-/// the index does not list.
+/// the index does not list. The codelist-gap counts are said after the
+/// failure count, including when every one is zero, and a miss is named
+/// under them.
 pub fn summary_lines(outcome: &ExportOutcome) -> Vec<String> {
     let seconds = outcome.elapsed.as_secs_f64();
     let (written, files, failed) = (outcome.written, outcome.files, outcome.failed);
@@ -603,6 +610,7 @@ pub fn summary_lines(outcome: &ExportOutcome) -> Vec<String> {
              {templates} border template(s), {unmatched} unmatched"
         ),
     ];
+    lines.extend(codelist_gap_lines(&outcome.codelist_gaps));
     let unnumbered = outcome.without_drawing_no;
     if unnumbered > 0 {
         lines.push(format!(
@@ -659,6 +667,31 @@ pub fn summary_lines(outcome: &ExportOutcome) -> Vec<String> {
     );
     lines
 }
+
+/// The codelist-gap sentence, then one line for each unmapped leaf and each
+/// specialty code outside {1, 2}. The sentence is said when every count is
+/// zero.
+fn codelist_gap_lines(gaps: &CodelistGaps) -> Vec<String> {
+    let mut lines = vec![format!(
+        "codelist gaps: {} object(s) whose leaf is outside the level table, {} specialty code(s) outside 1 and 2, {} plant-added instrument(s) skipped",
+        gaps.unmapped_leaf_total(),
+        gaps.unmapped_specialty_total(),
+        gaps.plant_added_instruments_skipped(),
+    )];
+    for row in gaps.unmapped_leaves() {
+        lines.push(format!(
+            "  {} {} {} ×{}",
+            row.class, row.interface, row.leaf, row.count
+        ));
+    }
+    for row in gaps.unmapped_specialty_codes() {
+        lines.push(format!("  SP_ISSPECIALTYITEM {} ×{}", row.code, row.count));
+    }
+    lines
+}
+
+/// What [`codelist_gap_lines`] says when nothing was left out.
+pub(crate) const NO_CODELIST_GAPS: &str = "codelist gaps: 0 object(s) whose leaf is outside the level table, 0 specialty code(s) outside 1 and 2, 0 plant-added instrument(s) skipped";
 
 /// Add to `lines` how many `sentences` there are of `what`, and the first
 /// [`LISTED`] of them; where there are more, how many more, and
@@ -787,6 +820,7 @@ mod tests {
             chain_faults: Vec::new(),
             shortfalls: Vec::new(),
             duplicate_uids: Vec::new(),
+            codelist_gaps: CodelistGaps::default(),
         }
     }
 
@@ -866,6 +900,7 @@ mod tests {
             files: 160,
             index_path: Path::new("out").join(INDEX_NAME),
             elapsed: Duration::from_millis(15_234),
+            codelist_gaps: CodelistGaps::default(),
         }
     }
 
@@ -1251,6 +1286,7 @@ mod tests {
             files: 7,
             index_path: out.join(INDEX_NAME),
             elapsed,
+            codelist_gaps: CodelistGaps::default(),
         };
         assert_eq!(outcome, expected);
         assert!(!outcome.sql_server());
@@ -1565,19 +1601,24 @@ mod tests {
             "wrote 53 drawing(s), 160 file(s), in 15.2 s",
             "failure count 0; 53 .pid file(s): 53 matched to a drawing, 0 border template(s), 0 \
              unmatched",
+            NO_CODELIST_GAPS,
             "2 drawing(s) have no DrawingNo: their number is the database's",
             index.as_str(),
         ];
         assert_eq!(summary_lines(&plain), lines);
 
         // A package with no database export is said nothing more of, and
-        // drawings that all state their number are not spoken of.
+        // drawings that all state their number are not spoken of. The gap
+        // counts are still said.
         let loose = ExportOutcome {
             export_kind: "PidOnly".to_string(),
             without_drawing_no: 0,
             ..plain.clone()
         };
-        assert_eq!(summary_lines(&loose), [lines[0], lines[1], lines[3]]);
+        assert_eq!(
+            summary_lines(&loose),
+            [lines[0], lines[1], lines[2], lines[4]]
+        );
 
         // A SQL Server package, most of whose files are templates, compared
         // with a reference.
@@ -1601,6 +1642,7 @@ mod tests {
             "wrote 1 drawing(s), 4 file(s), in 15.2 s",
             "failure count 0; 12 .pid file(s): 1 matched to a drawing, 11 border template(s), 0 \
              unmatched",
+            NO_CODELIST_GAPS,
             index.as_str(),
             "compared with the reference: 53 drawing(s), 7 the same, 1 with findings, 4 of \
              another revision, 41 without a reference",
@@ -1631,6 +1673,7 @@ mod tests {
             "wrote 27 drawing(s), 82 file(s), in 15.2 s",
             "failure count 26; 53 .pid file(s): 52 matched to a drawing, 0 border template(s), 1 \
              unmatched",
+            NO_CODELIST_GAPS,
             "2 drawing(s) have no DrawingNo: their number is the database's",
         ]);
         expected.push(format!("index: {}", troubled.index_path.display()));
@@ -1674,6 +1717,7 @@ mod tests {
             "wrote 53 drawing(s), 160 file(s), in 15.2 s",
             "failure count 0; 1 .pid file(s): 0 matched to a drawing, 1 border template(s), 1 \
              unmatched",
+            NO_CODELIST_GAPS,
         ]);
         expected.push(format!("index: {}", listed.index_path.display()));
         expected.push("20 drawing(s) could not be written:".to_string());
@@ -1737,13 +1781,20 @@ mod tests {
         assert_eq!(written[0].0, INDEX_NAME);
         let index: Value = serde_json::from_slice(written[0].1.as_ref().unwrap()).unwrap();
         assert_eq!(index["package"], package.display().to_string());
+        assert_eq!(index["unmapped_leaf_levels"]["total"].as_u64(), Some(0));
+        assert_eq!(index["unmapped_specialty_codes"]["total"].as_u64(), Some(0));
+        assert_eq!(index["plant_added_instruments_skipped"].as_u64(), Some(0));
+        assert_eq!(outcome.codelist_gaps.unmapped_leaf_total(), 0);
+        assert_eq!(outcome.codelist_gaps.unmapped_specialty_total(), 0);
+        assert_eq!(outcome.codelist_gaps.plant_added_instruments_skipped(), 0);
         assert_eq!(tree(&package), before);
         let lines = summary_lines(&outcome);
         let listed = [
             "1 drawing(s) could not be written:".to_string(),
             format!("  A-101: {why}"),
         ];
-        assert_eq!(lines[3..], listed, "{lines:?}");
+        assert_eq!(lines[4..], listed, "{lines:?}");
+        assert_eq!(lines[2], NO_CODELIST_GAPS);
 
         // The same compared with a reference that holds nothing.
         request.out_dir = root.join("compared");

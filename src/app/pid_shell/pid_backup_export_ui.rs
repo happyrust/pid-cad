@@ -478,6 +478,7 @@ fn pid_backup_export_ui_ui8_three_outcome_forms_details_and_path_opener_work_in_
         files: 22,
         index_path: pub_index.clone(),
         elapsed: Duration::from_millis(4200),
+        codelist_gaps: pid_parse::publish::codelist_values::CodelistGaps::default(),
     }));
     app.on_pid_backup_pdf_finished(Ok(PdfOutcome {
         pages: vec![PdfPage {
@@ -547,6 +548,7 @@ fn pid_backup_export_ui_ui8_three_outcome_forms_details_and_path_opener_work_in_
         files: 160,
         index_path: pub_index,
         elapsed: Duration::from_secs(28),
+        codelist_gaps: pid_parse::publish::codelist_values::CodelistGaps::default(),
     }));
     app.on_pid_backup_pdf_finished(Ok(PdfOutcome {
         pages: vec![
@@ -676,6 +678,7 @@ fn pid_backup_export_ui_review_cross_package_isolation_quoted_paths_and_cached_v
         files: 4,
         index_path: out_a.join("_Index.json"),
         elapsed: Duration::from_secs(1),
+        codelist_gaps: pid_parse::publish::codelist_values::CodelistGaps::default(),
     }));
     app.on_pid_backup_pdf_finished(Ok(PdfOutcome {
         pages: vec![PdfPage {

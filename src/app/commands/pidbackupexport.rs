@@ -830,11 +830,12 @@ mod tests {
             files: 7,
             index_path: out.join("_Index.json"),
             elapsed: Duration::from_millis(15_200),
+            codelist_gaps: pid_parse::publish::codelist_values::CodelistGaps::default(),
         }
     }
 
     /// What the command line says of [`outcome`].
-    fn summary(out: &Path) -> [Said; 4] {
+    fn summary(out: &Path) -> [Said; 5] {
         let index = out.join("_Index.json");
         [
             line("PIDBACKUPEXPORT: wrote 2 drawing(s), 7 file(s), in 15.2 s"),
@@ -842,6 +843,10 @@ mod tests {
                 "PIDBACKUPEXPORT: failure count 0; 3 .pid file(s): 2 matched to a drawing, \
                  0 border template(s), 1 unmatched",
             ),
+            line(format!(
+                "PIDBACKUPEXPORT: {}",
+                crate::io::pid_backup_export::NO_CODELIST_GAPS
+            )),
             line("PIDBACKUPEXPORT: 1 drawing(s) have no DrawingNo: their number is the database's"),
             line(format!("PIDBACKUPEXPORT: index: {}", index.display())),
         ]
@@ -874,7 +879,7 @@ mod tests {
     }
 
     /// What the command line says of [`compared`].
-    fn compared_summary(out: &Path) -> [Said; 8] {
+    fn compared_summary(out: &Path) -> [Said; 9] {
         let index = out.join("_Index.json");
         [
             line("PIDBACKUPEXPORT: wrote 1 drawing(s), 4 file(s), in 15.2 s"),
@@ -882,6 +887,10 @@ mod tests {
                 "PIDBACKUPEXPORT: failure count 1; 3 .pid file(s): 2 matched to a drawing, \
                  0 border template(s), 1 unmatched",
             ),
+            line(format!(
+                "PIDBACKUPEXPORT: {}",
+                crate::io::pid_backup_export::NO_CODELIST_GAPS
+            )),
             line("PIDBACKUPEXPORT: 1 drawing(s) have no DrawingNo: their number is the database's"),
             line(format!("PIDBACKUPEXPORT: index: {}", index.display())),
             line(
@@ -1456,7 +1465,7 @@ mod tests {
             &format!("PIDBACKUPEXPORT Plant=P02 {}", out.display()),
         );
 
-        assert_eq!(answer.len(), 8, "{answer:?}");
+        assert_eq!(answer.len(), 9, "{answer:?}");
         let text = |at: usize| match &answer[at] {
             Said::Line(text) => text.as_str(),
             other => panic!("{other:?} is no plain line"),
@@ -1468,16 +1477,23 @@ mod tests {
         let counted = "PIDBACKUPEXPORT: failure count 3; 3 .pid file(s): 0 matched to a \
                        drawing, 0 border template(s), 3 unmatched";
         assert_eq!(text(2), counted);
-        let index = out.join("_Index.json");
         assert_eq!(
             text(3),
+            format!(
+                "PIDBACKUPEXPORT: {}",
+                crate::io::pid_backup_export::NO_CODELIST_GAPS
+            )
+        );
+        let index = out.join("_Index.json");
+        assert_eq!(
+            text(4),
             format!("PIDBACKUPEXPORT: index: {}", index.display())
         );
         assert_eq!(
-            text(4),
+            text(5),
             "PIDBACKUPEXPORT: 3 drawing(s) could not be written:"
         );
-        let mut unwritten: Vec<&str> = (5..8)
+        let mut unwritten: Vec<&str> = (6..9)
             .map(|at| text(at).trim_start_matches("PIDBACKUPEXPORT:   "))
             .map(|named| named.split_once(": ").map_or(named, |(name, _)| name))
             .collect();
