@@ -243,7 +243,12 @@ async fn reconnect_with_resume_transfers_claim_and_distinguishes_disconnected_vs
         other => panic!("expected PeerDisconnected on abrupt drop, got {other:?}"),
     }
     // Claim on P-1001 is STILL held while disconnected.
-    assert!(state.occupancy.lock().await.get("P-1001").is_some());
+    assert!(state
+        .occupancy
+        .lock()
+        .await
+        .get("PID-1101", "P-1001")
+        .is_some());
 
     // #36: A reconnects before expiry with `resume_session_id = Some(s1)`.
     let mut a2 = RawWs::connect(proxy_a.addr()).await;
