@@ -348,6 +348,47 @@ mod tests {
         assert_eq!(table.len(), 1, "reading removes nothing");
     }
 
+    /// #104: the claim key is `(drawing, tag)` and nothing else. A second
+    /// class that carries the same tag does not get a key of its own — the
+    /// table has no type-code column — so its claim is the one already held.
+    /// A claim frame that names only the tag, the shape from before any type
+    /// field, still reads; an extra type code on that frame is not a key.
+    #[test]
+    fn a_second_class_with_the_same_tag_does_not_get_its_own_claim_key() {
+        let mut table = OccupancyTable::new();
+        let (valve, _) = table.claim("V-1001", "PID-1101", "s-valve", "u1", 1_000, 300);
+        assert!(matches!(valve, ClaimOutcome::Granted(_)));
+
+        let (equipment, _) = table.claim("V-1001", "PID-1101", "s-equip", "u2", 1_010, 300);
+        assert_eq!(
+            equipment,
+            ClaimOutcome::Denied {
+                holder: "s-valve".into(),
+                expires_at: 1_300,
+            },
+            "equipment with the same tag is the same claim"
+        );
+        assert_eq!(table.len(), 1);
+        let stored = serde_json::to_value(table.get("PID-1101", "V-1001").unwrap()).unwrap();
+        assert!(stored.get("type_code").is_none());
+        assert!(stored.get("type").is_none());
+
+        let old = r#"{"type":"claim","session_id":"s-1","tag":"V-1001"}"#;
+        let parsed: crate::ClientMessage = serde_json::from_str(old).expect("old frame reads");
+        match parsed {
+            crate::ClientMessage::Claim { session_id, tag } => {
+                assert_eq!((session_id.as_str(), tag.as_str()), ("s-1", "V-1001"));
+            }
+            other => panic!("old claim frame: {other:?}"),
+        }
+        let extra = r#"{"type":"claim","session_id":"s-1","tag":"V-1001","type_code":"EQUIPMENT"}"#;
+        let parsed: crate::ClientMessage = serde_json::from_str(extra).expect("extra field ignored");
+        match parsed {
+            crate::ClientMessage::Claim { tag, .. } => assert_eq!(tag, "V-1001"),
+            other => panic!("typed claim frame: {other:?}"),
+        }
+    }
+
     #[test]
     fn second_claimant_is_denied_with_holder_and_expiry() {
         let mut table = OccupancyTable::new();
