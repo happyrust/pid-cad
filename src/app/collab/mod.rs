@@ -475,10 +475,17 @@ fn reassignments(changes: &[Value]) -> Vec<Value> {
     changes
         .iter()
         .chain(nested)
-        .filter(|change| change["kind"] == broadcast::KIND_INSERT_SYMBOL)
+        .filter(|change| {
+            change["kind"] == broadcast::KIND_INSERT_SYMBOL
+                || change["kind"] == pipes::KIND_INSERT_FITTING
+        })
         .filter_map(|change| {
             let from = change["reassigned_from"].as_str()?;
-            let to = change["object_ref"].as_str().or(change["tag"].as_str())?;
+            let to = if change["kind"] == pipes::KIND_INSERT_FITTING {
+                change["tag"].as_str()?
+            } else {
+                change["object_ref"].as_str().or(change["tag"].as_str())?
+            };
             (from != to).then(|| {
                 json!({
                     "kind": broadcast::KIND_REASSIGN_TAG,

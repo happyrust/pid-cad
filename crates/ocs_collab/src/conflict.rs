@@ -635,14 +635,33 @@ impl DrawingModel {
                 .unwrap_or_default();
             change.raw["tag"] = Value::String(tag);
         }
-        if change.kind == KIND_INSERT_SYMBOL {
-            let tag = change.subject();
-            if !tag.is_empty() && self.is_taken(&tag) {
+        if change.kind == KIND_INSERT_SYMBOL || change.kind == KIND_INSERT_FITTING {
+            let tag = if change.kind == KIND_INSERT_FITTING {
+                change.text("tag").unwrap_or_default()
+            } else {
+                change.subject()
+            };
+            let run_tag = change.text("run_tag").unwrap_or_default();
+            if !tag.is_empty() && tag != run_tag && self.is_taken(&tag) {
                 let free = self.free_tag_after(&tag);
-                change.raw["reassigned_from"] = Value::String(tag);
+                change.raw["reassigned_from"] = Value::String(tag.clone());
                 change.raw["tag"] = Value::String(free.clone());
-                change.raw["object_ref"] = Value::String(free.clone());
-                change.object_ref = free;
+                if change.kind == KIND_INSERT_SYMBOL {
+                    change.raw["object_ref"] = Value::String(free.clone());
+                    change.object_ref = free.clone();
+                }
+                if let Some(fittings) = change
+                    .raw
+                    .get_mut("run")
+                    .and_then(|run| run.get_mut("fittings"))
+                    .and_then(Value::as_array_mut)
+                {
+                    for fitting in fittings {
+                        if fitting.get("tag").and_then(Value::as_str) == Some(tag.as_str()) {
+                            fitting["tag"] = Value::String(free.clone());
+                        }
+                    }
+                }
             }
         }
         change
@@ -1435,6 +1454,38 @@ mod tests {
         let again = model.completed(&place("V-1001"));
         assert_eq!(again.subject(), "V-1001");
         assert!(again.raw.get("reassigned_from").is_none());
+    }
+
+    /// #93: two fittings placed under one tag get two tags. A tag only a
+    /// joining client's copy has is taken the same way.
+    #[test]
+    fn a_fitting_placed_under_a_taken_tag_is_given_the_next_free_one() {
+        let mut model = DrawingModel::default();
+        let place = |tag: &str| {
+            one(json!({
+                "kind": KIND_INSERT_FITTING,
+                "line_tag": "L-1001",
+                "run_tag": "L-1001-01",
+                "fitting_type": "gate_valve",
+                "tag": tag,
+                "at": [50, 0],
+                "run": {"fittings": [{"tag": tag, "fitting_type": "gate_valve"}]}
+            }))
+        };
+        let first = model.completed(&place("V-1001"));
+        assert_eq!(first.text("tag").as_deref(), Some("V-1001"));
+        assert!(applies(&take(&mut model, &first, 0, 1, "s1")));
+        let second = model.completed(&place("V-1001"));
+        assert_eq!(second.text("tag").as_deref(), Some("V-1002"));
+        assert_eq!(second.raw["reassigned_from"], "V-1001");
+        assert_eq!(second.raw["run"]["fittings"][0]["tag"], "V-1002");
+        assert!(applies(&take(&mut model, &second, 1, 2, "s2")));
+        assert!(model.object("V-1001").is_some() && model.object("V-1002").is_some());
+
+        model.report_tags(["V-2001"], 2);
+        let avoided = model.completed(&place("V-2001"));
+        assert_eq!(avoided.text("tag").as_deref(), Some("V-2002"));
+        assert_eq!(avoided.raw["reassigned_from"], "V-2001");
     }
 
     /// A symbol placed under `tag`.
