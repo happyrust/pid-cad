@@ -749,12 +749,15 @@ async fn conflict_resolve(
 
     // The ruling took effect as an op: the room has heard it (`ops::resolve`
     // announces it in its turn), and the sessions' baseline follows the
-    // revision as it does for any op.
-    state
-        .sessions
-        .lock()
-        .await
-        .advance_base_revision(&resolved.row.drawing_id, resolved.revision);
+    // revision as it does for any op — including downstream drawings updated
+    // via off-page connectors (#34).
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.advance_base_revision(&resolved.row.drawing_id, resolved.revision);
+        for (downstream_id, downstream_rev) in &resolved.downstream_revisions {
+            sessions.advance_base_revision(downstream_id, *downstream_rev);
+        }
+    }
     (
         StatusCode::OK,
         Json(json!({

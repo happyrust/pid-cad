@@ -347,7 +347,7 @@ pub fn receive(
         });
         if let Some(index) = tied {
             let first = drawing.held.remove(index);
-            return tie(state, drawing, first, &incoming, changes);
+            return tie(state, &mut drawings, first, &incoming, changes);
         }
         // Only what could tie waits: a deletion or a new symbol contends
         // for nothing and commits at once.
@@ -701,7 +701,14 @@ pub fn objects(
                     )
                 })
                 .collect();
-            serde_json::json!({ "object_ref": tag, "fields": fields })
+            let mut obj = serde_json::json!({ "object_ref": tag, "fields": fields });
+            if !object.overrides.is_empty() {
+                obj["overrides"] = serde_json::json!(object.overrides.iter().collect::<Vec<_>>());
+            }
+            if let Some(src) = &object.tag_source {
+                obj["tag_source"] = serde_json::json!(src);
+            }
+            obj
         })
         .collect();
     (drawing.model.revision(), items)
@@ -778,6 +785,9 @@ pub struct Resolved {
     pub revision: i64,
     /// The `op_applied` that told the room (it has gone out already).
     pub message: ServerMessage,
+    /// Any downstream `(drawing_id, revision)` pairs updated via off-page
+    /// connectors as a result of this ruling (#34).
+    pub downstream_revisions: Vec<(String, i64)>,
 }
 
 /// Why a ruling was not carried out.
@@ -958,15 +968,43 @@ pub fn resolve(
     let message = ServerMessage::OpApplied {
         op_id,
         revision,
-        changes: broadcast,
+        changes: broadcast.clone(),
     };
     // A ruling is an op like any other, and is told to the room in its turn.
     announce(state, &row.drawing_id, &message);
+
+    // #34: Propagate resolved line-level attributes across paired off-page
+    // connectors, recording downstream audit rows citing the source drawing.
+    let resolver_session = Session {
+        session_id,
+        drawing_id: row.drawing_id.clone(),
+        user_id: resolved_by.to_owned(),
+        display_name: state.display_name_of(resolved_by),
+        mode: "协同编辑".to_owned(),
+        workspace: "默认工作区".to_owned(),
+        status: ocs_collab::SessionStatus::Active,
+        base_revision: revision,
+        last_heartbeat: now,
+        created_at: now,
+        disconnected_at: None,
+    };
+    let mut rooms = LinkedRooms {
+        state,
+        drawings: &mut drawings,
+        by: &resolver_session,
+        peer_addr: "127.0.0.1",
+        now,
+        told: Vec::new(),
+    };
+    ocs_collab::link::follow(&mut rooms, &row.drawing_id, revision, &broadcast);
+    let downstream_revisions = revisions_reached(&rooms.told);
+
     Ok(Resolved {
         row,
         final_value,
         revision,
         message,
+        downstream_revisions,
     })
 }
 
@@ -1559,12 +1597,15 @@ fn yielded(
 /// the two ops carry is unaffected and commits now.
 fn tie(
     state: &AppState,
-    drawing: &mut DrawingOps,
+    drawings: &mut HashMap<String, DrawingOps>,
     first: HeldOp,
     second: &Incoming<'_>,
     second_changes: Vec<Change>,
 ) -> Outcome {
     let drawing_id = second.session.drawing_id.clone();
+    let drawing = drawings
+        .entry(drawing_id.clone())
+        .or_insert_with(|| DrawingOps::load(state, &drawing_id));
     let first_incoming = Incoming {
         session: &first.session,
         peer_addr: &first.peer_addr,
@@ -1680,7 +1721,15 @@ fn tie(
         if rest.is_empty() {
             continue;
         }
-        let mut outcome = judge_and_commit(state, drawing, who, rest);
+        let mut outcome = {
+            let drawing = drawings
+                .entry(drawing_id.clone())
+                .or_insert_with(|| DrawingOps::load(state, &drawing_id));
+            judge_and_commit(state, drawing, who, rest)
+        };
+        // #34: Non-conflicting parts of concurrent submissions also propagate
+        // across paired off-page connectors.
+        follow_connectors(state, drawings, who.session, who.peer_addr, who.now, &mut outcome);
         // `first` has no socket in this call; address its session.
         if std::ptr::eq(who, &first_incoming) {
             for reaction in &mut outcome.reactions {
@@ -3452,5 +3501,188 @@ mod tests {
                 changes,
             }]
         );
+    }
+
+    /// #34: With tie window enabled, (1) non-conflicting fields inside a
+    /// concurrent tying submission still propagate across off-page connectors,
+    /// (2) conflict resolution writes propagate across off-page connectors to
+    /// downstream drawings, and (3) downstream audit cites the source drawing.
+    #[tokio::test]
+    async fn conflict_resolution_and_non_conflicting_tie_remainder_propagate_across_connectors() {
+        let mut state = state();
+        let mut a1 = join_on(&state, "u1", DRAWING).await;
+        let mut a2 = join_on(&state, "u2", DRAWING).await;
+        let mut b1 = join_on(&state, "u3", OTHER).await;
+
+        // Pair L-1001 from DRAWING -> OTHER before enabling the tie window.
+        let r = submit(&state, &mut a1, 0, "op-c1", outflow("L-1001", OTHER)).await;
+        assert!(applied(&r).is_some(), "{r:?}");
+        let r = submit(&state, &mut b1, 0, "op-c2", inflow("L-1001", 20.0)).await;
+        assert!(applied(&r).is_some(), "{r:?}");
+        let rev_a = crate::ws::current_revision(&state, DRAWING);
+        state.tie_window = Duration::from_secs(10);
+
+        // Concurrent ops against `rev_a`:
+        // - a1 writes 管道等级=A1A (ties) AND 公称直径=DN100 (non-conflicting!)
+        // - a2 writes 管道等级=B1B (ties)
+        let batch_a1 = json!({
+            "kind": "set_property",
+            "object_ref": "L-1001",
+            "field": "管道等级",
+            "value": "A1A",
+            "changes": [
+                {"kind": "set_property", "object_ref": "L-1001", "field": "公称直径", "value": "DN100"}
+            ]
+        });
+        let single_a2 = line_field("L-1001", "管道等级", "B1B");
+
+        let hold = submit(&state, &mut a1, rev_a, "op-tie-1", batch_a1).await;
+        assert!(hold.is_empty(), "held inside tie window");
+        let tied = submit(&state, &mut a2, rev_a, "op-tie-2", single_a2).await;
+
+        let conflict_id = tied
+            .iter()
+            .find_map(|r| match r {
+                Reaction::Publish {
+                    message: ServerMessage::Conflict { conflict_id, .. },
+                    ..
+                } => Some(conflict_id.clone()),
+                _ => None,
+            })
+            .expect("conflict created");
+
+        // Non-conflicting 公称直径=DN100 must already have propagated to OTHER!
+        let (_, other_objs) = objects(&state, OTHER, Some("L-1001"));
+        assert_eq!(
+            other_objs[0]["fields"]["公称直径"]["value"], "DN100",
+            "non-conflicting tie remainder must propagate downstream: {other_objs:?}"
+        );
+        // Conflicting 管道等级 is not yet set on OTHER.
+        assert!(other_objs[0]["fields"].get("管道等级").is_none());
+
+        // Resolve conflict picking 人工改值 = C2C -> propagates to OTHER!
+        let resolved = resolve(
+            &state,
+            &conflict_id,
+            RESOLUTION_MANUAL,
+            Some("C2C"),
+            "u-admin",
+            T0 + 50,
+        )
+        .expect("resolve");
+        assert!(
+            resolved
+                .downstream_revisions
+                .iter()
+                .any(|(d, _)| d == OTHER),
+            "downstream drawing must be reported: {:?}",
+            resolved.downstream_revisions
+        );
+
+        let (_, other_after) = objects(&state, OTHER, Some("L-1001"));
+        assert_eq!(
+            other_after[0]["fields"]["管道等级"]["value"], "C2C",
+            "resolved value must propagate downstream: {other_after:?}"
+        );
+
+        // Downstream audit records the propagation citing the source drawing.
+        let audit = state
+            .store
+            .as_ref()
+            .expect("store")
+            .audit_query(&AuditQuery {
+                object_ref: Some("L-1001".into()),
+                ..AuditQuery::default()
+            })
+            .expect("audit");
+        assert!(
+            audit
+                .items
+                .iter()
+                .any(|row| row.change_text.contains("C2C") && row.change_text.contains(DRAWING)),
+            "downstream audit must cite source drawing {DRAWING}: {:?}",
+            audit.items
+        );
+    }
+
+    /// #35: Overrides and `tag_source` persist through the op log and survive
+    /// server restart / model reload identically.
+    #[tokio::test]
+    async fn pipe_run_overrides_and_tag_source_survive_op_log_replay() {
+        let store = Store::open_in_memory().expect("memory store");
+        let state = AppState::new(Some(store), None, ":memory:", SessionConfig::default());
+        let mut a = join(&state, "u1").await;
+
+        let _ = submit(
+            &state,
+            &mut a,
+            0,
+            "op-ov-1",
+            json!({"kind": "create_pipe_line", "tag": "L-1001", "type": "PIPE_LINE", "tag_source": "auto"}),
+        )
+        .await;
+        let _ = submit(
+            &state,
+            &mut a,
+            1,
+            "op-ov-2",
+            json!({"kind": "add_pipe_run", "line_tag": "L-1001", "tag": "L-1001-01", "points": []}),
+        )
+        .await;
+        let _ = submit(
+            &state,
+            &mut a,
+            2,
+            "op-ov-3",
+            json!({"kind": "add_pipe_run", "line_tag": "L-1001", "tag": "L-1001-02", "points": []}),
+        )
+        .await;
+        let _ = submit(
+            &state,
+            &mut a,
+            3,
+            "op-ov-4",
+            json!({
+                "kind": "set_property",
+                "object_ref": "L-1001-01",
+                "field": "公称直径",
+                "value": "DN80",
+                "overrides": ["公称直径"]
+            }),
+        )
+        .await;
+        let _ = submit(
+            &state,
+            &mut a,
+            4,
+            "op-ov-5",
+            json!({"kind": "set_property", "object_ref": "L-1001", "field": "公称直径", "value": "DN150"}),
+        )
+        .await;
+        let _ = submit(
+            &state,
+            &mut a,
+            5,
+            "op-ov-6",
+            json!({"kind": "set_tag", "object_ref": "P-1001", "value": "P-1009", "tag_source": "auto"}),
+        )
+        .await;
+
+        // Clear in-memory cache to force full replay from SQLite `ops` table.
+        state.drawings.lock().expect("drawings").clear();
+
+        let (_, topo) = topology(&state, DRAWING);
+        let runs = topo["pipe_runs"].as_array().expect("runs");
+        let r1 = runs.iter().find(|r| r["tag"] == "L-1001-01").expect("r1");
+        let r2 = runs.iter().find(|r| r["tag"] == "L-1001-02").expect("r2");
+        assert_eq!(r1["props"]["公称直径"], "DN80");
+        assert_eq!(r1["overrides"], json!(["公称直径"]));
+        assert_eq!(r2["props"]["公称直径"], "DN150");
+        assert_eq!(r2["overrides"], json!([]));
+
+        let (_, objs) = objects(&state, DRAWING, Some("P-1009"));
+        assert_eq!(objs[0]["tag_source"], "auto");
+        let (_, run_objs) = objects(&state, DRAWING, Some("L-1001-01"));
+        assert_eq!(run_objs[0]["overrides"], json!(["公称直径"]));
     }
 }
