@@ -676,13 +676,20 @@ impl DrawingModel {
                 change.subject()
             };
             let run_tag = change.text("run_tag").unwrap_or_default();
-            // A step put on again carries the account the run already has.
-            // That fitting already owns the tag; renaming it would invent a
-            // second valve. A different fitting that asks for the same tag
-            // (another place, or a tag only a joining copy has) still moves.
+            // A symbol moves when an object or a listed copy already has
+            // the tag. A fitting moves only when an object already has it:
+            // a tag that only a listing names is the client's own fitting,
+            // which the same client then sends under that tag, and the room
+            // takes it as sent. Putting the same run account on again is
+            // that object restated, not a second valve.
+            let taken = if change.kind == KIND_INSERT_FITTING {
+                self.objects.contains_key(&tag)
+            } else {
+                self.is_taken(&tag)
+            };
             if !tag.is_empty()
                 && tag != run_tag
-                && self.is_taken(&tag)
+                && taken
                 && !self.account_already_on_run(&change)
             {
                 let free = self.free_tag_after(&tag);
@@ -1569,8 +1576,9 @@ mod tests {
         assert!(again.raw.get("reassigned_from").is_none());
     }
 
-    /// #93: two fittings placed under one tag get two tags. A tag only a
-    /// joining client's copy has is taken the same way.
+    /// #93: two fittings placed under one tag get two tags. A tag that only
+    /// a joining copy has listed does not, by itself, rename the fitting
+    /// the owner then sends under it.
     #[test]
     fn a_fitting_placed_under_a_taken_tag_is_given_the_next_free_one() {
         let mut model = DrawingModel::default();
@@ -1597,9 +1605,9 @@ mod tests {
         assert!(model.object("V-1001").is_some() && model.object("V-1002").is_some());
 
         model.report_tags(["V-2001"], 2);
-        let avoided = model.completed(&place("V-2001", 120));
-        assert_eq!(avoided.text("tag").as_deref(), Some("V-2002"));
-        assert_eq!(avoided.raw["reassigned_from"], "V-2001");
+        let kept = model.completed(&place("V-2001", 120));
+        assert_eq!(kept.text("tag").as_deref(), Some("V-2001"));
+        assert!(kept.raw.get("reassigned_from").is_none());
     }
 
     /// A symbol placed under `tag`.
