@@ -59,6 +59,10 @@ struct Cli {
     open_mode: bool,
     /// Require credentials verified against `users.credential_hash` (#68).
     require_auth: bool,
+    /// PEM certificate chain for HTTPS/WSS transport encryption (#69).
+    tls_cert: Option<String>,
+    /// PEM private key for HTTPS/WSS transport encryption (#69).
+    tls_key: Option<String>,
 }
 
 fn default_db_path() -> String {
@@ -75,10 +79,12 @@ fn default_db_path() -> String {
 fn usage() -> &'static str {
     "ocs_collab_server --port <port> --db <path> [--bind <IP 地址>] \
      [--heartbeat-timeout <seconds>] [--claim-ttl <seconds>] [--seed <json>] \
-     [--tie-window-ms <milliseconds>] [--new-repo-id] [--open-mode] [--require-auth]\n\
-     --bind 默认 127.0.0.1，只有本机能连。未启用身份核对/加密时仅适合可信内网。\n\
+     [--tie-window-ms <milliseconds>] [--new-repo-id] [--open-mode] [--require-auth] \
+     [--tls-cert <pem> --tls-key <pem>]\n\
+     --bind 默认 127.0.0.1，只有本机能连。监听非本机回环地址时必须同时启用 --require-auth 与 TLS（--tls-cert/--tls-key）。\n\
      --open-mode 打开开放模式（允许未登记用户与图纸入会，仅用于演示与测试；缺省为严格模式）。\n\
      --require-auth 强制所有入会与管理接口核对用户凭据（凭据在库中仅存散列）。\n\
+     --tls-cert / --tls-key 启用 HTTPS/WSS 传输加密。\n\
      --new-repo-id 给库换一个新的库标识后照常启动。从备份恢复库文件之后用它启动一次，\
      记着旧库标识的图纸加入时得到 REPO_MISMATCH；每次带它启动都会再换一次。"
 }
@@ -95,6 +101,8 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
         new_repo_id: false,
         open_mode: false,
         require_auth: false,
+        tls_cert: None,
+        tls_key: None,
     };
 
     let mut iter = args.into_iter();
@@ -145,12 +153,39 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
             "--new-repo-id" => cli.new_repo_id = true,
             "--open-mode" => cli.open_mode = true,
             "--require-auth" => cli.require_auth = true,
+            "--tls-cert" => cli.tls_cert = Some(value("--tls-cert")?),
+            "--tls-key" => cli.tls_key = Some(value("--tls-key")?),
             "--help" | "-h" => return Err(usage().to_owned()),
             other => return Err(format!("未知参数 {other}；用法：{}", usage())),
         }
     }
 
     Ok(cli)
+}
+
+/// Validates startup security invariants (#69):
+/// - `--tls-cert` and `--tls-key` must be supplied together.
+/// - Binding a non-loopback address without `--require-auth` or without TLS
+///   is refused with an explicit reason.
+fn validate_startup(cli: &Cli) -> Result<(), String> {
+    if cli.tls_cert.is_some() != cli.tls_key.is_some() {
+        return Err("--tls-cert 与 --tls-key 必须成对提供".to_owned());
+    }
+    if !cli.bind.is_loopback() {
+        if !cli.require_auth {
+            return Err(format!(
+                "拒绝启动：监听非本机地址 {} 时必须启用身份核对（--require-auth）",
+                cli.bind
+            ));
+        }
+        if cli.tls_cert.is_none() {
+            return Err(format!(
+                "拒绝启动：监听非本机地址 {} 时必须启用传输加密（--tls-cert 与 --tls-key）",
+                cli.bind
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn build_state(cli: &Cli) -> AppState {
@@ -222,8 +257,13 @@ async fn bind(addr: SocketAddr) -> std::io::Result<(tokio::net::TcpListener, Soc
 
 /// The line startup prints once the server listens on `bound`.
 fn listening_line(bound: SocketAddr, cli: &Cli) -> String {
+    let scheme = if cli.tls_cert.is_some() {
+        "https"
+    } else {
+        "http"
+    };
     format!(
-        "[ocs_collab_server] v{} 监听 http://{bound}（heartbeat_timeout={}s, claim_ttl={}s, tie_window={}ms）",
+        "[ocs_collab_server] v{} 监听 {scheme}://{bound}（heartbeat_timeout={}s, claim_ttl={}s, tie_window={}ms）",
         env!("CARGO_PKG_VERSION"),
         cli.heartbeat_timeout,
         cli.claim_ttl,
@@ -249,6 +289,25 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Err(reason) = validate_startup(&cli) {
+        eprintln!("[ocs_collab_server] {reason}");
+        return ExitCode::from(2);
+    }
+    let tls_config = match (&cli.tls_cert, &cli.tls_key) {
+        (Some(cert), Some(key)) => {
+            match ocs_collab_server::tls::load_server_config(
+                std::path::Path::new(cert),
+                std::path::Path::new(key),
+            ) {
+                Ok(cfg) => Some(cfg),
+                Err(err) => {
+                    eprintln!("[ocs_collab_server] {err}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        _ => None,
+    };
 
     // Bind **before** the database is opened. `build_state` calls
     // `clear_ephemeral`, which drops every session and claim row in the shared
@@ -270,6 +329,7 @@ async fn main() -> ExitCode {
 
     let mut state = build_state(&cli);
     state.tie_window = std::time::Duration::from_millis(cli.tie_window_ms);
+    state.tls_enabled = tls_config.is_some();
     let state = Arc::new(state);
     // With a tie window, ops made against the current revision wait it out
     // before they commit; this is what commits them.
@@ -287,8 +347,10 @@ async fn main() -> ExitCode {
     let app = http::router(state);
 
     println!("{}", listening_line(bound, &cli));
-    if let Some(warning) = exposure_warning(bound) {
-        eprintln!("{warning}");
+    if tls_config.is_none() {
+        if let Some(warning) = exposure_warning(bound) {
+            eprintln!("{warning}");
+        }
     }
 
     let shutdown = async {
@@ -296,13 +358,23 @@ async fn main() -> ExitCode {
         println!("[ocs_collab_server] 收到中断，正在退出");
     };
 
-    if let Err(err) = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await
-    {
+    let serve_result = if let Some(cfg) = tls_config {
+        let tls_listener = ocs_collab_server::tls::TlsListener::new(listener, cfg);
+        axum::serve(
+            tls_listener,
+            app.into_make_service_with_connect_info::<ocs_collab_server::tls::PeerAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+    } else {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+    };
+    if let Err(err) = serve_result {
         eprintln!("[ocs_collab_server] 服务异常退出：{err}");
         return ExitCode::FAILURE;
     }
@@ -428,7 +500,7 @@ mod tests {
             "默认 127.0.0.1",
             "--open-mode",
             "--require-auth",
-            "可信内网",
+            "--tls-cert",
         ] {
             assert!(usage.contains(said), "{said} is not in {usage}");
         }
@@ -515,6 +587,8 @@ mod tests {
             new_repo_id: false,
             open_mode: false,
             require_auth: false,
+            tls_cert: None,
+            tls_key: None,
         };
         let state = build_state(&cli);
         assert!(state.store.is_none());
@@ -537,6 +611,8 @@ mod tests {
             new_repo_id: false,
             open_mode: false,
             require_auth: false,
+            tls_cert: None,
+            tls_key: None,
         };
         let state = build_state(&cli);
         assert!(state.db_healthy());
@@ -833,5 +909,37 @@ mod tests {
             Some(vec![CLOSE]),
             "a close, then the end of the stream"
         );
+    }
+
+    /// #69: Non-loopback bind refuses startup without `--require-auth` and TLS.
+    #[test]
+    fn non_loopback_bind_requires_auth_and_tls() {
+        let no_auth = parse_args(args(&["--bind", "0.0.0.0"])).expect("parses");
+        let err = validate_startup(&no_auth).expect_err("must refuse without auth");
+        assert!(err.contains("--require-auth"), "{err}");
+
+        let no_tls =
+            parse_args(args(&["--bind", "0.0.0.0", "--require-auth"])).expect("parses");
+        let err = validate_startup(&no_tls).expect_err("must refuse without TLS");
+        assert!(err.contains("--tls-cert"), "{err}");
+
+        let half_tls = parse_args(args(&["--tls-cert", "a.pem"])).expect("parses");
+        assert!(validate_startup(&half_tls).is_err());
+
+        let full = parse_args(args(&[
+            "--bind",
+            "0.0.0.0",
+            "--require-auth",
+            "--tls-cert",
+            "a.pem",
+            "--tls-key",
+            "b.pem",
+        ]))
+        .expect("parses");
+        assert!(validate_startup(&full).is_ok());
+
+        // Loopback remains allowed without TLS/auth for local single-machine use.
+        let local = parse_args(args(&[])).expect("parses");
+        assert!(validate_startup(&local).is_ok());
     }
 }

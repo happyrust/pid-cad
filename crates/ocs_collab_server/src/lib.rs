@@ -11,6 +11,7 @@ pub mod ops;
 pub mod perm;
 pub mod proxy;
 pub mod store;
+pub mod tls;
 pub mod ws;
 
 use std::collections::HashMap;

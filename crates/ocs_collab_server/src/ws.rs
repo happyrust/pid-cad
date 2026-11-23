@@ -50,10 +50,18 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 /// `into_make_service_with_connect_info` so `ConnectInfo` is always present.
 pub async fn upgrade(
     State(state): State<Arc<AppState>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    extensions: axum::http::Extensions,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let peer_addr = addr.ip().to_string();
+    let peer_addr = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(a)| a.ip().to_string())
+        .or_else(|| {
+            extensions
+                .get::<ConnectInfo<crate::tls::PeerAddr>>()
+                .map(|ConnectInfo(crate::tls::PeerAddr(a))| a.ip().to_string())
+        })
+        .unwrap_or_else(|| "127.0.0.1".to_owned());
     ws.on_upgrade(move |socket| handle_socket(socket, state, peer_addr))
 }
 
