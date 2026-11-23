@@ -110,6 +110,9 @@ impl OpenCADStudio {
         if self.pid_collab_view.sync.is_some() != sync.is_some() {
             crate::ui::wrap_bar::forget_bounds(crate::ui::window::pid_collab::SYNC_BOUNDS_ID);
         }
+        let setup_server = self.pid_collab_view.setup_server.clone();
+        let setup_user = self.pid_collab_view.setup_user.clone();
+        let setup_drawing = self.pid_collab_view.setup_drawing.clone();
         self.pid_collab_view = CollabView {
             connected: state.connected,
             server_url: state.server_url.clone(),
@@ -124,6 +127,9 @@ impl OpenCADStudio {
             claims_open: self.pid_collab_claims_open,
             conflict_list: self.pid_collab_conflict_list.clone(),
             ruling: self.pid_collab_ruling.clone(),
+            setup_server,
+            setup_user,
+            setup_drawing,
         };
     }
 
@@ -463,7 +469,72 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
+            PidCollabMsg::SetSetupServer(value) => {
+                self.pid_collab_view.setup_server = value;
+                Task::none()
+            }
+            PidCollabMsg::SetSetupUser(value) => {
+                self.pid_collab_view.setup_user = value;
+                Task::none()
+            }
+            PidCollabMsg::SetSetupDrawing(value) => {
+                self.pid_collab_view.setup_drawing = value;
+                Task::none()
+            }
+            PidCollabMsg::ApplySetup => {
+                self.apply_panel_setup();
+                Task::none()
+            }
         }
+    }
+
+    /// Take the three fields the unconfigured panel is holding and, when
+    /// each one is present, save them and start the session (#99). An
+    /// address that carries credentials is refused without repeating them.
+    fn apply_panel_setup(&mut self) {
+        let server = self.pid_collab_view.setup_server.trim().to_owned();
+        let user = self.pid_collab_view.setup_user.trim().to_owned();
+        let drawing = self.pid_collab_view.setup_drawing.trim().to_owned();
+        if let Some(gap) = crate::ui::window::pid_collab::setup_gap(&server, &user, &drawing) {
+            self.command_line.push_info(&gap);
+            return;
+        }
+        if let Err(why) = dialable(&server) {
+            self.command_line.push_error(&format!(
+                "协同：{why}。地址要写成 ws://主机:端口/ws，实得 \"{}\"。",
+                super::shown_address(&server)
+            ));
+            return;
+        }
+        if user.contains(char::is_whitespace) || drawing.contains(char::is_whitespace) {
+            self.command_line
+                .push_error("协同：用户和图号都只接受一个词。");
+            return;
+        }
+        self.collab.configured_server_url = server;
+        self.collab.configured_user_id = user.clone();
+        self.collab.configured_drawing_id = drawing.clone();
+        if !self.collab.wanted() {
+            self.collab.user_id = user;
+            self.collab.drawing_id = drawing;
+            self.collab.drawing_given = true;
+        }
+        self.save_config();
+        if self.collab.wanted() {
+            self.command_line
+                .push_info("协同：已保存；本次运行的会话不变，下次启动生效");
+            return;
+        }
+        match self.start_saved_session() {
+            Ok(()) => self.command_line.push_info(&format!(
+                "协同：正在连接 {}",
+                super::shown_address(&self.collab.server_url)
+            )),
+            Err(missing) => self
+                .command_line
+                .push_info(&format!("协同：{missing}，暂不连接")),
+        }
+        self.refresh_collab_view();
     }
 
     /// Open the conflict list from the query, not from the frames already
@@ -1703,6 +1774,50 @@ mod tests {
         let refused = run(&mut app, "PIDCOLLAB SERVE ws://someone:hunter2@127.0.0.1:3240/ws");
         assert_eq!(refused["ok"], false, "{refused}");
         assert!(!refused.to_string().contains("hunter2"), "{refused}");
+    }
+
+    /// #99: the panel's three fields connect at once, and the settings the
+    /// file is written from hold them. A credential in the address is refused
+    /// and not repeated.
+    #[test]
+    fn the_panel_connects_when_its_three_fields_are_filled() {
+        use crate::ui::window::pid_collab::PidCollabMsg;
+
+        let mut app = app_with_tags(&["P-1001"]);
+        app.pid_collab_view.setup_server = "ws://someone:hunter2@127.0.0.1:3240/ws".to_owned();
+        app.pid_collab_view.setup_user = "u1".to_owned();
+        app.pid_collab_view.setup_drawing = "PID-1101".to_owned();
+        let _ = app.on_pid_collab(PidCollabMsg::ApplySetup);
+        let said = app.command_line.last_error.clone().unwrap_or_default();
+        assert!(
+            !said.contains("hunter2"),
+            "the password is repeated in {said}"
+        );
+        assert!(
+            !said.contains("someone"),
+            "the user name is repeated in {said}"
+        );
+        assert!(said.contains("127.0.0.1:3240"), "{said}");
+        assert!(app.current_config().collab.server_url.is_empty());
+        assert!(!app.collab.wanted());
+
+        app.pid_collab_view.setup_server = SERVER.to_owned();
+        let _ = app.on_pid_collab(PidCollabMsg::ApplySetup);
+        let saved = app.current_config().collab;
+        assert_eq!(
+            (
+                saved.server_url.as_str(),
+                saved.user_id.as_str(),
+                saved.drawing_id.as_str()
+            ),
+            (SERVER, "u1", "PID-1101"),
+            "what settings.json is written from"
+        );
+        assert!(
+            app.collab.wanted(),
+            "the session starts as soon as the three are filled"
+        );
+        assert_eq!(app.collab.document, Some(app.tabs[app.active_tab].id));
     }
 
     /// With nobody to connect as, or no drawing to connect for, the address

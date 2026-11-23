@@ -57,6 +57,14 @@ pub enum PidCollabMsg {
     ShowPendingConflicts,
     /// The ruled page of the same list (#84).
     ShowRuledConflicts,
+    /// A keystroke in the unconfigured panel's server field (#99).
+    SetSetupServer(String),
+    /// A keystroke in the unconfigured panel's user field (#99).
+    SetSetupUser(String),
+    /// A keystroke in the unconfigured panel's drawing field (#99).
+    SetSetupDrawing(String),
+    /// Connect with the three fields (#99).
+    ApplySetup,
 }
 
 impl PidCollabMsg {
@@ -115,8 +123,29 @@ pub const NO_OTHERS_LABEL: &str = "暂无其他在线用户";
 /// What the panel says when no server address is set (`VAL-CLI-017`).
 pub const NOT_CONFIGURED_LABEL: &str = "未配置协同服务器";
 
-/// And how to set one, under it.
-pub const NOT_CONFIGURED_HINT: &str = "在命令行输入 PIDCOLLAB SERVER ws://主机:端口/ws";
+/// And how to set one, under it (#99).
+pub const NOT_CONFIGURED_HINT: &str = "填写下面三项";
+
+/// Which of the three setup fields is still empty. `None` when all three
+/// are filled. The panel prints this so a person can see what is missing
+/// before connecting (#99).
+pub fn setup_gap(server: &str, user: &str, drawing: &str) -> Option<String> {
+    let mut missing = Vec::new();
+    if server.trim().is_empty() {
+        missing.push("服务器地址");
+    }
+    if user.trim().is_empty() {
+        missing.push("用户");
+    }
+    if drawing.trim().is_empty() {
+        missing.push("图号");
+    }
+    if missing.is_empty() {
+        None
+    } else {
+        Some(format!("还缺：{}", missing.join("、")))
+    }
+}
 
 /// `PosReport` id of those two lines. Reported only while the panel shows
 /// them, so its presence is the state.
@@ -291,6 +320,13 @@ pub struct CollabView {
     pub last_message: Option<String>,
     /// The claims section is expanded.
     pub claims_open: bool,
+    /// What the unconfigured panel's three fields hold (#99). Kept on the
+    /// view so a keystroke survives the next rebuild of the rest.
+    pub setup_server: String,
+    /// The user id typed beside [`Self::setup_server`].
+    pub setup_user: String,
+    /// The drawing id typed beside [`Self::setup_server`].
+    pub setup_drawing: String,
 }
 
 impl CollabView {
@@ -535,26 +571,44 @@ pub fn view<'a>(view: &'a CollabView, width: f32, chrome: Chrome) -> Element<'a,
     let title_bar = crate::ui::dock::title_bar(PanelId::PidCollab, "协同".to_string(), chrome);
 
     if !view.configured() {
-        // Says what to do about it as well: the address is given on the
-        // command line (`PIDCOLLAB SERVER`), which is not somewhere a person
-        // would look unprompted.
-        // The two lines report where they are under an id of their own, and
-        // the panel under its usual one: a client reading the bounds can
-        // tell the panel is open, and that this is what it says
-        // (`VAL-CLI-017`, `VAL-CROSS-012`) — a screenshot was the only way.
+        // The three fields are the way in (#99). The block reports where it
+        // is under an id of its own, and the panel under its usual one
+        // (`VAL-CLI-017`, `VAL-CROSS-012`).
+        let mut lines = column![
+            text(NOT_CONFIGURED_LABEL).size(12).style(muted),
+            text(NOT_CONFIGURED_HINT).size(10).style(muted),
+        ]
+        .spacing(4)
+        .width(Fill);
+        if let Some(gap) = setup_gap(&view.setup_server, &view.setup_user, &view.setup_drawing) {
+            lines = lines.push(text(gap).size(11).style(muted));
+        }
+        lines = lines.push(text("服务器").size(11));
+        lines = lines.push(
+            text_input("ws://主机:端口/ws", &view.setup_server)
+                .on_input(|value| PidCollabMsg::SetSetupServer(value).message()),
+        );
+        lines = lines.push(text("用户").size(11));
+        lines = lines.push(
+            text_input("用户标识", &view.setup_user)
+                .on_input(|value| PidCollabMsg::SetSetupUser(value).message()),
+        );
+        lines = lines.push(text("图号").size(11));
+        lines = lines.push(
+            text_input("图纸编号", &view.setup_drawing)
+                .on_input(|value| PidCollabMsg::SetSetupDrawing(value).message()),
+        );
+        lines = lines.push(
+            button(text("连接").size(11))
+                .on_press(PidCollabMsg::ApplySetup.message())
+                .padding([2, 8]),
+        );
         let hint = container(crate::ui::wrap_bar::PosReport::new(
             NOT_CONFIGURED_BOUNDS_ID,
-            column![
-                text(NOT_CONFIGURED_LABEL).size(12).style(muted),
-                text(NOT_CONFIGURED_HINT).size(10).style(muted),
-            ]
-            .spacing(4)
-            .align_x(iced::Center),
+            lines,
         ))
-        .center_x(Fill)
-        .center_y(Fill)
         .width(Fill)
-        .height(Fill);
+        .padding(8);
         let reported = crate::ui::wrap_bar::PosReport::new(PANEL_BOUNDS_ID, hint);
         return crate::ui::dock::frame(title_bar, reported, width);
     }
@@ -860,17 +914,45 @@ mod tests {
         assert_eq!(drawn(&mut ui, NO_OTHERS_LABEL), None);
     }
 
-    /// `VAL-CLI-017`, `VAL-CROSS-012`: with no server set the panel says so,
-    /// and says how to set one — and nothing else: no banner, no roster.
+    /// `VAL-CLI-017`, `VAL-CROSS-012`, #99: with no server set the panel says
+    /// so, names the three fields, and says which of them is empty. It does
+    /// not draw the session banner or the roster.
     #[test]
     fn a_panel_with_no_server_says_so_and_how_to_set_one() {
         let view_model = CollabView::default();
         let mut ui = draw(&view_model);
         let said = drawn(&mut ui, NOT_CONFIGURED_LABEL).expect("the note is drawn");
         let how = drawn(&mut ui, NOT_CONFIGURED_HINT).expect("the hint is drawn");
-        assert!(said.y < how.y, "{said:?} {how:?}");
+        let gap = drawn(&mut ui, "还缺：服务器地址、用户、图号").expect("what is missing");
+        let server = drawn(&mut ui, "ws://主机:端口/ws").expect("the server field");
+        let user = drawn(&mut ui, "用户标识").expect("the user field");
+        let drawing = drawn(&mut ui, "图纸编号").expect("the drawing field");
+        let connect = drawn(&mut ui, "连接").expect("the connect button");
+        assert!(said.y < how.y && how.y < gap.y, "{said:?} {how:?} {gap:?}");
+        assert!(
+            gap.y < server.y && server.y < user.y && user.y < drawing.y && drawing.y < connect.y,
+            "{gap:?} {server:?} {user:?} {drawing:?} {connect:?}"
+        );
         assert_eq!(drawn(&mut ui, "未连接"), None);
         assert_eq!(drawn(&mut ui, "在线用户"), None);
+
+        let partial = CollabView {
+            setup_server: "ws://127.0.0.1:3240/ws".to_owned(),
+            ..CollabView::default()
+        };
+        let mut ui = draw(&partial);
+        assert!(drawn(&mut ui, "还缺：用户、图号").is_some());
+        assert_eq!(drawn(&mut ui, "服务器地址"), None);
+
+        let ready = CollabView {
+            setup_server: "ws://127.0.0.1:3240/ws".to_owned(),
+            setup_user: "u1".to_owned(),
+            setup_drawing: "PID-1101".to_owned(),
+            ..CollabView::default()
+        };
+        let mut ui = draw(&ready);
+        assert_eq!(drawn(&mut ui, "还缺"), None);
+        assert!(drawn(&mut ui, "连接").is_some());
     }
 
     /// `VAL-CROSS-007`: an entry awaiting a ruling is listed under a header
