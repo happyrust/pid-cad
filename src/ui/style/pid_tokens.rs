@@ -85,11 +85,10 @@ pub fn by_name(name: &str, theme: PidTheme) -> Option<TokenValue> {
     generated::lookup(name, theme)
 }
 
-/// Theme token used to tint claimed tags on canvas and claim markers (#56).
-/// Distinct from [`CONNECTOR_PIPE_COLOR_TOKEN`] and
-/// [`CONNECTOR_SIGNAL_COLOR_TOKEN`]. When #47 adds a dedicated `claim` token
-/// to `pid-platform.pen`, swap this constant alone.
-pub const CLAIM_COLOR_TOKEN: ColorToken = ColorToken::Amber;
+/// Theme token for claim marks (#47, #56). The design's `claim` variable,
+/// not the page-connector line (`amber`) and not
+/// [`CONNECTOR_PIPE_COLOR_TOKEN`] or [`CONNECTOR_SIGNAL_COLOR_TOKEN`].
+pub const CLAIM_COLOR_TOKEN: ColorToken = ColorToken::Claim;
 
 /// Theme token used for process-pipe page connector lines/badges (#56).
 pub const CONNECTOR_PIPE_COLOR_TOKEN: ColorToken = ColorToken::LineProcess;
@@ -410,6 +409,136 @@ mod tests {
             .filter(|theme| theme.in_design())
             .collect();
         assert_eq!(drawn, design.theme_list(), "the themes the design draws");
+    }
+
+    /// sRGB relative luminance, WCAG 2.1.
+    fn luminance(color: Rgba) -> f64 {
+        fn channel(value: u8) -> f64 {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(color[0]) + 0.7152 * channel(color[1]) + 0.0722 * channel(color[2])
+    }
+
+    /// Contrast ratio of two opaque colours.
+    fn contrast(foreground: Rgba, background: Rgba) -> f64 {
+        let lighter = luminance(foreground).max(luminance(background));
+        let darker = luminance(foreground).min(luminance(background));
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// `foreground` painted over an opaque `background`.
+    fn over(foreground: Rgba, background: Rgba) -> Rgba {
+        let alpha = f64::from(foreground[3]) / 255.0;
+        let mix = |front: u8, back: u8| -> u8 {
+            (f64::from(front) * alpha + f64::from(back) * (1.0 - alpha)).round() as u8
+        };
+        [
+            mix(foreground[0], background[0]),
+            mix(foreground[1], background[1]),
+            mix(foreground[2], background[2]),
+            255,
+        ]
+    }
+
+    /// Claim marks are small text and strokes. WCAG 2.1 AA for normal text
+    /// (1.4.3) is 4.5:1 against the surface they sit on, which also clears
+    /// the 3:1 bar for non-text UI (1.4.11). The page connector stays on
+    /// `amber`; process and signal lines stay on their own variables.
+    #[test]
+    fn claim_color_meets_wcag_aa_and_is_not_a_connector_line() {
+        const AA_TEXT: f64 = 4.5;
+        assert_eq!(
+            ColorToken::Claim.rgba(PidTheme::Dark),
+            [0xFF, 0x6B, 0xA8, 0xFF]
+        );
+        assert_eq!(
+            ColorToken::Claim.rgba(PidTheme::Light),
+            [0x83, 0x18, 0x43, 0xFF]
+        );
+        assert_eq!(CLAIM_COLOR_TOKEN, ColorToken::Claim);
+        for theme in PidTheme::ALL {
+            let claim = ColorToken::Claim.rgba(theme);
+            assert_ne!(
+                claim,
+                ColorToken::Amber.rgba(theme),
+                "{theme:?} vs connector"
+            );
+            assert_ne!(claim, ColorToken::LineProcess.rgba(theme), "{theme:?}");
+            assert_ne!(claim, ColorToken::LineSignal.rgba(theme), "{theme:?}");
+            for surface in [
+                ColorToken::BgCanvas,
+                ColorToken::BgPanel,
+                ColorToken::BgRaised,
+            ] {
+                let ratio = contrast(claim, surface.rgba(theme));
+                assert!(
+                    ratio >= AA_TEXT,
+                    "{theme:?} claim on {} is {ratio:.2}, need {AA_TEXT}",
+                    surface.name()
+                );
+            }
+            let soft = ColorToken::ClaimSoft.rgba(theme);
+            let under = if soft[3] == 255 {
+                soft
+            } else {
+                over(soft, ColorToken::BgPanel.rgba(theme))
+            };
+            let ratio = contrast(claim, under);
+            assert!(
+                ratio >= AA_TEXT,
+                "{theme:?} claim on claim-soft is {ratio:.2}, need {AA_TEXT}"
+            );
+        }
+    }
+
+    /// Claim marks in the design use `claim`; page-connector lines stay on
+    /// `amber`, the variable they already had.
+    #[test]
+    fn claim_marks_and_page_connectors_use_different_variables() {
+        let design: Value =
+            serde_json::from_str(&std::fs::read_to_string(PEN).expect("the design")).unwrap();
+        let mut connectors = 0;
+        let mut claims = 0;
+        fn walk(node: &Value, connectors: &mut i32, claims: &mut i32) {
+            match node {
+                Value::Object(fields) => {
+                    let name = fields.get("name").and_then(Value::as_str).unwrap_or("");
+                    let stroke = fields.get("stroke").and_then(Value::as_str);
+                    let fill = fields.get("fill").and_then(Value::as_str);
+                    if name == "Off-page Connector" {
+                        *connectors += 1;
+                        assert_eq!(stroke, Some("$amber"), "{name}");
+                        assert_ne!(stroke, Some("$claim"));
+                    }
+                    if name.starts_with("Claim Chip") {
+                        *claims += 1;
+                        assert_eq!(stroke, Some("$claim"), "{name}");
+                        assert_ne!(fill, Some("$amber"));
+                        assert_ne!(stroke, Some("$amber"));
+                    }
+                    for field in fields.values() {
+                        walk(field, connectors, claims);
+                    }
+                }
+                Value::Array(items) => {
+                    for item in items {
+                        walk(item, connectors, claims);
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(&design, &mut connectors, &mut claims);
+        assert!(
+            connectors >= 4,
+            "page connectors in the collab frames: {connectors}"
+        );
+        assert!(claims >= 3, "claim chips: {claims}");
     }
 
     /// A theme the design does not draw still answers, with the dark value,

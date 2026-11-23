@@ -25,6 +25,8 @@ pub(super) const NAMES: &[&str] = &[
     "accent-soft",
     "amber",
     "amber-soft",
+    "claim",
+    "claim-soft",
     "danger",
     "danger-soft",
     "success",
@@ -79,6 +81,10 @@ pub enum ColorToken {
     Amber,
     /// `amber-soft`: dark `#F0A63A1F`, light `#FBEFD5`.
     AmberSoft,
+    /// `claim`: dark `#FF6BA8`, light `#831843`.
+    Claim,
+    /// `claim-soft`: dark `#FF6BA81F`, light `#FCE7F3`.
+    ClaimSoft,
     /// `danger`: dark `#EF5A5F`, light `#C8272E`.
     Danger,
     /// `danger-soft`: dark `#EF5A5F1F`, light `#FBE6E6`.
@@ -132,6 +138,8 @@ impl ColorToken {
         ColorToken::AccentSoft,
         ColorToken::Amber,
         ColorToken::AmberSoft,
+        ColorToken::Claim,
+        ColorToken::ClaimSoft,
         ColorToken::Danger,
         ColorToken::DangerSoft,
         ColorToken::Success,
@@ -168,6 +176,8 @@ impl ColorToken {
             ColorToken::AccentSoft => "accent-soft",
             ColorToken::Amber => "amber",
             ColorToken::AmberSoft => "amber-soft",
+            ColorToken::Claim => "claim",
+            ColorToken::ClaimSoft => "claim-soft",
             ColorToken::Danger => "danger",
             ColorToken::DangerSoft => "danger-soft",
             ColorToken::Success => "success",
@@ -210,6 +220,8 @@ impl ColorToken {
             ColorToken::AccentSoft => [[0x4C, 0x9E, 0xFF, 0x1F], [0x0F, 0x5B, 0xB8, 0x1F]],
             ColorToken::Amber => [[0xF0, 0xA6, 0x3A, 0xFF], [0x8F, 0x55, 0x00, 0xFF]],
             ColorToken::AmberSoft => [[0xF0, 0xA6, 0x3A, 0x1F], [0xFB, 0xEF, 0xD5, 0xFF]],
+            ColorToken::Claim => [[0xFF, 0x6B, 0xA8, 0xFF], [0x83, 0x18, 0x43, 0xFF]],
+            ColorToken::ClaimSoft => [[0xFF, 0x6B, 0xA8, 0x1F], [0xFC, 0xE7, 0xF3, 0xFF]],
             ColorToken::Danger => [[0xEF, 0x5A, 0x5F, 0xFF], [0xC8, 0x27, 0x2E, 0xFF]],
             ColorToken::DangerSoft => [[0xEF, 0x5A, 0x5F, 0x1F], [0xFB, 0xE6, 0xE6, 0xFF]],
             ColorToken::Success => [[0x38, 0xC5, 0x8C, 0xFF], [0x12, 0x71, 0x4A, 0xFF]],

@@ -41619,7 +41619,7 @@
                       "x": 342,
                       "y": 496,
                       "name": "Tag P-1001A",
-                      "fill": "$amber",
+                      "fill": "$claim",
                       "content": "P-1001A",
                       "fontFamily": "$font-mono",
                       "fontSize": 11,
@@ -41690,7 +41690,7 @@
                       "x": 604,
                       "y": 265,
                       "name": "Tag XV-1012",
-                      "fill": "$amber",
+                      "fill": "$claim",
                       "content": "XV-1012",
                       "fontFamily": "$font-mono",
                       "fontSize": 11,
@@ -41724,7 +41724,7 @@
                       "x": 866,
                       "y": 280,
                       "name": "Tag E-1002",
-                      "fill": "$amber",
+                      "fill": "$claim",
                       "content": "E-1002",
                       "fontFamily": "$font-mono",
                       "fontSize": 11,
@@ -42218,7 +42218,7 @@
                       "name": "Claim Chip 李工 占用 · 到期 10:47",
                       "fill": "$bg-panel",
                       "cornerRadius": 9,
-                      "stroke": "$amber",
+                      "stroke": "$claim",
                       "strokeWidth": 1,
                       "gap": 4,
                       "padding": [
@@ -42235,13 +42235,13 @@
                           "height": 10,
                           "icon": "lock",
                           "library": "lucide",
-                          "fill": "$amber"
+                          "fill": "$claim"
                         },
                         {
                           "type": "text",
                           "id": "CPwIg",
                           "name": "Label",
-                          "fill": "$amber",
+                          "fill": "$claim",
                           "content": "李工 占用 · 到期 10:47",
                           "fontFamily": "$font-ui",
                           "fontSize": 10,
@@ -42257,7 +42257,7 @@
                       "name": "Claim Chip 本机占用 · 到期 10:46",
                       "fill": "$bg-panel",
                       "cornerRadius": 9,
-                      "stroke": "$amber",
+                      "stroke": "$claim",
                       "strokeWidth": 1,
                       "gap": 4,
                       "padding": [
@@ -42274,13 +42274,13 @@
                           "height": 10,
                           "icon": "user-check",
                           "library": "lucide",
-                          "fill": "$amber"
+                          "fill": "$claim"
                         },
                         {
                           "type": "text",
                           "id": "vnoJO",
                           "name": "Label",
-                          "fill": "$amber",
+                          "fill": "$claim",
                           "content": "本机占用 · 到期 10:46",
                           "fontFamily": "$font-ui",
                           "fontSize": 10,
@@ -42296,7 +42296,7 @@
                       "name": "Claim Chip 赵工 占用 · 到期 10:44",
                       "fill": "$bg-panel",
                       "cornerRadius": 9,
-                      "stroke": "$amber",
+                      "stroke": "$claim",
                       "strokeWidth": 1,
                       "gap": 4,
                       "padding": [
@@ -42313,13 +42313,13 @@
                           "height": 10,
                           "icon": "lock",
                           "library": "lucide",
-                          "fill": "$amber"
+                          "fill": "$claim"
                         },
                         {
                           "type": "text",
                           "id": "acMqQ",
                           "name": "Label",
-                          "fill": "$amber",
+                          "fill": "$claim",
                           "content": "赵工 占用 · 到期 10:44",
                           "fontFamily": "$font-ui",
                           "fontSize": 10,
@@ -42335,7 +42335,7 @@
                       "name": "Toast 位号 P-1001A 已",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-md",
-                      "stroke": "$amber",
+                      "stroke": "$claim",
                       "strokeWidth": 1,
                       "effect": {
                         "type": "shadow",
@@ -42362,7 +42362,7 @@
                           "height": 15,
                           "icon": "lock",
                           "library": "lucide",
-                          "fill": "$amber"
+                          "fill": "$claim"
                         },
                         {
                           "type": "frame",
@@ -42511,9 +42511,9 @@
                           "id": "m5zCbN",
                           "name": "Alert 位号已被占用",
                           "width": "fill_container",
-                          "fill": "$amber-soft",
+                          "fill": "$claim-soft",
                           "cornerRadius": "$radius-md",
-                          "stroke": "$amber",
+                          "stroke": "$claim",
                           "strokeWidth": 1,
                           "layout": "vertical",
                           "gap": 6,
@@ -42535,13 +42535,13 @@
                                   "height": 14,
                                   "icon": "lock",
                                   "library": "lucide",
-                                  "fill": "$amber"
+                                  "fill": "$claim"
                                 },
                                 {
                                   "type": "text",
                                   "id": "n4OTHi",
                                   "name": "位号已被占用",
-                                  "fill": "$amber",
+                                  "fill": "$claim",
                                   "content": "位号已被占用",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 12,
@@ -43254,7 +43254,7 @@
                                       "type": "text",
                                       "id": "aT2ax",
                                       "name": "P-1001A",
-                                      "fill": "$amber",
+                                      "fill": "$claim",
                                       "content": "P-1001A",
                                       "fontFamily": "$font-mono",
                                       "fontSize": 11.5,
@@ -43318,7 +43318,7 @@
                                       "type": "text",
                                       "id": "kPSN1",
                                       "name": "XV-1012",
-                                      "fill": "$amber",
+                                      "fill": "$claim",
                                       "content": "XV-1012",
                                       "fontFamily": "$font-mono",
                                       "fontSize": 11.5,
@@ -43382,7 +43382,7 @@
                                       "type": "text",
                                       "id": "Et7EC",
                                       "name": "E-1002",
-                                      "fill": "$amber",
+                                      "fill": "$claim",
                                       "content": "E-1002",
                                       "fontFamily": "$font-mono",
                                       "fontSize": 11.5,
@@ -66469,6 +66469,40 @@
         },
         {
           "value": "#FBEFD5",
+          "theme": {
+            "mode": "light"
+          }
+        }
+      ]
+    },
+    "claim": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#FF6BA8",
+          "theme": {
+            "mode": "dark"
+          }
+        },
+        {
+          "value": "#831843",
+          "theme": {
+            "mode": "light"
+          }
+        }
+      ]
+    },
+    "claim-soft": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#FF6BA81F",
+          "theme": {
+            "mode": "dark"
+          }
+        },
+        {
+          "value": "#FCE7F3",
           "theme": {
             "mode": "light"
           }
