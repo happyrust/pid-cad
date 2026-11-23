@@ -140,7 +140,10 @@ async fn load_20_editing_sessions_and_200_ops_measures_latencies_and_db_size() {
             db_path.display().to_string(),
             SessionConfig::default(),
         )
-        .with_open_mode(true),
+        .with_open_mode(true)
+        // The default cap is 20 editing sessions (#98). This harness is
+        // 20 editors plus one observer, all joined as editing sessions.
+        .with_session_caps(TOTAL_CLIENTS, TOTAL_CLIENTS),
     );
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -262,7 +265,17 @@ async fn load_20_editing_sessions_and_200_ops_measures_latencies_and_db_size() {
         .get("PID-LOAD-01")
         .copied()
         .unwrap_or(0);
-    assert_eq!(ops_rows, TOTAL_OPS as i64);
+    // #103 drops ops already folded into a snapshot, so the table does not
+    // still hold all 200. What remains, plus the snapshot, is the drawing.
+    let snapshot_rev = state
+        .store
+        .as_ref()
+        .expect("store")
+        .latest_snapshot("PID-LOAD-01")
+        .expect("snapshot")
+        .map(|(revision, _)| revision)
+        .unwrap_or(0);
+    assert_eq!(snapshot_rev + ops_rows, TOTAL_OPS as i64);
     assert_eq!(state.metrics.applied_ops_total(), TOTAL_OPS as u64);
     assert!(db_size > 0);
 
