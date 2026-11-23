@@ -35,8 +35,8 @@ use crate::ui::style::pid_tokens::{
     CONNECTOR_SIGNAL_COLOR_TOKEN,
 };
 use crate::ui::window::pid_collab::{
-    PidCollabMsg, ADOPT_A, ADOPT_B, CONFIRM_RULING, NO_OTHERS_LABEL, NO_PENDING_CONFLICTS,
-    NO_PENDING_CONFLICTS_WHY, OPEN_CONFLICT_LIST,
+    PidCollabMsg, ADOPT_A, ADOPT_B, ADOPT_MANUAL, CONFIRM_RULING, NO_OTHERS_LABEL,
+    NO_PENDING_CONFLICTS, NO_PENDING_CONFLICTS_WHY, OPEN_CONFLICT_LIST,
 };
 use crate::ui::wrap_bar::PosReport;
 
@@ -1065,8 +1065,22 @@ pub(crate) fn inspector_collab_section<'a>(
             .padding([2, 8])
             .style(bare)
             .on_press(PidCollabMsg::ChooseRuling(ADOPT_B.to_owned()).message()),
+            button(
+                text(ADOPT_MANUAL)
+                    .size(10.5)
+                    .color(ColorToken::Accent.color(theme)),
+            )
+            .padding([2, 8])
+            .style(bare)
+            .on_press(PidCollabMsg::ChooseRuling(ADOPT_MANUAL.to_owned()).message()),
         ]
         .spacing(2);
+        if dialog.choice.as_deref() == Some(ADOPT_MANUAL) {
+            dialog_col = dialog_col.push(
+                text_input("最终值", &dialog.manual)
+                    .on_input(|value| PidCollabMsg::SetRulingManual(value).message()),
+            );
+        }
         if dialog.choice.is_some() {
             dialog_col = dialog_col.push(
                 button(
@@ -2156,6 +2170,179 @@ mod tests {
                 .is_some_and(|list| list.iter().all(|row| row.conflict_id != "c-7f3a")),
             "the ruled row leaves the list"
         );
+    }
+
+    /// #83: a typed value is the same resolve as the command. An empty
+    /// value, a second ruling, and a role refusal each say so and leave the
+    /// row pending.
+    #[test]
+    fn a_manual_value_and_the_three_refusals_stay_on_the_pending_row() {
+        use crate::app::collab::query::{
+            CollabQueryClient, ConflictListItem, QueryError, ResolveOutcome,
+        };
+        use crate::ui::window::pid_collab::{PidCollabMsg, ADOPT_A, ADOPT_MANUAL};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Debug)]
+        struct Rec {
+            calls: Mutex<Vec<(String, String, Option<String>)>>,
+        }
+
+        impl CollabQueryClient for Rec {
+            fn fetch_pending_conflicts(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Vec<PendingConflict>, QueryError> {
+                Ok(Vec::new())
+            }
+            fn fetch_conflict_list(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Vec<ConflictListItem>, QueryError> {
+                Ok(["c-ok", "c-dup", "c-perm"]
+                    .into_iter()
+                    .map(|id| ConflictListItem {
+                        conflict_id: id.to_owned(),
+                        object_ref: "P-1001".to_owned(),
+                        field: "设计压力".to_owned(),
+                        value_a: "1.6MPa".to_owned(),
+                        value_b: "2.5MPa".to_owned(),
+                        base_revision: 4,
+                        status: "待裁决".to_owned(),
+                    })
+                    .collect())
+            }
+            fn resolve_conflict(
+                &self,
+                _: &str,
+                conflict_id: &str,
+                resolution: &str,
+                _: &str,
+                value: Option<&str>,
+            ) -> Result<ResolveOutcome, QueryError> {
+                if conflict_id == "c-dup" {
+                    return Err(QueryError {
+                        status: 409,
+                        code: "CONFLICT_ALREADY_RESOLVED".into(),
+                        message: "该冲突条目已经裁决过".into(),
+                        level: None,
+                        detail: None,
+                    });
+                }
+                if conflict_id == "c-perm" {
+                    return Err(QueryError {
+                        status: 403,
+                        code: "PERM_DENIED_ROLE".into(),
+                        message: "角色不允许授权配置".into(),
+                        level: Some("role".into()),
+                        detail: None,
+                    });
+                }
+                self.calls.lock().expect("calls").push((
+                    conflict_id.to_owned(),
+                    resolution.to_owned(),
+                    value.map(str::to_owned),
+                ));
+                Ok(ResolveOutcome {
+                    conflict_id: conflict_id.to_owned(),
+                    status: "已裁决".into(),
+                    resolution: resolution.to_owned(),
+                    resolved_by: "u4".into(),
+                    value: value.unwrap_or("").to_owned(),
+                    object_ref: "P-1001".into(),
+                    field: "设计压力".into(),
+                    revision: 6,
+                })
+            }
+            fn fetch_audit(
+                &self,
+                _: &str,
+                _: &crate::app::collab::query::AuditFilter,
+            ) -> Result<Vec<crate::app::collab::query::AuditItem>, QueryError> {
+                Ok(Vec::new())
+            }
+            fn fetch_drawing_objects(
+                &self,
+                _: &str,
+                drawing_id: &str,
+                _: Option<&str>,
+            ) -> Result<crate::app::collab::query::DrawingObjectsPage, QueryError> {
+                Ok(crate::app::collab::query::DrawingObjectsPage {
+                    drawing_id: drawing_id.to_owned(),
+                    revision: 0,
+                    items: Vec::new(),
+                })
+            }
+        }
+
+        let still = |app: &OpenCADStudio, id: &str| {
+            app.pid_collab_conflict_list.as_ref().is_some_and(|list| {
+                list.iter()
+                    .any(|row| row.conflict_id == id && row.status == "待裁决")
+            })
+        };
+        let rec = Arc::new(Rec {
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut app = pid_app();
+        app.collab.server_url = "ws://127.0.0.1:3240/ws".into();
+        app.collab.drawing_id = "PID-1101".into();
+        app.collab.user_id = "u4".into();
+        app.collab.set_query_client(rec.clone());
+        let _ = app.on_pid_collab(PidCollabMsg::OpenConflictList);
+
+        let _ = app.on_pid_collab(PidCollabMsg::OpenRuling("c-ok".into()));
+        let _ = app.on_pid_collab(PidCollabMsg::ChooseRuling(ADOPT_MANUAL.into()));
+        let _ = app.on_pid_collab(PidCollabMsg::ConfirmRuling);
+        assert!(
+            app.command_line
+                .last_error
+                .as_deref()
+                .is_some_and(|text| text.contains("必须提供最终值")),
+            "{:?}",
+            app.command_line.last_error
+        );
+        assert!(rec.calls.lock().expect("calls").is_empty());
+        assert!(still(&app, "c-ok"));
+
+        let _ = app.on_pid_collab(PidCollabMsg::SetRulingManual("3.2MPa".into()));
+        let _ = app.on_pid_collab(PidCollabMsg::ConfirmRuling);
+        app.resolve_conflict_cmd("c-ok 人工改值 3.2MPa");
+        let calls = rec.calls.lock().expect("calls").clone();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0], calls[1]);
+        assert_eq!(calls[0].2.as_deref(), Some("3.2MPa"));
+        assert!(!still(&app, "c-ok"));
+
+        let _ = app.on_pid_collab(PidCollabMsg::OpenRuling("c-dup".into()));
+        let _ = app.on_pid_collab(PidCollabMsg::ChooseRuling(ADOPT_A.into()));
+        let _ = app.on_pid_collab(PidCollabMsg::ConfirmRuling);
+        assert_eq!(
+            app.command_line.last_error_code.as_deref(),
+            Some("CONFLICT_ALREADY_RESOLVED")
+        );
+        assert!(app
+            .command_line
+            .last_error
+            .as_deref()
+            .is_some_and(|text| text.contains("已经裁决过")));
+        assert!(still(&app, "c-dup"));
+
+        let _ = app.on_pid_collab(PidCollabMsg::OpenRuling("c-perm".into()));
+        let _ = app.on_pid_collab(PidCollabMsg::ChooseRuling(ADOPT_A.into()));
+        let _ = app.on_pid_collab(PidCollabMsg::ConfirmRuling);
+        assert_eq!(
+            app.command_line.last_error_code.as_deref(),
+            Some("PERM_DENIED_ROLE")
+        );
+        assert!(app
+            .command_line
+            .last_error
+            .as_deref()
+            .is_some_and(|text| text.contains("角色不允许")));
+        assert!(still(&app, "c-perm"));
     }
 
     #[test]

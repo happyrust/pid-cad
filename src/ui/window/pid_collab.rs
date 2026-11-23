@@ -27,7 +27,7 @@
 use crate::app::collab::query::ConflictListItem;
 use crate::app::Message;
 use crate::ui::dock::{Chrome, PanelId};
-use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Background, Border, Element, Fill, Length, Theme};
 
 /// What the user did in the panel.
@@ -51,6 +51,8 @@ pub enum PidCollabMsg {
     ChooseRuling(String),
     /// Confirm the pick. Same action as `PIDCOLLAB RESOLVE`.
     ConfirmRuling,
+    /// The value typed for 人工改值 (#83).
+    SetRulingManual(String),
 }
 
 impl PidCollabMsg {
@@ -191,13 +193,16 @@ pub fn conflict_list_bounds_id(conflict_id: &str) -> String {
 /// The two picks the ruling dialog offers (#82).
 pub const ADOPT_A: &str = "采用甲方";
 pub const ADOPT_B: &str = "采用乙方";
+pub const ADOPT_MANUAL: &str = "人工改值";
 pub const CONFIRM_RULING: &str = "确认";
 
-/// The dialog for one conflict: the query row, and which side is picked.
+/// The dialog for one conflict: the query row, which side is picked, and a
+/// value typed by hand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RulingDialog {
     pub item: ConflictListItem,
     pub choice: Option<String>,
+    pub manual: String,
 }
 
 /// `PosReport` id of the line under the banner that says what has not
@@ -448,8 +453,18 @@ fn ruling_dialog<'a>(dialog: &'a RulingDialog) -> Element<'a, Message> {
             .on_press(PidCollabMsg::ChooseRuling(ADOPT_B.to_owned()).message())
             .style(button::secondary)
             .padding([2, 6]),
+        button(text(ADOPT_MANUAL).size(10))
+            .on_press(PidCollabMsg::ChooseRuling(ADOPT_MANUAL.to_owned()).message())
+            .style(button::secondary)
+            .padding([2, 6]),
     ]
     .spacing(2);
+    if dialog.choice.as_deref() == Some(ADOPT_MANUAL) {
+        body = body.push(
+            text_input("最终值", &dialog.manual)
+                .on_input(|value| PidCollabMsg::SetRulingManual(value).message()),
+        );
+    }
     if dialog.choice.is_some() {
         body = body.push(
             button(text(CONFIRM_RULING).size(10))

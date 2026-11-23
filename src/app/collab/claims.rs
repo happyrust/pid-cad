@@ -424,7 +424,11 @@ impl OpenCADStudio {
                     .pid_collab_conflict_list
                     .as_ref()
                     .and_then(|list| list.iter().find(|item| item.conflict_id == id).cloned())
-                    .map(|item| crate::ui::window::pid_collab::RulingDialog { item, choice: None });
+                    .map(|item| crate::ui::window::pid_collab::RulingDialog {
+                        item,
+                        choice: None,
+                        manual: String::new(),
+                    });
                 self.refresh_collab_view();
                 Task::none()
             }
@@ -435,10 +439,22 @@ impl OpenCADStudio {
                 self.refresh_collab_view();
                 Task::none()
             }
+            PidCollabMsg::SetRulingManual(value) => {
+                if let Some(dialog) = &mut self.pid_collab_ruling {
+                    dialog.manual = value;
+                }
+                self.refresh_collab_view();
+                Task::none()
+            }
             PidCollabMsg::ConfirmRuling => {
                 if let Some(dialog) = self.pid_collab_ruling.clone() {
                     if let Some(choice) = dialog.choice {
-                        self.resolve_conflict_cmd(&format!("{} {choice}", dialog.item.conflict_id));
+                        let arg = if choice == crate::ui::window::pid_collab::ADOPT_MANUAL {
+                            format!("{} {} {}", dialog.item.conflict_id, choice, dialog.manual)
+                        } else {
+                            format!("{} {choice}", dialog.item.conflict_id)
+                        };
+                        self.resolve_conflict_cmd(&arg);
                     } else {
                         self.command_line.push_error("请先选择采用甲方或采用乙方");
                     }
