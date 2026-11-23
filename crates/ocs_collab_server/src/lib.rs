@@ -24,6 +24,10 @@ use ocs_collab::{OccupancyTable, ServerMessage, SessionConfig, SessionRegistry};
 pub use bus::Bus;
 pub use store::Store;
 
+/// Default cap for editing sessions on one drawing and on the server (#98).
+/// The single-project figure in `docs/pid-platform/architecture/non-functional.md`.
+pub const DEFAULT_MAX_EDITING_SESSIONS: usize = 20;
+
 /// The server's shared state.
 pub struct AppState {
     /// `None` when the database could not be opened; `GET /health` then
@@ -95,6 +99,11 @@ pub struct AppState {
     pub logger: Arc<metrics::StructuredLogger>,
     /// Optional directory where periodic/on-demand online backups are written (#105).
     pub backup_dir: Option<std::path::PathBuf>,
+    /// Active editing sessions allowed on one drawing. Default 20, the
+    /// single-project figure in `non-functional.md` (#38, #98).
+    pub max_editing_sessions_per_drawing: usize,
+    /// Active editing sessions allowed on this server. Same default.
+    pub max_editing_sessions: usize,
     pub version: &'static str,
 }
 
@@ -132,8 +141,17 @@ impl AppState {
             metrics: Arc::new(metrics::Metrics::default()),
             logger: Arc::new(metrics::StructuredLogger::default()),
             backup_dir: None,
+            max_editing_sessions_per_drawing: DEFAULT_MAX_EDITING_SESSIONS,
+            max_editing_sessions: DEFAULT_MAX_EDITING_SESSIONS,
             version: env!("CARGO_PKG_VERSION"),
         }
+    }
+
+    /// `--max-sessions-per-drawing` and `--max-sessions` (#98).
+    pub fn with_session_caps(mut self, per_drawing: usize, server: usize) -> Self {
+        self.max_editing_sessions_per_drawing = per_drawing.max(1);
+        self.max_editing_sessions = server.max(1);
+        self
     }
 
     /// Builder helper to explicitly enable or disable `--open-mode` (#67).

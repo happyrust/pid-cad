@@ -2088,7 +2088,12 @@ impl State {
                 }
             }
             CollabEvent::ServerError { code, message } => {
-                if code == "CLAIM_EXPIRING" {
+                if code == ocs_collab::protocol::codes::SESSION_FULL {
+                    self.last_error = Some("人数已满".to_owned());
+                    self.connected = false;
+                    self.toasts
+                        .push(toasts::ToastKind::Warning, "人数已满".to_owned());
+                } else if code == "CLAIM_EXPIRING" {
                     self.last_claim_message = Some(message.clone());
                     self.toasts
                         .push(toasts::ToastKind::Info, message);

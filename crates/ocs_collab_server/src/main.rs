@@ -67,6 +67,9 @@ struct Cli {
     log_file: Option<String>,
     /// Directory for periodic/on-demand online SQLite backups (#105).
     backup_dir: Option<String>,
+    /// Editing sessions allowed on one drawing, and on the server (#98).
+    max_sessions_per_drawing: usize,
+    max_sessions: usize,
     /// Periodic online backup interval in seconds (0 = disabled, #105).
     backup_interval: u64,
 }
@@ -87,7 +90,8 @@ fn usage() -> &'static str {
      [--heartbeat-timeout <seconds>] [--claim-ttl <seconds>] [--seed <json>] \
      [--tie-window-ms <milliseconds>] [--new-repo-id] [--open-mode] [--require-auth] \
      [--tls-cert <pem> --tls-key <pem>] [--log-file <path>] \
-     [--backup-dir <dir>] [--backup-interval <seconds>]\n\
+     [--backup-dir <dir>] [--backup-interval <seconds>] \
+     [--max-sessions-per-drawing <n>] [--max-sessions <n>]\n\
      --bind 默认 127.0.0.1，只有本机能连。监听非本机回环地址时必须同时启用 --require-auth 与 TLS（--tls-cert/--tls-key）。\n\
      --open-mode 打开开放模式（允许未登记用户与图纸入会，仅用于演示与测试；缺省为严格模式）。\n\
      --require-auth 强制所有入会与管理接口核对用户凭据（凭据在库中仅存散列）。\n\
@@ -113,6 +117,8 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
         log_file: None,
         backup_dir: None,
         backup_interval: 0,
+        max_sessions_per_drawing: ocs_collab_server::DEFAULT_MAX_EDITING_SESSIONS,
+        max_sessions: ocs_collab_server::DEFAULT_MAX_EDITING_SESSIONS,
     };
 
     let mut iter = args.into_iter();
@@ -142,6 +148,20 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
                 })?;
                 if cli.heartbeat_timeout <= 0 {
                     return Err("--heartbeat-timeout 必须大于 0".to_owned());
+                }
+            }
+            "--max-sessions" | "--max-sessions-per-drawing" => {
+                let raw = value(flag.as_str())?;
+                let parsed: usize = raw.parse().map_err(|_| {
+                    format!("{flag} 需要正整数，收到 {raw}")
+                })?;
+                if parsed == 0 {
+                    return Err(format!("{flag} 必须大于 0"));
+                }
+                if flag == "--max-sessions" {
+                    cli.max_sessions = parsed;
+                } else {
+                    cli.max_sessions_per_drawing = parsed;
                 }
             }
             "--claim-ttl" => {
@@ -243,6 +263,7 @@ fn build_state(cli: &Cli) -> AppState {
             AppState::new(Some(store), None, cli.db.clone(), session_config)
                 .with_open_mode(cli.open_mode)
                 .with_require_auth(cli.require_auth)
+                .with_session_caps(cli.max_sessions_per_drawing, cli.max_sessions)
         }
         Err(err) => {
             eprintln!("[ocs_collab_server] 数据库初始化失败：{err}");
@@ -255,7 +276,8 @@ fn build_state(cli: &Cli) -> AppState {
 /// reports 503 on `GET /health`, and takes no session.
 fn unavailable(cli: &Cli, err: String, session_config: SessionConfig) -> AppState {
     eprintln!("[ocs_collab_server] 不接受会话：hello 一律答 STORE_UNAVAILABLE，GET /health 报 503");
-    let mut state = AppState::new(None, Some(err), cli.db.clone(), session_config);
+    let mut state = AppState::new(None, Some(err), cli.db.clone(), session_config)
+        .with_session_caps(cli.max_sessions_per_drawing, cli.max_sessions);
     state.store_unavailable = true;
     state
 }
@@ -667,6 +689,8 @@ mod tests {
             log_file: None,
             backup_dir: None,
             backup_interval: 0,
+            max_sessions_per_drawing: 20,
+            max_sessions: 20,
         };
         let state = build_state(&cli);
         assert!(state.store.is_none());
@@ -694,6 +718,8 @@ mod tests {
             log_file: None,
             backup_dir: None,
             backup_interval: 0,
+            max_sessions_per_drawing: 20,
+            max_sessions: 20,
         };
         let state = build_state(&cli);
         assert!(state.db_healthy());

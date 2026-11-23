@@ -442,6 +442,9 @@ pub mod codes {
     pub const AUTH_FAILED: &str = "AUTH_FAILED";
     /// The user account is disabled (`active = 0`, #68).
     pub const USER_DISABLED: &str = "USER_DISABLED";
+    /// The drawing or the server already has as many editing sessions as its
+    /// startup cap allows (#98).
+    pub const SESSION_FULL: &str = "SESSION_FULL";
 
     /// Every error/reason code registered in this protocol crate.
     /// Shared fixture tests assert that each one has a frame example.
@@ -477,6 +480,7 @@ pub mod codes {
         PROTOCOL_VERSION_UNSUPPORTED,
         AUTH_FAILED,
         USER_DISABLED,
+        SESSION_FULL,
     ];
 }
 

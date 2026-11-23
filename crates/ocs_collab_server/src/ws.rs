@@ -1030,6 +1030,34 @@ async fn hello(
     } else {
         mode
     };
+    if mode != "只读" {
+        let registry = state.sessions.lock().await;
+        let on_drawing = registry
+            .all()
+            .iter()
+            .filter(|session| {
+                session.drawing_id == drawing_id && session.is_active() && session.is_editing()
+            })
+            .count();
+        let on_server = registry
+            .all()
+            .iter()
+            .filter(|session| session.is_active() && session.is_editing())
+            .count();
+        drop(registry);
+        if on_drawing >= state.max_editing_sessions_per_drawing
+            || on_server >= state.max_editing_sessions
+        {
+            println!(
+                "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：人数已满（本图 {on_drawing}/{}，服务器 {on_server}/{}）",
+                state.max_editing_sessions_per_drawing, state.max_editing_sessions
+            );
+            return vec![
+                Reaction::Send(error_message(codes::SESSION_FULL, "人数已满")),
+                Reaction::Close,
+            ];
+        }
+    }
     let display_name = state.display_name_of(user_id);
     // #36: If the client reconnects with `resume_session_id` naming its own
     // previous session on this drawing, take it over immediately before
@@ -2431,6 +2459,33 @@ mod tests {
         let session = conn_b.session.expect("joined");
         assert_eq!(session.mode, "只读");
         assert!(crate::access::write_access(&state, &session).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_third_editing_session_is_refused_when_the_cap_is_two() {
+        let state = state().with_session_caps(2, 2);
+        for (user, at) in [("u1", T0), ("u2", T0 + 1)] {
+            let mut conn = conn();
+            let reactions = handle_message(&state, &mut conn, hello(user, "协同编辑", ""), at).await;
+            assert!(
+                sends(&reactions)
+                    .iter()
+                    .any(|message| matches!(message, ServerMessage::Welcome { .. })),
+                "{user}: {reactions:?}"
+            );
+        }
+        let mut third = conn();
+        let reactions =
+            handle_message(&state, &mut third, hello("u3", "协同编辑", ""), T0 + 2).await;
+        let message = sends(&reactions).into_iter().next();
+        match message {
+            Some(ServerMessage::Error { code, message, .. }) => {
+                assert_eq!(code, codes::SESSION_FULL);
+                assert_eq!(message, "人数已满");
+            }
+            other => panic!("expected 人数已满, got {other:?}"),
+        }
+        assert!(third.session.is_none(), "the third session is not opened");
     }
 
     /// [`hello`], from a client whose copy was aligned against this

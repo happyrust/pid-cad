@@ -318,7 +318,8 @@
     { "code": "DUPLICATE_INFLOW_CONNECTOR", "frame": { "type": "error", "code": "DUPLICATE_INFLOW_CONNECTOR", "message": "同一线号同图已有流入连接符", "op_id": "op-8", "rejected": true } },
     { "code": "PROTOCOL_VERSION_UNSUPPORTED", "frame": { "type": "error", "code": "PROTOCOL_VERSION_UNSUPPORTED", "message": "协议版本不兼容，需要升级" } },
     { "code": "AUTH_FAILED", "frame": { "type": "error", "code": "AUTH_FAILED", "message": "身份核对失败" } },
-    { "code": "USER_DISABLED", "frame": { "type": "error", "code": "USER_DISABLED", "message": "账号已停用" } }
+    { "code": "USER_DISABLED", "frame": { "type": "error", "code": "USER_DISABLED", "message": "账号已停用" } },
+    { "code": "SESSION_FULL", "frame": { "type": "error", "code": "SESSION_FULL", "message": "人数已满" } }
   ],
   "legacy_client": [
     {

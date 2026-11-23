@@ -627,6 +627,9 @@ pub(crate) fn connector_inspector_section<'a>(
 /// (never repeat verbatim) the shell navigation foot's `SyncStatus::label()` (#48).
 pub(crate) fn collab_section_status(state: &CollabState) -> (String, ColorToken) {
     if !state.connected {
+        if state.last_error.as_deref() == Some("人数已满") {
+            return ("人数已满".to_owned(), ColorToken::Danger);
+        }
         let queued = state.outbox.len();
         let text = if queued > 0 {
             format!(
@@ -1565,6 +1568,16 @@ mod tests {
         });
         let info = readonly_banner_info(&app).expect("the zone says why it is read-only");
         assert!(info.reason.contains("符号库"), "{}", info.reason);
+    }
+
+    #[test]
+    fn a_full_room_is_shown_as_人数已满() {
+        let mut app = pid_app();
+        app.collab.apply(CollabEvent::ServerError {
+            code: ocs_collab::protocol::codes::SESSION_FULL.to_owned(),
+            message: "人数已满".to_owned(),
+        });
+        assert_eq!(collab_section_status(&app.collab).0, "人数已满");
     }
 
     #[test]
