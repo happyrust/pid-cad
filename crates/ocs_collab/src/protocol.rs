@@ -291,7 +291,46 @@ pub mod codes {
     /// The client's `hello.protocol_version` is outside the range this server
     /// supports; no editing session is established.
     pub const PROTOCOL_VERSION_UNSUPPORTED: &str = "PROTOCOL_VERSION_UNSUPPORTED";
+
+    /// Every error/reason code registered in this protocol crate.
+    /// Shared fixture tests assert that each one has a frame example.
+    pub const ALL: &[&str] = &[
+        SESSION_UNKNOWN,
+        SESSION_EXPIRED,
+        SESSION_TAKEN_OVER,
+        HELLO_REQUIRED,
+        UNKNOWN_MESSAGE_TYPE,
+        INVALID_MESSAGE,
+        UNKNOWN_DRAWING,
+        UNKNOWN_USER,
+        PERM_DENIED_ROLE,
+        PERM_DENIED_PBS,
+        PERM_DENIED_STATE,
+        PERM_UNKNOWN_SUBJECT,
+        PERM_UNKNOWN_OPERATION,
+        PERM_INVALID_STATE,
+        OBJECT_REFERENCED,
+        REPO_MISMATCH,
+        REVISION_AHEAD,
+        REPLAY_GAP,
+        NOT_ALIGNED,
+        STORE_UNAVAILABLE,
+        OBJECT_DELETED,
+        INVALID_STATE_TRANSITION,
+        STALE_BASE_REVISION,
+        CONFLICT_UNKNOWN,
+        CONFLICT_ALREADY_RESOLVED,
+        OP_SUPERSEDED,
+        CLAIM_HELD,
+        DUPLICATE_INFLOW_CONNECTOR,
+        PROTOCOL_VERSION_UNSUPPORTED,
+    ];
 }
+
+/// Shared wire-protocol JSON fixtures (client frames, server frames, all
+/// registered error codes, and legacy frames) used by both `ocs_collab`
+/// round-trip tests and server/scenario tests.
+pub const FIXTURE_JSON: &str = include_str!("../fixtures/protocol_frames.json");
 
 /// Reasons carried by [`ServerMessage::ClaimReleased`].
 pub mod release_reasons {

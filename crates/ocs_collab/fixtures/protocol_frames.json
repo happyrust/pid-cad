@@ -1,0 +1,329 @@
+{
+  "description": "Shared wire-protocol frame fixtures for ocs_collab and ocs_collab_server scenario tests (#21).",
+  "client": [
+    {
+      "name": "hello_full",
+      "frame": {
+        "type": "hello",
+        "user_id": "u1",
+        "drawing_id": "PID-1101",
+        "mode": "协同编辑",
+        "client_version": "0.1.0",
+        "workspace": "plant-a",
+        "since": 5,
+        "repo_id": "r-00000000-0000-4000-8000-000000000001",
+        "existing_tags": ["P-1001", "V-1001"],
+        "protocol_version": 2
+      }
+    },
+    {
+      "name": "heartbeat",
+      "frame": {
+        "type": "heartbeat",
+        "session_id": "s-00000000-0000-4000-8000-000000000001"
+      }
+    },
+    {
+      "name": "claim",
+      "frame": {
+        "type": "claim",
+        "session_id": "s-00000000-0000-4000-8000-000000000001",
+        "tag": "P-1001"
+      }
+    },
+    {
+      "name": "release",
+      "frame": {
+        "type": "release",
+        "session_id": "s-00000000-0000-4000-8000-000000000001",
+        "tag": "P-1001"
+      }
+    },
+    {
+      "name": "op_set_property",
+      "frame": {
+        "type": "op",
+        "session_id": "s-00000000-0000-4000-8000-000000000001",
+        "base_revision": 0,
+        "op_id": "op-r1-1",
+        "payload": {
+          "kind": "set_property",
+          "object_ref": "P-1001",
+          "field": "设计压力",
+          "value": "1.6MPa",
+          "old_value": "1.0MPa"
+        }
+      }
+    },
+    {
+      "name": "attempt",
+      "frame": {
+        "type": "attempt",
+        "session_id": "s-00000000-0000-4000-8000-000000000001",
+        "object_ref": "P-1001",
+        "text": "PIDPROP P-1001 设计压力 2.5MPa"
+      }
+    }
+  ],
+  "server": [
+    {
+      "name": "welcome_full",
+      "frame": {
+        "type": "welcome",
+        "session_id": "s-00000000-0000-4000-8000-000000000001",
+        "base_revision": 5,
+        "peers": [
+          {
+            "session_id": "s-00000000-0000-4000-8000-000000000002",
+            "user_id": "u2",
+            "display_name": "李工"
+          }
+        ],
+        "claims": [
+          {
+            "tag": "V-1001",
+            "session_id": "s-00000000-0000-4000-8000-000000000002",
+            "user_id": "u2",
+            "expires_at": 1700000300
+          }
+        ],
+        "repo_id": "r-00000000-0000-4000-8000-000000000001",
+        "replay_from": 3,
+        "protocol_version": 2
+      }
+    },
+    {
+      "name": "welcome_align_refused_repo_mismatch",
+      "frame": {
+        "type": "welcome",
+        "session_id": "s-00000000-0000-4000-8000-000000000001",
+        "base_revision": 5,
+        "peers": [],
+        "claims": [],
+        "repo_id": "r-00000000-0000-4000-8000-000000000001",
+        "align_refused": {
+          "code": "REPO_MISMATCH",
+          "message": "协同库标识不一致：这份文件对齐的是另一个服务器库"
+        },
+        "protocol_version": 2
+      }
+    },
+    {
+      "name": "welcome_align_refused_revision_ahead",
+      "frame": {
+        "type": "welcome",
+        "session_id": "s-00000000-0000-4000-8000-000000000001",
+        "base_revision": 5,
+        "peers": [],
+        "claims": [],
+        "repo_id": "r-00000000-0000-4000-8000-000000000001",
+        "align_refused": {
+          "code": "REVISION_AHEAD",
+          "message": "文件记的应用修订 8 比服务器当前修订 5 新"
+        },
+        "protocol_version": 2
+      }
+    },
+    {
+      "name": "welcome_align_refused_replay_gap",
+      "frame": {
+        "type": "welcome",
+        "session_id": "s-00000000-0000-4000-8000-000000000001",
+        "base_revision": 5,
+        "peers": [],
+        "claims": [],
+        "repo_id": "r-00000000-0000-4000-8000-000000000001",
+        "align_refused": {
+          "code": "REPLAY_GAP",
+          "message": "操作日志不完整，无法补发该修订之后的全部提交"
+        },
+        "protocol_version": 2
+      }
+    },
+    {
+      "name": "claim_granted",
+      "frame": {
+        "type": "claim_granted",
+        "tag": "P-1001",
+        "session_id": "s-00000000-0000-4000-8000-000000000001"
+      }
+    },
+    {
+      "name": "claim_denied",
+      "frame": {
+        "type": "claim_denied",
+        "tag": "P-1001",
+        "holder": "s-00000000-0000-4000-8000-000000000002",
+        "expires_at": 1700000300
+      }
+    },
+    {
+      "name": "claim_released_voluntary",
+      "frame": {
+        "type": "claim_released",
+        "tag": "P-1001",
+        "reason": "released"
+      }
+    },
+    {
+      "name": "claim_released_expired",
+      "frame": {
+        "type": "claim_released",
+        "tag": "P-1001",
+        "reason": "expired"
+      }
+    },
+    {
+      "name": "op_applied",
+      "frame": {
+        "type": "op_applied",
+        "op_id": "op-r1-1",
+        "revision": 6,
+        "changes": [
+          {
+            "kind": "set_property",
+            "object_ref": "P-1001",
+            "field": "设计压力",
+            "value": "1.6MPa"
+          }
+        ]
+      }
+    },
+    {
+      "name": "peer_joined",
+      "frame": {
+        "type": "peer_joined",
+        "session_id": "s-00000000-0000-4000-8000-000000000002",
+        "user_id": "u2",
+        "display_name": "李工"
+      }
+    },
+    {
+      "name": "peer_left",
+      "frame": {
+        "type": "peer_left",
+        "session_id": "s-00000000-0000-4000-8000-000000000002",
+        "user_id": "u2",
+        "display_name": "李工"
+      }
+    },
+    {
+      "name": "readonly_downgrade",
+      "frame": {
+        "type": "readonly_downgrade",
+        "reason": "图纸已切换为只读",
+        "holder": null,
+        "level": "state",
+        "code": "PERM_DENIED_STATE"
+      }
+    },
+    {
+      "name": "conflict",
+      "frame": {
+        "type": "conflict",
+        "conflict_id": "c-00000000-0000-4000-8000-000000000001",
+        "object_ref": "P-1001",
+        "field": "设计压力",
+        "value_a": "1.6MPa",
+        "value_b": "2.5MPa",
+        "op_ids": ["op-r1-1", "op-r2-1"]
+      }
+    }
+  ],
+  "error_codes": [
+    { "code": "SESSION_UNKNOWN", "frame": { "type": "error", "code": "SESSION_UNKNOWN", "message": "会话不存在" } },
+    { "code": "SESSION_EXPIRED", "frame": { "type": "error", "code": "SESSION_EXPIRED", "message": "会话已失效" } },
+    { "code": "SESSION_TAKEN_OVER", "frame": { "type": "error", "code": "SESSION_TAKEN_OVER", "message": "会话已被新连接接管" } },
+    { "code": "HELLO_REQUIRED", "frame": { "type": "error", "code": "HELLO_REQUIRED", "message": "请先发送 hello 建立会话" } },
+    { "code": "UNKNOWN_MESSAGE_TYPE", "frame": { "type": "error", "code": "UNKNOWN_MESSAGE_TYPE", "message": "未知消息类型" } },
+    { "code": "INVALID_MESSAGE", "frame": { "type": "error", "code": "INVALID_MESSAGE", "message": "消息无法解析" } },
+    { "code": "UNKNOWN_DRAWING", "frame": { "type": "error", "code": "UNKNOWN_DRAWING", "message": "图纸未登记" } },
+    { "code": "UNKNOWN_USER", "frame": { "type": "error", "code": "UNKNOWN_USER", "message": "用户未登记" } },
+    { "code": "PERM_DENIED_ROLE", "frame": { "type": "error", "code": "PERM_DENIED_ROLE", "message": "角色不允许编辑图纸", "level": "role", "op_id": "op-1", "rejected": true } },
+    { "code": "PERM_DENIED_PBS", "frame": { "type": "error", "code": "PERM_DENIED_PBS", "message": "PBS 节点未授权", "level": "pbs", "op_id": "op-1", "rejected": true } },
+    { "code": "PERM_DENIED_STATE", "frame": { "type": "error", "code": "PERM_DENIED_STATE", "message": "图纸状态不允许编辑", "level": "state", "holder": "s-1", "op_id": "op-1", "rejected": true } },
+    { "code": "PERM_UNKNOWN_SUBJECT", "frame": { "type": "error", "code": "PERM_UNKNOWN_SUBJECT", "message": "主体不存在" } },
+    { "code": "PERM_UNKNOWN_OPERATION", "frame": { "type": "error", "code": "PERM_UNKNOWN_OPERATION", "message": "操作非法" } },
+    { "code": "PERM_INVALID_STATE", "frame": { "type": "error", "code": "PERM_INVALID_STATE", "message": "图纸状态非法" } },
+    { "code": "OBJECT_REFERENCED", "frame": { "type": "error", "code": "OBJECT_REFERENCED", "message": "对象仍被引用，不能删除", "op_id": "op-2", "rejected": true } },
+    { "code": "REPO_MISMATCH", "frame": { "type": "error", "code": "REPO_MISMATCH", "message": "协同库标识不一致" } },
+    { "code": "REVISION_AHEAD", "frame": { "type": "error", "code": "REVISION_AHEAD", "message": "文件修订领先于服务器" } },
+    { "code": "REPLAY_GAP", "frame": { "type": "error", "code": "REPLAY_GAP", "message": "操作日志不完整，无法补发" } },
+    { "code": "NOT_ALIGNED", "frame": { "type": "error", "code": "NOT_ALIGNED", "message": "连接未对齐", "op_id": "op-3" } },
+    { "code": "STORE_UNAVAILABLE", "frame": { "type": "error", "code": "STORE_UNAVAILABLE", "message": "服务器数据库不可用" } },
+    { "code": "OBJECT_DELETED", "frame": { "type": "error", "code": "OBJECT_DELETED", "message": "对象已被删除", "op_id": "op-4", "rejected": true } },
+    { "code": "INVALID_STATE_TRANSITION", "frame": { "type": "error", "code": "INVALID_STATE_TRANSITION", "message": "状态值非法" } },
+    { "code": "STALE_BASE_REVISION", "frame": { "type": "error", "code": "STALE_BASE_REVISION", "message": "基线已过期", "op_id": "op-5", "rejected": true } },
+    { "code": "CONFLICT_UNKNOWN", "frame": { "type": "error", "code": "CONFLICT_UNKNOWN", "message": "没有这个冲突条目" } },
+    { "code": "CONFLICT_ALREADY_RESOLVED", "frame": { "type": "error", "code": "CONFLICT_ALREADY_RESOLVED", "message": "冲突条目已裁决" } },
+    { "code": "OP_SUPERSEDED", "frame": { "type": "error", "code": "OP_SUPERSEDED", "message": "修改让位", "op_id": "op-6" } },
+    { "code": "CLAIM_HELD", "frame": { "type": "error", "code": "CLAIM_HELD", "message": "位号已被其他会话占用", "holder": "s-2", "op_id": "op-7", "rejected": true } },
+    { "code": "DUPLICATE_INFLOW_CONNECTOR", "frame": { "type": "error", "code": "DUPLICATE_INFLOW_CONNECTOR", "message": "同一线号同图已有流入连接符", "op_id": "op-8", "rejected": true } },
+    { "code": "PROTOCOL_VERSION_UNSUPPORTED", "frame": { "type": "error", "code": "PROTOCOL_VERSION_UNSUPPORTED", "message": "协议版本不兼容，需要升级" } }
+  ],
+  "legacy_client": [
+    {
+      "name": "legacy_hello_v1",
+      "frame": {
+        "type": "hello",
+        "user_id": "u1",
+        "drawing_id": "PID-1101",
+        "mode": "协同编辑"
+      }
+    },
+    {
+      "name": "legacy_attempt_minimal",
+      "frame": {
+        "type": "attempt",
+        "session_id": "s-1"
+      }
+    }
+  ],
+  "legacy_server": [
+    {
+      "name": "legacy_welcome_v1",
+      "frame": {
+        "type": "welcome",
+        "session_id": "s-1",
+        "base_revision": 0,
+        "peers": [],
+        "claims": []
+      }
+    },
+    {
+      "name": "legacy_error_minimal",
+      "frame": {
+        "type": "error",
+        "code": "INVALID_MESSAGE",
+        "message": "bad"
+      }
+    },
+    {
+      "name": "legacy_readonly_downgrade_v1",
+      "frame": {
+        "type": "readonly_downgrade",
+        "reason": "图纸已切换为只读",
+        "holder": "s-1"
+      }
+    },
+    {
+      "name": "legacy_conflict_v1",
+      "frame": {
+        "type": "conflict",
+        "conflict_id": "c-1",
+        "object_ref": "P-1001",
+        "field": "设计压力",
+        "value_a": "1.6MPa",
+        "value_b": "2.5MPa"
+      }
+    },
+    {
+      "name": "legacy_claim_granted_v1",
+      "frame": {
+        "type": "claim_granted",
+        "tag": "P-1001",
+        "session_id": "s-1"
+      }
+    }
+  ]
+}
