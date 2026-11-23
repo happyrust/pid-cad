@@ -70,6 +70,7 @@ pub(super) fn read(text: &str) -> Reading {
             repo_id,
             replay_from,
             align_refused,
+            ..
         } => {
             // Said first: the session is then taken as not aligned, or at
             // the revision its drawing has with what it missed still to

@@ -1446,6 +1446,7 @@ mod tests {
                 existing_tags: Vec::new(),
 
                 repo_id: None,
+                protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             },
             now,
         )
@@ -1542,6 +1543,7 @@ mod tests {
                 existing_tags: Vec::new(),
 
                 repo_id: None,
+                protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             },
             now,
         )
@@ -1940,6 +1942,7 @@ mod tests {
             existing_tags: vec!["V-1002".into(), "P-2001".into()],
 
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         };
         crate::ws::handle_message(&state, &mut conn, hello, ocs_collab::now_unix()).await;
 
@@ -2208,6 +2211,7 @@ mod tests {
                 existing_tags: Vec::new(),
 
                 repo_id: None,
+                protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             };
             ws::handle_message(&state, &mut conn, hello, 1_700_000_000).await;
             sessions.push(conn);
@@ -2548,6 +2552,7 @@ mod tests {
             existing_tags: Vec::new(),
 
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         };
         crate::ws::handle_message(state, &mut conn, hello, now).await;
         assert!(conn.session.is_some(), "{user_id} is let in");

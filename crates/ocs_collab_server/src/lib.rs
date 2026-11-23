@@ -72,6 +72,10 @@ pub struct AppState {
     /// replaces it; without one it is generated fresh each start, so an
     /// in-memory run never stands in for a previous one.
     pub repo_id: String,
+    /// Minimum wire protocol version accepted by this server.
+    pub min_protocol_version: u32,
+    /// Current wire protocol version spoken by this server.
+    pub protocol_version: u32,
     pub version: &'static str,
 }
 
@@ -101,6 +105,8 @@ impl AppState {
             holders: Arc::new(Mutex::new(HashMap::new())),
             tie_window: Duration::ZERO,
             repo_id,
+            min_protocol_version: ocs_collab::protocol::MIN_PROTOCOL_VERSION,
+            protocol_version: ocs_collab::protocol::PROTOCOL_VERSION,
             version: env!("CARGO_PKG_VERSION"),
         }
     }

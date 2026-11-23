@@ -1640,6 +1640,7 @@ mod tests {
             since: None,
             existing_tags: Vec::new(),
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -1791,6 +1792,7 @@ mod tests {
             since: None,
             existing_tags: Vec::new(),
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         };
         let welcome = handle_message(&state, &mut late, hello, T0).await;
         let told = welcome
@@ -2374,6 +2376,7 @@ mod tests {
             since,
             existing_tags: Vec::new(),
             repo_id: Some(state.repo_id.clone()),
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         };
         handle_message(state, &mut conn, hello, T0 + 5).await
     }
@@ -2467,6 +2470,7 @@ mod tests {
             since: Some(0),
             existing_tags: Vec::new(),
             repo_id: Some(state.repo_id.clone()),
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         };
         let reactions = handle_message(&state, &mut late, hello, T0 + 5).await;
         let (_, _, replayed) = welcomed(&reactions);
@@ -2621,6 +2625,7 @@ mod tests {
             since: None,
             existing_tags: Vec::new(),
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");
@@ -2909,6 +2914,7 @@ mod tests {
             since,
             existing_tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             repo_id: Some(state.repo_id.clone()),
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         };
         handle_message(state, &mut conn, hello, T0).await;
         assert!(conn.session.is_some(), "hello must open a session");

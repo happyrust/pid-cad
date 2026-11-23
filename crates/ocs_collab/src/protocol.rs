@@ -7,6 +7,17 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Current wire protocol version spoken by this build.
+pub const PROTOCOL_VERSION: u32 = 2;
+/// Oldest wire protocol version this build remains compatible with (v1 = clients
+/// predating the explicit `protocol_version` field).
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
+
+/// Whether a client speaking `version` can collaborate with this server.
+pub fn is_protocol_compatible(version: u32) -> bool {
+    (MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version)
+}
+
 /// A message sent by a client to the server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -47,6 +58,10 @@ pub enum ClientMessage {
         /// somebody else places. Absent when there is none to list.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         existing_tags: Vec<String>,
+        /// Wire protocol version spoken by the client. Absent from older
+        /// clients (treated as version 1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_version: Option<u32>,
     },
     /// Keep-alive, expected every 15 s.
     Heartbeat { session_id: String },
@@ -107,6 +122,9 @@ pub enum ServerMessage {
         /// replayed, and every `op` it sends is answered `NOT_ALIGNED`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align_refused: Option<AlignRefusal>,
+        /// Wire protocol version spoken by the server. Absent from older servers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_version: Option<u32>,
     },
     /// Structured failure. `level` names the first denying tier when the
     /// failure came out of the permission chain.
@@ -270,6 +288,9 @@ pub mod codes {
     /// (`VAL-PIPE-024`, `VAL-CROSS-009`). The editor refuses it before it is
     /// made; the server refuses the second of two made at once.
     pub const DUPLICATE_INFLOW_CONNECTOR: &str = "DUPLICATE_INFLOW_CONNECTOR";
+    /// The client's `hello.protocol_version` is outside the range this server
+    /// supports; no editing session is established.
+    pub const PROTOCOL_VERSION_UNSUPPORTED: &str = "PROTOCOL_VERSION_UNSUPPORTED";
 }
 
 /// Reasons carried by [`ServerMessage::ClaimReleased`].
@@ -364,6 +385,7 @@ mod tests {
             repo_id: "r-test".into(),
             replay_from: None,
             align_refused: None,
+            protocol_version: Some(PROTOCOL_VERSION),
         };
         let value: Value = serde_json::to_value(&msg).expect("welcome must serialize");
         assert_eq!(value["type"], "welcome");
@@ -422,6 +444,7 @@ mod tests {
             repo_id: "r-test".into(),
             replay_from: Some(6),
             align_refused: None,
+            protocol_version: None,
         };
         let value: Value = serde_json::to_value(&replaying).expect("serialize");
         assert_eq!(value["replay_from"], 6);
@@ -624,5 +647,43 @@ mod tests {
         assert_eq!(value["type"], "claim_denied");
         assert_eq!(value["holder"], "s-1");
         assert_eq!(value["expires_at"], 1_700_000_300_i64);
+    }
+
+    #[test]
+    fn protocol_version_negotiation_round_trips_and_is_backward_compatible() {
+        // Legacy hello without protocol_version still parses.
+        let legacy: ClientMessage = serde_json::from_str(
+            r#"{"type":"hello","user_id":"u1","drawing_id":"PID-1101","mode":"协同编辑"}"#,
+        )
+        .expect("legacy hello");
+        let legacy_json = serde_json::to_value(&legacy).expect("serialize");
+        assert!(legacy_json.get("protocol_version").is_none());
+
+        // New hello with protocol_version preserves it on round-trip.
+        let modern: ClientMessage = serde_json::from_str(
+            r#"{"type":"hello","user_id":"u1","drawing_id":"PID-1101","mode":"协同编辑","protocol_version":2}"#,
+        )
+        .expect("modern hello");
+        let modern_json = serde_json::to_value(&modern).expect("serialize");
+        assert_eq!(modern_json["protocol_version"], 2);
+
+        // Welcome with protocol_version preserves it; legacy welcome without it still parses.
+        let legacy_welcome: ServerMessage = serde_json::from_str(
+            r#"{"type":"welcome","session_id":"s-1","base_revision":0,"peers":[],"claims":[]}"#,
+        )
+        .expect("legacy welcome");
+        assert!(serde_json::to_value(&legacy_welcome)
+            .expect("serialize")
+            .get("protocol_version")
+            .is_none());
+
+        let modern_welcome: ServerMessage = serde_json::from_str(
+            r#"{"type":"welcome","session_id":"s-1","base_revision":0,"peers":[],"claims":[],"protocol_version":2}"#,
+        )
+        .expect("modern welcome");
+        assert_eq!(
+            serde_json::to_value(&modern_welcome).expect("serialize")["protocol_version"],
+            2
+        );
     }
 }

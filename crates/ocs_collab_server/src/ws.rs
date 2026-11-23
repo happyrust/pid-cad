@@ -544,6 +544,7 @@ pub async fn handle_message(
         since,
         existing_tags,
         repo_id,
+        protocol_version,
         ..
     } = &message
     {
@@ -564,6 +565,23 @@ pub async fn handle_message(
                 codes::INVALID_MESSAGE,
                 "会话已完成 hello，重复的 hello 被拒绝",
             ))];
+        }
+        let client_proto = protocol_version.unwrap_or(1);
+        if client_proto < state.min_protocol_version || client_proto > state.protocol_version {
+            println!(
+                "[ocs_collab_server] 拒绝 hello user={user_id} drawing={drawing_id}：协议版本不兼容 client={client_proto} server={}..={}",
+                state.min_protocol_version, state.protocol_version
+            );
+            return vec![
+                Reaction::Send(error_message(
+                    codes::PROTOCOL_VERSION_UNSUPPORTED,
+                    &format!(
+                        "协议版本不兼容，需要升级：客户端版本 {client_proto}，服务器支持 {}..={}（当前 {}）",
+                        state.min_protocol_version, state.protocol_version, state.protocol_version
+                    ),
+                )),
+                Reaction::Close,
+            ];
         }
         return hello(
             state,
@@ -932,6 +950,7 @@ async fn hello(
                         code: code.to_owned(),
                         message,
                     }),
+                    protocol_version: Some(state.protocol_version),
                 }),
             ]);
             // What the session missed, each op as the room first heard it,
@@ -1771,6 +1790,7 @@ mod tests {
             since: None,
             existing_tags: Vec::new(),
             repo_id: None,
+            protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
         }
     }
 
@@ -2486,6 +2506,7 @@ mod tests {
                 since: None,
                 existing_tags: Vec::new(),
                 repo_id: None,
+                protocol_version: Some(ocs_collab::protocol::PROTOCOL_VERSION),
             },
             T0 + 2,
         )
@@ -3200,5 +3221,98 @@ mod tests {
         let hello_now = hello_back(&state, "u3", Some(1));
         let reactions = handle_message(&state, &mut current, hello_now, T0 + 3).await;
         assert_eq!(refused(&reactions), None, "{reactions:?}");
+    }
+
+    #[tokio::test]
+    async fn protocol_version_negotiation_accepts_compatible_and_rejects_incompatible() {
+        let state = state();
+
+        // 1. Legacy client without protocol_version is treated as v1 (compatible) and welcomed with server protocol_version.
+        let mut legacy_conn = conn();
+        let legacy_hello: ClientMessage = serde_json::from_str(
+            r#"{"type":"hello","user_id":"u1","drawing_id":"PID-1101","mode":"协同编辑"}"#,
+        )
+        .expect("legacy hello");
+        let reactions = handle_message(&state, &mut legacy_conn, legacy_hello, T0).await;
+        let welcome_val = reactions
+            .iter()
+            .find_map(|r| match r {
+                Reaction::Send(m @ ServerMessage::Welcome { .. }) => serde_json::to_value(m).ok(),
+                _ => None,
+            })
+            .expect("legacy client gets welcome");
+        assert!(
+            welcome_val["protocol_version"].as_u64().unwrap_or(0) >= 2,
+            "welcome must report server protocol_version: {welcome_val}"
+        );
+        assert!(legacy_conn.session.is_some());
+
+        // 1b. Mixed-version collaboration: legacy v1 client and v2 client both edit and claim normally.
+        let legacy_sid = session_id(&legacy_conn);
+        let mut modern_conn = conn();
+        let modern_hello = hello("u_modern", "协同编辑", "");
+        let modern_reactions = handle_message(&state, &mut modern_conn, modern_hello, T0).await;
+        assert!(modern_conn.session.is_some(), "{modern_reactions:?}");
+        let claim_reactions = handle_message(
+            &state,
+            &mut legacy_conn,
+            ClientMessage::Claim {
+                session_id: legacy_sid.clone(),
+                tag: "P-1001".into(),
+            },
+            T0 + 1,
+        )
+        .await;
+        assert!(
+            claim_reactions
+                .iter()
+                .any(|r| matches!(r, Reaction::Send(ServerMessage::ClaimGranted { tag, .. }) | Reaction::Publish { message: ServerMessage::ClaimGranted { tag, .. }, .. } if tag == "P-1001")),
+            "legacy v1 client claim must succeed: {claim_reactions:?}"
+        );
+        let op_reactions = handle_message(
+            &state,
+            &mut legacy_conn,
+            ClientMessage::Op {
+                session_id: legacy_sid,
+                base_revision: 0,
+                op_id: "op-v1-1".into(),
+                payload: json!({"kind": "set_property", "object_ref": "P-1001", "field": "设计压力", "value": "1.6MPa"}),
+            },
+            T0 + 2,
+        )
+        .await;
+        assert!(
+            op_reactions.iter().any(|r| matches!(
+                r,
+                Reaction::Published { message: ServerMessage::OpApplied { revision: 1, .. }, .. }
+            )),
+            "legacy v1 client op must succeed: {op_reactions:?}"
+        );
+
+        // 2. Incompatible client (version 99 or 0) is rejected with PROTOCOL_VERSION_UNSUPPORTED and no session created.
+        for bad_ver in [0_u32, 99_u32] {
+            let mut bad_conn = conn();
+            let raw = format!(
+                r#"{{"type":"hello","user_id":"u2","drawing_id":"PID-1101","mode":"协同编辑","protocol_version":{bad_ver}}}"#
+            );
+            let bad_hello: ClientMessage = serde_json::from_str(&raw).expect("bad hello");
+            let reactions = handle_message(&state, &mut bad_conn, bad_hello, T0 + 1).await;
+            assert!(
+                bad_conn.session.is_none(),
+                "incompatible client v{bad_ver} must not establish a session"
+            );
+            let err = reactions
+                .iter()
+                .find_map(|r| match r {
+                    Reaction::Send(ServerMessage::Error { code, message, .. }) => {
+                        Some((code.clone(), message.clone()))
+                    }
+                    _ => None,
+                })
+                .expect("incompatible client gets error");
+            assert_eq!(err.0, "PROTOCOL_VERSION_UNSUPPORTED");
+            assert!(err.1.contains("升级"), "message should mention upgrade: {}", err.1);
+            assert!(reactions.iter().any(|r| matches!(r, Reaction::Close)));
+        }
     }
 }
