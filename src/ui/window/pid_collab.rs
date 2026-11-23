@@ -668,9 +668,11 @@ pub fn view<'a>(view: &'a CollabView, width: f32, chrome: Chrome) -> Element<'a,
         body = body.push(
             container(
                 column![
-                    text(format!("本图与房间已不一致，本地修改不再提交。{reason}"))
-                        .size(10)
-                        .style(notice),
+                    text(format!(
+                        "本图与服务器上的图纸已不一致，本地修改不再提交。{reason}"
+                    ))
+                    .size(10)
+                    .style(notice),
                     text(GET_LATEST_HINT).size(10).style(notice),
                 ]
                 .spacing(2),
@@ -1164,7 +1166,7 @@ mod tests {
         };
         let mut ui = draw(&view_model);
         let said = drawn(&mut ui, &line.text()).expect("the line is drawn");
-        let note = drawn(&mut ui, "本图与房间已不一致，本地修改不再提交。")
+        let note = drawn(&mut ui, "本图与服务器上的图纸已不一致，本地修改不再提交。")
             .expect("the note is drawn, without the reason");
         let hint = drawn(&mut ui, GET_LATEST_HINT).expect("what to do is drawn");
         assert!(

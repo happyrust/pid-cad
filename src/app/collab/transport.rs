@@ -1339,7 +1339,7 @@ fn run_session(
                     link.stop_requested() || sender.is_closed()
                 });
                 return Ok(Ended::Closed(
-                    "本图与房间对不上，正在不带对齐位置重新加入会话".to_owned(),
+                    "本图与服务器上的图纸对不上，正在不带对齐位置重新加入会话".to_owned(),
                 ));
             }
             // The drawing came, and it was taken off the room it was in:

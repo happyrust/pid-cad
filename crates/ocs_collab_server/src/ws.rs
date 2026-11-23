@@ -745,12 +745,12 @@ async fn request_write(state: &AppState, session: &Session) -> Vec<Reaction> {
 /// for a connection that aligns.
 fn not_aligned(session: &Session, op_id: String) -> Vec<Reaction> {
     println!(
-        "[ocs_collab_server] 入站 op session={} user={} op_id={op_id} -> NOT_ALIGNED（这次连接没有对上房间，不裁决、不入日志、不广播）",
+        "[ocs_collab_server] 入站 op session={} user={} op_id={op_id} -> NOT_ALIGNED（这次连接没有对上服务器上的图纸，不裁决、不入日志、不广播）",
         session.session_id, session.user_id
     );
     vec![Reaction::Send(ServerMessage::Error {
         code: codes::NOT_ALIGNED.to_owned(),
-        message: "这次连接与房间对不上：这一步没有提交，需要取得最新图纸".to_owned(),
+        message: "这次连接与服务器上的图纸对不上：这一步没有提交，需要取得最新图纸".to_owned(),
         level: None,
         holder: None,
         op_id: Some(op_id),

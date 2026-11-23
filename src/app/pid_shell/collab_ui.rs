@@ -745,46 +745,49 @@ pub(crate) fn inspector_collab_section<'a>(
 
     // Divergence / Realign box (#78)
     if let Some(reason) = state.mismatch() {
-        content = content.push(
-            PosReport::owned(
-                part("collab-diverged"),
-                container(
-                    column![
-                        text(format!("与房间不一致：{reason}"))
-                            .size(11)
-                            .font(ui(theme, font::Weight::Normal))
-                            .color(ColorToken::Danger.color(theme)),
-                        PosReport::owned(
-                            part("collab-realign"),
-                            button(
-                                container(
-                                    text("重新对齐")
-                                        .size(11)
-                                        .font(ui(theme, font::Weight::Medium))
-                                        .color(ColorToken::TextOnDanger.color(theme)),
-                                )
-                                .padding([4, 10])
-                                .style(move |_| filled(theme, ColorToken::Danger, None, 3.0)),
+        content = content.push(PosReport::owned(
+            part("collab-diverged"),
+            container(
+                column![
+                    text(format!("与服务器上的图纸不一致：{reason}"))
+                        .size(11)
+                        .font(ui(theme, font::Weight::Normal))
+                        .color(ColorToken::Danger.color(theme)),
+                    PosReport::owned(
+                        part("collab-realign"),
+                        button(
+                            container(
+                                text("重新对齐")
+                                    .size(11)
+                                    .font(ui(theme, font::Weight::Medium))
+                                    .color(ColorToken::TextOnDanger.color(theme)),
                             )
-                            .padding(0)
-                            .style(bare)
-                            .on_press(PidCollabMsg::Realign.message()),
-                        ),
-                    ]
-                    .spacing(6),
+                            .padding([4, 10])
+                            .style(move |_| filled(
+                                theme,
+                                ColorToken::Danger,
+                                None,
+                                3.0
+                            )),
+                        )
+                        .padding(0)
+                        .style(bare)
+                        .on_press(PidCollabMsg::Realign.message()),
+                    ),
+                ]
+                .spacing(6),
+            )
+            .width(Fill)
+            .padding(8)
+            .style(move |_| {
+                filled(
+                    theme,
+                    ColorToken::DangerSoft,
+                    Some(ColorToken::Danger),
+                    NumberToken::RadiusSm.value(theme),
                 )
-                .width(Fill)
-                .padding(8)
-                .style(move |_| {
-                    filled(
-                        theme,
-                        ColorToken::DangerSoft,
-                        Some(ColorToken::Danger),
-                        NumberToken::RadiusSm.value(theme),
-                    )
-                }),
-            ),
-        );
+            }),
+        ));
     }
 
     // Queue / Replay / Rejections summary (#53)

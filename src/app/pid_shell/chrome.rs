@@ -142,7 +142,7 @@ impl SyncStatus {
                 format!("已连接 · 修订 {revision} · 已排队 {queued} 步")
             }
             SyncStatus::ReadOnly { revision } => format!("已连接 · 只读 · 修订 {revision}"),
-            SyncStatus::Diverged => "与房间不一致，已停止同步".to_owned(),
+            SyncStatus::Diverged => "与服务器上的图纸不一致，已停止同步".to_owned(),
         }
     }
 

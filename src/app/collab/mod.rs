@@ -410,7 +410,7 @@ impl NotAligned {
     /// What the command line says of it.
     pub(super) fn said(&self) -> String {
         format!(
-            "协同：这次连接与房间对不上（{}：{}），本地修改照常排队、不提交；需要取得最新图纸",
+            "协同：这次连接与服务器上的图纸对不上（{}：{}），本地修改照常排队、不提交；需要取得最新图纸",
             self.code, self.message
         )
     }
@@ -1013,7 +1013,7 @@ impl State {
     /// where the two parted.
     pub(super) fn mark_diverged(&mut self, code: &'static str, reason: String) {
         if self.diverged.is_none() {
-            self.last_error = Some(format!("已与房间不一致：{reason}"));
+            self.last_error = Some(format!("已与服务器上的图纸不一致：{reason}"));
             self.diverged = Some(reason);
             self.diverged_as = Some((code, ocs_collab::ids::now_unix()));
         }
@@ -1099,7 +1099,10 @@ impl State {
 
     /// Take this connection as not aligned with the room, for `reason`.
     fn hold_apart(&mut self, reason: NotAligned) {
-        self.last_error = Some(format!("本次连接与房间对不上：{}", reason.reason()));
+        self.last_error = Some(format!(
+            "本次连接与服务器上的图纸对不上：{}",
+            reason.reason()
+        ));
         self.catching_up = None;
         for entry in &mut self.outbox {
             entry.sent = false;
@@ -1509,7 +1512,7 @@ impl State {
                         Some(NotAligned {
                             code: ocs_collab::protocol::codes::REPLAY_GAP.to_owned(),
                             message: format!(
-                                "房间已从修订 {} 走到 {base_revision}，其间的变更没有补发给这份图纸",
+                                "服务器已从修订 {} 走到 {base_revision}，其间的变更没有补发给这份图纸",
                                 self.base_revision
                             ),
                         })
@@ -2342,7 +2345,7 @@ impl State {
         // being the server's own number.
         if let Some(reason) = &self.diverged {
             return Err(format!(
-                "本图与房间已不一致（{reason}），已停止提交变更，需要重新同步"
+                "本图与服务器上的图纸已不一致（{reason}），已停止提交变更，需要重新同步"
             ));
         }
         if self.session_id.is_none() && !self.had_session {
@@ -2423,7 +2426,7 @@ impl State {
         // held apart sends none.
         if let Some(apart) = &self.not_aligned {
             return Err(format!(
-                "这次连接与房间对不上：{}，不申请占用",
+                "这次连接与服务器上的图纸对不上：{}，不申请占用",
                 apart.reason()
             ));
         }

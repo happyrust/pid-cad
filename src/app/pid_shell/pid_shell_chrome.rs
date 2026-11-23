@@ -364,7 +364,7 @@ fn the_sync_status_says_what_the_session_is() {
     check(
         &app,
         SyncStatus::Diverged,
-        "与房间不一致，已停止同步",
+        "与服务器上的图纸不一致，已停止同步",
         ColorToken::Danger,
     );
 

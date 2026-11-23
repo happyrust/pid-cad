@@ -666,7 +666,7 @@ impl OpenCADStudio {
             }
             Ok(super::Queued::NotAligned(waiting)) => {
                 self.command_line.push_warning(&format!(
-                    "协同：这次连接与房间对不上，这一步已排队（共 {waiting} 步），不提交"
+                    "协同：这次连接与服务器上的图纸对不上，这一步已排队（共 {waiting} 步），不提交"
                 ));
             }
             Err(reason) => {
@@ -788,17 +788,20 @@ impl OpenCADStudio {
                 self.collab.mark_diverged(
                     ROLLBACK_FAILED,
                     format!(
-                        "服务器拒绝了「{}」（{code}），而它之后有一次撤销或重做把它和房间已有的步骤一起动了，\
+                        "服务器拒绝了「{}」（{code}），而它之后有一次撤销或重做把它和服务器上已有的步骤一起动了，\
                          无法只撤回被拒的部分",
                         entry.label
                     ),
                 );
-                (Vec::new(), "无法只撤回被拒的部分，本图与房间已不一致")
+                (
+                    Vec::new(),
+                    "无法只撤回被拒的部分，本图与服务器上的图纸已不一致",
+                )
             }
             // This person took it back (or put it on again) themselves
             // meanwhile: the drawing is what the room has already.
             Some(_) if account.in_effect.is_empty() => {
-                (Vec::new(), "本图已经是房间里的样子，不需要再动")
+                (Vec::new(), "本图已经是服务器上的样子，不需要再动")
             }
             Some(i) => match self.take_back_steps(i, entry.on, &account.in_effect) {
                 Some(steps) => (steps, if entry.on { "已撤回" } else { "已恢复" }),
@@ -812,7 +815,7 @@ impl OpenCADStudio {
                     );
                     (
                         Vec::new(),
-                        "这一步已不在撤销栈里，无法撤回，本图与房间已不一致",
+                        "这一步已不在撤销栈里，无法撤回，本图与服务器上的图纸已不一致",
                     )
                 }
             },
@@ -952,7 +955,7 @@ impl OpenCADStudio {
                                 entry.label, first.label
                             ),
                         );
-                        "已不在撤销栈里，无法撤回，本图与房间已不一致".to_owned()
+                        "已不在撤销栈里，无法撤回，本图与服务器上的图纸已不一致".to_owned()
                     }
                 };
                 let steps_moved = moved.as_ref().map_or(0, Vec::len);
@@ -1054,14 +1057,14 @@ impl OpenCADStudio {
     ) -> (String, bool) {
         if yields {
             return (
-                "让位：房间里的样子已经在本图里，不需要再动".to_owned(),
+                "让位：服务器上的样子已经在本图里，不需要再动".to_owned(),
                 true,
             );
         }
         match self.write_inverse(i, entry) {
             Ok((_, 0)) => ("已按反向修改撤回".to_owned(), true),
             Ok((0, passed)) => (
-                format!("{passed} 项已被别人改过，保留别人的，本图已是房间的样子"),
+                format!("{passed} 项已被别人改过，保留别人的，本图已是服务器上的样子"),
                 true,
             ),
             Ok((_, passed)) => (
@@ -1076,7 +1079,10 @@ impl OpenCADStudio {
                         entry.label
                     ),
                 );
-                (format!("{why}，无法撤回，本图与房间已不一致"), false)
+                (
+                    format!("{why}，无法撤回，本图与服务器上的图纸已不一致"),
+                    false,
+                )
             }
         }
     }
@@ -1443,7 +1449,7 @@ impl OpenCADStudio {
                 self.report_apply_error(reason);
                 if first {
                     self.command_line.push_warning(
-                        "协同：本图与房间已不一致，此后的本地修改不再提交；\
+                        "协同：本图与服务器上的图纸已不一致，此后的本地修改不再提交；\
                          请取得最新图纸后重新打开",
                     );
                 }
