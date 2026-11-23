@@ -34,7 +34,10 @@ use crate::ui::style::pid_tokens::{
     ColorToken, NumberToken, PidTheme, CLAIM_COLOR_TOKEN, CONNECTOR_PIPE_COLOR_TOKEN,
     CONNECTOR_SIGNAL_COLOR_TOKEN,
 };
-use crate::ui::window::pid_collab::{PidCollabMsg, NO_OTHERS_LABEL};
+use crate::ui::window::pid_collab::{
+    PidCollabMsg, NO_OTHERS_LABEL, NO_PENDING_CONFLICTS, NO_PENDING_CONFLICTS_WHY,
+    OPEN_CONFLICT_LIST,
+};
 use crate::ui::wrap_bar::PosReport;
 
 /// The five role names defined by `REQ-COLL-011` (#52).
@@ -963,6 +966,15 @@ pub(crate) fn inspector_collab_section<'a>(
                             .size(10)
                             .font(mono(theme, font::Weight::Normal))
                             .color(ColorToken::TextMuted.color(theme)),
+                        button(
+                            text(OPEN_CONFLICT_LIST)
+                                .size(10.5)
+                                .font(ui(theme, font::Weight::Medium))
+                                .color(ColorToken::Accent.color(theme)),
+                        )
+                        .padding([2, 8])
+                        .style(bare)
+                        .on_press(PidCollabMsg::OpenConflictList.message()),
                     ]
                     .spacing(2),
                 )
@@ -979,6 +991,51 @@ pub(crate) fn inspector_collab_section<'a>(
             ));
         }
         content = content.push(PosReport::owned(part("collab-conflicts"), ccol));
+    }
+    if let Some(items) = &app.pid_collab_conflict_list {
+        let mut list = column![text("冲突列表")
+            .size(11)
+            .font(ui(theme, font::Weight::Semibold))
+            .color(ColorToken::TextPrimary.color(theme))]
+        .spacing(4);
+        if items.is_empty() {
+            list = list.push(
+                text(NO_PENDING_CONFLICTS)
+                    .size(11)
+                    .color(ColorToken::TextPrimary.color(theme)),
+            );
+            list = list.push(
+                text(NO_PENDING_CONFLICTS_WHY)
+                    .size(10.5)
+                    .color(ColorToken::TextMuted.color(theme)),
+            );
+        }
+        for item in items {
+            let mut lines = column![].spacing(1);
+            for line in item.lines() {
+                lines = lines.push(
+                    text(line)
+                        .size(10.5)
+                        .font(mono(theme, font::Weight::Normal))
+                        .color(ColorToken::TextPrimary.color(theme)),
+                );
+            }
+            list = list.push(PosReport::owned(
+                part(&format!("collab-conflict-list-{}", item.conflict_id)),
+                lines,
+            ));
+        }
+        list = list.push(
+            button(
+                text("返回")
+                    .size(10.5)
+                    .color(ColorToken::TextSecondary.color(theme)),
+            )
+            .padding(0)
+            .style(bare)
+            .on_press(PidCollabMsg::CloseConflictList.message()),
+        );
+        content = content.push(PosReport::owned(part("collab-conflict-list"), list));
     }
 
     // Tag claims list + Claim / Release action for selected object (#54, #55)
@@ -1820,6 +1877,110 @@ mod tests {
         }
         app.collab.clear_unpaired_connector("L-1001", "pipe_out");
         assert!(app.collab.unpaired_connectors.is_empty());
+    }
+
+    /// #81: 去裁决 fills the collab-zone list from the query stand-in, and
+    /// the rows sit one under the other.
+    #[test]
+    fn conflict_list_from_the_query_stand_in_is_drawn_row_by_row() {
+        use crate::app::collab::query::{CollabQueryClient, ConflictListItem, QueryError};
+        use crate::ui::window::pid_collab::PidCollabMsg;
+
+        #[derive(Debug)]
+        struct StandIn {
+            items: Vec<ConflictListItem>,
+        }
+
+        impl CollabQueryClient for StandIn {
+            fn fetch_pending_conflicts(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Vec<PendingConflict>, QueryError> {
+                Ok(Vec::new())
+            }
+            fn fetch_conflict_list(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Vec<ConflictListItem>, QueryError> {
+                Ok(self.items.clone())
+            }
+            fn resolve_conflict(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Option<&str>,
+            ) -> Result<crate::app::collab::query::ResolveOutcome, QueryError> {
+                Err(QueryError::transport("stub"))
+            }
+            fn fetch_audit(
+                &self,
+                _: &str,
+                _: &crate::app::collab::query::AuditFilter,
+            ) -> Result<Vec<crate::app::collab::query::AuditItem>, QueryError> {
+                Ok(Vec::new())
+            }
+            fn fetch_drawing_objects(
+                &self,
+                _: &str,
+                drawing_id: &str,
+                _: Option<&str>,
+            ) -> Result<crate::app::collab::query::DrawingObjectsPage, QueryError> {
+                Ok(crate::app::collab::query::DrawingObjectsPage {
+                    drawing_id: drawing_id.to_owned(),
+                    revision: 0,
+                    items: Vec::new(),
+                })
+            }
+        }
+
+        let item = ConflictListItem {
+            conflict_id: "c-7f3a".to_owned(),
+            object_ref: "P-1001".to_owned(),
+            field: "设计压力".to_owned(),
+            value_a: "1.6MPa".to_owned(),
+            value_b: "2.5MPa".to_owned(),
+            base_revision: 4,
+            status: "待裁决".to_owned(),
+        };
+        let second = ConflictListItem {
+            conflict_id: "c-8a01".to_owned(),
+            object_ref: "L-1001".to_owned(),
+            field: "topology".to_owned(),
+            value_a: "from A".to_owned(),
+            value_b: "from B".to_owned(),
+            base_revision: 4,
+            status: "待裁决".to_owned(),
+        };
+        let mut app = pid_app();
+        app.collab.server_url = "ws://127.0.0.1:3240/ws".into();
+        app.collab.drawing_id = "PID-1101".into();
+        app.collab.set_query_client(std::sync::Arc::new(StandIn {
+            items: vec![item.clone(), second.clone()],
+        }));
+        let _ = app.on_pid_collab(PidCollabMsg::OpenConflictList);
+        assert_eq!(
+            app.pid_collab_conflict_list.as_deref(),
+            Some([item.clone(), second.clone()].as_slice())
+        );
+
+        let element = inspector_collab_section(&app, None).expect("the collab zone");
+        let mut ui = iced_test::simulator::Simulator::with_size(
+            iced::Settings::default(),
+            (280.0, 900.0),
+            element,
+        );
+        let find = |ui: &mut iced_test::simulator::Simulator<'_, AppMessage>, label: &str| {
+            ui.find(label).ok().and_then(|found| found.visible_bounds())
+        };
+        let first = find(&mut ui, "c-7f3a").expect("first list row");
+        let next = find(&mut ui, "c-8a01").expect("second list row");
+        assert!(first.y < next.y, "{first:?} {next:?}");
+        assert!(find(&mut ui, "基线修订号 4").is_some());
+        assert!(find(&mut ui, "状态 待裁决").is_some());
     }
 
     #[test]

@@ -220,6 +220,56 @@ pub struct DrawingObjectsPage {
     pub items: Vec<ObjectSnapshot>,
 }
 
+/// One pending conflict as `GET /conflicts` returns it (#81). The fields are
+/// the ones the list shows, and they are the server row's own fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictListItem {
+    pub conflict_id: String,
+    pub object_ref: String,
+    pub field: String,
+    pub value_a: String,
+    pub value_b: String,
+    pub base_revision: i64,
+    pub status: String,
+}
+
+impl ConflictListItem {
+    /// The six facts the list draws, one line each, in the order a reader
+    /// meets them.
+    pub fn lines(&self) -> [String; 6] {
+        [
+            self.conflict_id.clone(),
+            format!("对象 {}", self.object_ref),
+            format!("字段 {}", self.field),
+            format!("甲方 {} · 乙方 {}", self.value_a, self.value_b),
+            format!("基线修订号 {}", self.base_revision),
+            format!("状态 {}", self.status),
+        ]
+    }
+}
+
+/// The `items` of a `GET /conflicts` body. A row that omits one of the six
+/// fields is left out: the list does not invent a value the query did not
+/// return.
+pub fn conflict_list_from_query_body(body: &Value) -> Vec<ConflictListItem> {
+    body["items"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(conflict_list_item).collect())
+        .unwrap_or_default()
+}
+
+fn conflict_list_item(row: &Value) -> Option<ConflictListItem> {
+    Some(ConflictListItem {
+        conflict_id: row["conflict_id"].as_str()?.to_owned(),
+        object_ref: row["object_ref"].as_str()?.to_owned(),
+        field: row["field"].as_str()?.to_owned(),
+        value_a: row["value_a"].as_str()?.to_owned(),
+        value_b: row["value_b"].as_str()?.to_owned(),
+        base_revision: row["base_revision"].as_i64()?,
+        status: row["status"].as_str()?.to_owned(),
+    })
+}
+
 /// Pluggable synchronous query interface for the collaboration server.
 ///
 /// The desktop build uses [`HttpQueryClient`]; tests can inject a stub via
@@ -231,6 +281,19 @@ pub trait CollabQueryClient: Send + Sync + fmt::Debug {
         base_url: &str,
         drawing_id: &str,
     ) -> Result<Vec<PendingConflict>, QueryError>;
+
+    /// The pending rows as the conflict list shows them (#81). The default
+    /// keeps a stub that only implements [`Self::fetch_pending_conflicts`]
+    /// working: those rows have no baseline or status, so they are not a
+    /// list. The HTTP client reads the query itself.
+    fn fetch_conflict_list(
+        &self,
+        base_url: &str,
+        drawing_id: &str,
+    ) -> Result<Vec<ConflictListItem>, QueryError> {
+        let _ = (base_url, drawing_id);
+        Ok(Vec::new())
+    }
 
     fn resolve_conflict(
         &self,
@@ -315,6 +378,24 @@ pub fn encode_query_component(raw: &str) -> String {
     out
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn get_pending_conflicts_body(base_url: &str, drawing_id: &str) -> Result<Value, QueryError> {
+    let url = format!(
+        "{base_url}/conflicts?drawing_id={}&status={}",
+        encode_query_component(drawing_id),
+        encode_query_component("待裁决"),
+    );
+    let resp = http_agent()
+        .get(&url)
+        .call()
+        .map_err(|e| QueryError::transport(format!("查询待裁决冲突失败：{e}")))?;
+    let (status, body) = read_json_response(resp)?;
+    if !(200..300).contains(&status) {
+        return Err(QueryError::from_json(status, &body));
+    }
+    Ok(body)
+}
+
 impl CollabQueryClient for HttpQueryClient {
     fn fetch_pending_conflicts(
         &self,
@@ -328,36 +409,36 @@ impl CollabQueryClient for HttpQueryClient {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let url = format!(
-                "{base_url}/conflicts?drawing_id={}&status={}",
-                encode_query_component(drawing_id),
-                encode_query_component("待裁决"),
-            );
-            let resp = http_agent()
-                .get(&url)
-                .call()
-                .map_err(|e| QueryError::transport(format!("查询待裁决冲突失败：{e}")))?;
-            let (status, body) = read_json_response(resp)?;
-            if !(200..300).contains(&status) {
-                return Err(QueryError::from_json(status, &body));
-            }
-            let items = body["items"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|row| {
-                            Some(PendingConflict {
-                                conflict_id: row["conflict_id"].as_str()?.to_owned(),
-                                object_ref: row["object_ref"].as_str()?.to_owned(),
-                                field: row["field"].as_str()?.to_owned(),
-                                value_a: row["value_a"].as_str()?.to_owned(),
-                                value_b: row["value_b"].as_str()?.to_owned(),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok(items)
+            Ok(
+                conflict_list_from_query_body(&get_pending_conflicts_body(base_url, drawing_id)?)
+                    .into_iter()
+                    .map(|item| PendingConflict {
+                        conflict_id: item.conflict_id,
+                        object_ref: item.object_ref,
+                        field: item.field,
+                        value_a: item.value_a,
+                        value_b: item.value_b,
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    fn fetch_conflict_list(
+        &self,
+        base_url: &str,
+        drawing_id: &str,
+    ) -> Result<Vec<ConflictListItem>, QueryError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (base_url, drawing_id);
+            Err(QueryError::transport("网页版不支持协同查询"))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Ok(conflict_list_from_query_body(&get_pending_conflicts_body(
+                base_url, drawing_id,
+            )?))
         }
     }
 
@@ -567,6 +648,8 @@ impl CollabQueryClient for HttpQueryClient {
 #[derive(Clone, Debug)]
 pub enum CollabQueryReply {
     PendingConflicts(Result<Vec<PendingConflict>, QueryError>),
+    /// The list opened from a conflict row (#81).
+    ConflictList(Result<Vec<ConflictListItem>, QueryError>),
     FieldWriters {
         tag: String,
         result: Result<DrawingObjectsPage, QueryError>,
@@ -597,6 +680,41 @@ mod tests {
             "https://collab.example.com"
         );
         assert!(http_base_from_ws("").is_err());
+    }
+
+    /// #81: each field of the list is that field of the server row.
+    #[test]
+    fn conflict_list_from_the_query_matches_each_server_field() {
+        let body = serde_json::json!({
+            "items": [{
+                "conflict_id": "c-7f3a",
+                "drawing_id": "PID-1101",
+                "object_ref": "P-1001",
+                "field": "设计压力",
+                "value_a": "1.6MPa",
+                "value_b": "2.5MPa",
+                "base_revision": 4,
+                "status": "待裁决",
+                "resolution": null
+            }],
+            "total": 1
+        });
+        let items = conflict_list_from_query_body(&body);
+        assert_eq!(items.len(), 1);
+        let row = &body["items"][0];
+        let item = &items[0];
+        assert_eq!(item.conflict_id, row["conflict_id"].as_str().unwrap());
+        assert_eq!(item.object_ref, row["object_ref"].as_str().unwrap());
+        assert_eq!(item.field, row["field"].as_str().unwrap());
+        assert_eq!(item.value_a, row["value_a"].as_str().unwrap());
+        assert_eq!(item.value_b, row["value_b"].as_str().unwrap());
+        assert_eq!(item.base_revision, row["base_revision"].as_i64().unwrap());
+        assert_eq!(item.status, row["status"].as_str().unwrap());
+        assert!(conflict_list_from_query_body(&serde_json::json!({
+            "items": [{"conflict_id": "c-1", "object_ref": "P-1001", "field": "设计压力",
+                "value_a": "1.6MPa", "value_b": "2.5MPa"}]
+        }))
+        .is_empty());
     }
 
     #[test]

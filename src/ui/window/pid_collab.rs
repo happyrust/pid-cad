@@ -24,6 +24,7 @@
 //! state of its own beyond which section is expanded, so a reconnect or a
 //! server push is reflected on the next frame without any sync code.
 
+use crate::app::collab::query::ConflictListItem;
 use crate::app::Message;
 use crate::ui::dock::{Chrome, PanelId};
 use iced::widget::{button, column, container, row, scrollable, text, Space};
@@ -40,6 +41,10 @@ pub enum PidCollabMsg {
     ToggleClaims,
     /// Realign this session with the room after divergence (#78).
     Realign,
+    /// Open the read-only conflict list (#81).
+    OpenConflictList,
+    /// Leave that list.
+    CloseConflictList,
 }
 
 impl PidCollabMsg {
@@ -162,6 +167,21 @@ pub fn conflict_bounds_id(conflict_id: &str) -> String {
 /// The header of the conflicts section. Drawn only while there is an entry.
 pub const CONFLICTS_LABEL: &str = "待裁决冲突";
 
+/// The button on a conflict row that opens the list (#81).
+pub const OPEN_CONFLICT_LIST: &str = "去裁决";
+
+/// What the list says when the query returned no pending conflict.
+pub const NO_PENDING_CONFLICTS: &str = "没有待裁决的冲突";
+
+/// And when one would appear. The tie window is off unless the server is
+/// started with one, so a default room never makes an entry.
+pub const NO_PENDING_CONFLICTS_WHY: &str = "只有两个人在同一基线修订上把同一字段写成不同的值，并且服务器开了并列窗口，才会出现。并列窗口缺省关闭。";
+
+/// `PosReport` id of one row of the list.
+pub fn conflict_list_bounds_id(conflict_id: &str) -> String {
+    format!("pid-collab-conflict-list-{conflict_id}")
+}
+
 /// `PosReport` id of the line under the banner that says what has not
 /// reached the room. Reported only while there is something to say, so its
 /// presence is the state.
@@ -235,6 +255,9 @@ pub struct CollabView {
     pub peers: Vec<PeerRow>,
     /// The conflict entries nobody has ruled on yet, oldest first.
     pub conflicts: Vec<ConflictRow>,
+    /// The list opened from 去裁决. `None` until it is opened; `Some` empty
+    /// is the list with nothing pending (#81).
+    pub conflict_list: Option<Vec<ConflictListItem>>,
     pub claims: Vec<ClaimRow>,
     pub last_message: Option<String>,
     /// The claims section is expanded.
@@ -345,11 +368,41 @@ fn conflict_row<'a>(entry: &'a ConflictRow) -> Element<'a, Message> {
     let lines = column![
         text(entry.subject()).size(11).style(notice),
         text(entry.values()).size(10).style(muted),
+        button(text(OPEN_CONFLICT_LIST).size(10))
+            .on_press(PidCollabMsg::OpenConflictList.message())
+            .style(button::secondary)
+            .padding([2, 6]),
     ]
     .spacing(1);
     let reported =
         crate::ui::wrap_bar::PosReport::owned(conflict_bounds_id(&entry.conflict_id), lines);
     container(reported).width(Fill).padding([2, 2]).into()
+}
+
+/// The read-only list: one row per query item, or the empty sentence.
+fn conflict_list_body<'a>(items: &'a [ConflictListItem]) -> Element<'a, Message> {
+    let mut rows = column![].spacing(4);
+    if items.is_empty() {
+        rows = rows.push(text(NO_PENDING_CONFLICTS).size(11));
+        rows = rows.push(text(NO_PENDING_CONFLICTS_WHY).size(10).style(muted));
+    }
+    for item in items {
+        let mut lines = column![].spacing(1);
+        for line in item.lines() {
+            lines = lines.push(text(line).size(10));
+        }
+        rows = rows.push(crate::ui::wrap_bar::PosReport::owned(
+            conflict_list_bounds_id(&item.conflict_id),
+            lines,
+        ));
+    }
+    rows = rows.push(
+        button(text("返回").size(10))
+            .on_press(PidCollabMsg::CloseConflictList.message())
+            .style(button::text)
+            .padding([2, 0]),
+    );
+    rows.into()
 }
 
 /// One claim row: the tag, its holder, and the claim/release button.
@@ -493,6 +546,10 @@ pub fn view<'a>(view: &'a CollabView, width: f32, chrome: Chrome) -> Element<'a,
             rows = rows.push(conflict_row(entry));
         }
         body = body.push(rows);
+    }
+    if let Some(items) = &view.conflict_list {
+        body = body.push(section_header("冲突列表", items.len()));
+        body = body.push(conflict_list_body(items));
     }
 
     // ── Claims ───────────────────────────────────────────────────────────
@@ -750,6 +807,64 @@ mod tests {
         };
         let mut ui = draw(&none);
         assert_eq!(drawn(&mut ui, CONFLICTS_LABEL), None);
+        let mut with_row = draw(&view_model);
+        assert!(drawn(&mut with_row, OPEN_CONFLICT_LIST).is_some());
+    }
+
+    /// #81: the list opened from 去裁决 shows each query field, in order,
+    /// and a second entry sits below the first. An empty query says so.
+    #[test]
+    fn conflict_list_rows_are_drawn_in_order() {
+        let first = ConflictListItem {
+            conflict_id: "c-7f3a".to_owned(),
+            object_ref: "P-1001".to_owned(),
+            field: "设计压力".to_owned(),
+            value_a: "1.6MPa".to_owned(),
+            value_b: "2.5MPa".to_owned(),
+            base_revision: 4,
+            status: "待裁决".to_owned(),
+        };
+        let second = ConflictListItem {
+            conflict_id: "c-8a01".to_owned(),
+            object_ref: "L-1001".to_owned(),
+            field: "topology".to_owned(),
+            value_a: "from A".to_owned(),
+            value_b: "from B".to_owned(),
+            base_revision: 4,
+            status: "待裁决".to_owned(),
+        };
+        let view_model = CollabView {
+            peers: vec![peer("u1", true, false)],
+            conflict_list: Some(vec![first.clone(), second.clone()]),
+            ..view_with(Vec::new())
+        };
+        let mut ui = iced_test::simulator::Simulator::with_size(
+            iced::Settings::default(),
+            (WIDTH, 720.0),
+            view(&view_model, WIDTH, Chrome::default()),
+        );
+        let mut previous = 0.0;
+        for line in first.lines() {
+            let bounds = drawn(&mut ui, &line).unwrap_or_else(|| panic!("missing {line}"));
+            assert!(
+                bounds.y >= previous,
+                "{line} at {bounds:?} is above the previous line"
+            );
+            previous = bounds.y;
+        }
+        let first_row = drawn(&mut ui, "c-7f3a").expect("first row");
+        let second_row = drawn(&mut ui, "c-8a01").expect("second row");
+        assert!(first_row.y < second_row.y, "{first_row:?} {second_row:?}");
+
+        let empty = CollabView {
+            peers: vec![peer("u1", true, false)],
+            conflict_list: Some(Vec::new()),
+            ..view_with(Vec::new())
+        };
+        let mut ui = draw(&empty);
+        let title = drawn(&mut ui, NO_PENDING_CONFLICTS).expect("the empty list says so");
+        let why = drawn(&mut ui, NO_PENDING_CONFLICTS_WHY).expect("and when one appears");
+        assert!(title.y < why.y, "{title:?} {why:?}");
     }
 
     /// A session whose drawing is short of the room's changes says so in the

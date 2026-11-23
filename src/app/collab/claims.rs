@@ -122,6 +122,7 @@ impl OpenCADStudio {
             claims,
             last_message: state.last_claim_message.clone(),
             claims_open: self.pid_collab_claims_open,
+            conflict_list: self.pid_collab_conflict_list.clone(),
         };
     }
 
@@ -410,7 +411,46 @@ impl OpenCADStudio {
                 self.realign_collab_session();
                 Task::none()
             }
+            PidCollabMsg::OpenConflictList => self.fetch_conflict_list(),
+            PidCollabMsg::CloseConflictList => {
+                self.pid_collab_conflict_list = None;
+                self.refresh_collab_view();
+                Task::none()
+            }
         }
+    }
+
+    /// Open the conflict list from the query, not from the frames already
+    /// on screen (#81). A stub client answers here; a live server answers
+    /// on a background thread.
+    pub(in crate::app) fn fetch_conflict_list(&mut self) -> Task<Message> {
+        let Ok(base_url) = super::query::http_base_from_ws(&self.collab.server_url) else {
+            return Task::none();
+        };
+        let drawing_id = self.collab.drawing_id.trim().to_owned();
+        if drawing_id.is_empty() {
+            return Task::none();
+        }
+        let client = self.collab.query_client();
+        if self.collab.query_client.is_some() {
+            let result = client.fetch_conflict_list(&base_url, &drawing_id);
+            self.on_collab_query_done(super::query::CollabQueryReply::ConflictList(result));
+            return Task::none();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let result = client.fetch_conflict_list(&base_url, &drawing_id);
+                let _ = tx.send(super::query::CollabQueryReply::ConflictList(result));
+            });
+            Task::future(rx).then(|res| match res {
+                Ok(reply) => Task::done(Message::CollabQueryDone(reply)),
+                Err(_) => Task::none(),
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        Task::none()
     }
 
     /// Fetch pending conflicts for the active drawing from the server (#40).
@@ -555,6 +595,16 @@ impl OpenCADStudio {
         match reply {
             super::query::CollabQueryReply::PendingConflicts(Ok(items)) => {
                 self.collab.replace_pending_conflicts(items);
+                self.refresh_collab_view();
+            }
+            super::query::CollabQueryReply::ConflictList(Ok(items)) => {
+                self.pid_collab_conflict_list = Some(items);
+                self.collab.last_query_error = None;
+                self.refresh_collab_view();
+            }
+            super::query::CollabQueryReply::ConflictList(Err(err)) => {
+                self.pid_collab_conflict_list = None;
+                self.collab.last_query_error = Some(err.describe());
                 self.refresh_collab_view();
             }
             super::query::CollabQueryReply::PendingConflicts(Err(err)) => {
