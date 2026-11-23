@@ -130,6 +130,12 @@ impl OpenCADStudio {
             setup_server,
             setup_user,
             setup_drawing,
+            notices: state
+                .toasts
+                .session()
+                .iter()
+                .map(|notice| notice.line())
+                .collect(),
         };
     }
 

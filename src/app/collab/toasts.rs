@@ -76,11 +76,33 @@ pub fn now_ms() -> u64 {
     }
 }
 
+/// One notice kept for the whole editing session (#101). The toast overlay
+/// drops it when it expires; this does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionNotice {
+    pub message: String,
+    pub created_at_ms: u64,
+}
+
+impl SessionNotice {
+    /// Clock time of the notice, `HH:MM:SS` UTC.
+    pub fn time(&self) -> String {
+        format_hms((self.created_at_ms / 1000) as i64)
+    }
+
+    /// The line the list draws: the time, then the same text as the toast.
+    pub fn line(&self) -> String {
+        format!("{} {}", self.time(), self.message)
+    }
+}
+
 /// Ordered queue of active collaboration toasts, oldest first.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ToastQueue {
     next_id: u64,
     items: Vec<CollabToast>,
+    /// Every notice of this editing session, newest first (#101).
+    log: Vec<SessionNotice>,
 }
 
 impl ToastQueue {
@@ -97,13 +119,21 @@ impl ToastQueue {
         created_at_ms: u64,
         ttl_ms: u64,
     ) -> u64 {
+        let message = message.into();
         self.prune_at(created_at_ms);
         self.next_id = self.next_id.saturating_add(1);
         let id = self.next_id;
+        self.log.insert(
+            0,
+            SessionNotice {
+                message: message.clone(),
+                created_at_ms,
+            },
+        );
         self.items.push(CollabToast {
             id,
             kind,
-            message: message.into(),
+            message,
             created_at_ms,
             ttl_ms,
         });
@@ -150,6 +180,11 @@ impl ToastQueue {
         &self.items
     }
 
+    /// Every notice of this editing session, newest first (#101).
+    pub fn session(&self) -> &[SessionNotice] {
+        &self.log
+    }
+
     /// Active toasts serialized for `GET /api/v1/collab/status`.
     pub fn to_json(&self) -> Vec<Value> {
         self.items.iter().map(CollabToast::to_json).collect()
@@ -186,6 +221,18 @@ pub fn avatar_glyph(user_id: &str, display_name: &str) -> String {
         .next()
         .map(|ch| ch.to_uppercase().collect())
         .unwrap_or_else(|| "?".to_owned())
+}
+
+/// Format a Unix timestamp in seconds as `HH:MM:SS` (UTC).
+pub fn format_hms(unix_secs: i64) -> String {
+    if unix_secs < 0 {
+        return "--:--:--".to_owned();
+    }
+    let secs_in_day = unix_secs.rem_euclid(86_400);
+    let hour = secs_in_day / 3_600;
+    let minute = (secs_in_day % 3_600) / 60;
+    let second = secs_in_day % 60;
+    format!("{hour:02}:{minute:02}:{second:02}")
 }
 
 /// Format a Unix timestamp in seconds as `HH:MM` (UTC+8 / local-offset aware;
@@ -266,5 +313,24 @@ mod tests {
         assert_eq!(format_hhmm(0), "--:--");
         assert_eq!(format_hhmm(15 * 3600 + 30 * 60), "15:30");
         assert_eq!(format_timestamp(1_700_000_000), "2023-11-14 22:13:20");
+    }
+
+    /// #101: the session list keeps every notice, newest first, after the
+    /// toast itself has expired. The line is the clock time and the same text.
+    #[test]
+    fn a_session_keeps_every_notice_after_the_toast_expires() {
+        let mut q = ToastQueue::default();
+        q.push_at(ToastKind::Info, "第一条", 0, 1);
+        q.push_at(ToastKind::Warning, "第二条", 5_000, 5_000);
+        q.push_at(ToastKind::Error, "第三条", 6_000, 5_000);
+        assert!(
+            q.items().iter().all(|toast| toast.message != "第一条"),
+            "the expired toast leaves the overlay"
+        );
+        assert_eq!(q.session().len(), 3);
+        assert_eq!(q.session()[0].line(), "00:00:06 第三条");
+        assert_eq!(q.session()[1].line(), "00:00:05 第二条");
+        assert_eq!(q.session()[2].line(), "00:00:00 第一条");
+        assert_eq!(q.session()[0].message, "第三条");
     }
 }

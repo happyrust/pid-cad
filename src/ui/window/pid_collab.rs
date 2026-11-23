@@ -327,6 +327,9 @@ pub struct CollabView {
     pub setup_user: String,
     /// The drawing id typed beside [`Self::setup_server`].
     pub setup_drawing: String,
+    /// This editing session's notices, newest first (#101). Each line is
+    /// the clock time and the same text as the toast.
+    pub notices: Vec<String>,
 }
 
 impl CollabView {
@@ -641,6 +644,12 @@ pub fn view<'a>(view: &'a CollabView, width: f32, chrome: Chrome) -> Element<'a,
     let banner = container(banner_items).width(Fill).padding([2, 2]);
 
     let mut body = column![banner].spacing(6);
+    if !view.notices.is_empty() {
+        body = body.push(text("本次消息").size(12));
+        for line in &view.notices {
+            body = body.push(text(line.clone()).size(10).style(muted));
+        }
+    }
     // What has not reached the room, right under the banner (§5.6).
     if let Some(line) = &view.sync {
         let style: fn(&Theme) -> iced::widget::text::Style = match line {
@@ -1147,6 +1156,30 @@ mod tests {
         };
         let mut ui = draw(&synced);
         assert_eq!(drawn(&mut ui, &line.text()), None);
+    }
+
+    /// #101: several notices of this session, newest first, each with its time
+    /// and the same text the toast used.
+    #[test]
+    fn the_session_message_list_is_newest_first() {
+        let view_model = CollabView {
+            notices: vec![
+                "00:00:03 第三条".to_owned(),
+                "00:00:02 第二条".to_owned(),
+                "00:00:01 第一条".to_owned(),
+            ],
+            ..view_with(Vec::new())
+        };
+        let mut ui = draw(&view_model);
+        let newest = drawn(&mut ui, "00:00:03 第三条").expect("the newest notice");
+        let middle = drawn(&mut ui, "00:00:02 第二条").expect("the middle notice");
+        let oldest = drawn(&mut ui, "00:00:01 第一条").expect("the oldest notice");
+        assert!(
+            newest.y < middle.y && middle.y < oldest.y,
+            "{newest:?} {middle:?} {oldest:?}"
+        );
+        assert_eq!(view_model.notices.len(), 3);
+        assert_eq!(drawn(&mut ui, "00:00:04"), None);
     }
 
     /// A drawing apart from the room: the line gives the reason, and the

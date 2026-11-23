@@ -743,6 +743,24 @@ pub(crate) fn inspector_collab_section<'a>(
     ]
     .spacing(10);
 
+    // Every notice of this editing session, newest first (#101).
+    if !state.toasts.session().is_empty() {
+        content = content.push(
+            text("本次消息")
+                .size(11)
+                .font(ui(theme, font::Weight::Semibold))
+                .color(ColorToken::TextMuted.color(theme)),
+        );
+        for notice in state.toasts.session() {
+            content = content.push(
+                text(notice.line())
+                    .size(11)
+                    .font(ui(theme, font::Weight::Normal))
+                    .color(ColorToken::TextSecondary.color(theme)),
+            );
+        }
+    }
+
     // Divergence / Realign box (#78)
     if let Some(reason) = state.mismatch() {
         content = content.push(PosReport::owned(
