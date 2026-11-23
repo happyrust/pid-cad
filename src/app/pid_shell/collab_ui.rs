@@ -993,12 +993,30 @@ pub(crate) fn inspector_collab_section<'a>(
         content = content.push(PosReport::owned(part("collab-conflicts"), ccol));
     }
     if let Some(items) = &app.pid_collab_conflict_list {
-        let mut list = column![text("冲突列表")
-            .size(11)
-            .font(ui(theme, font::Weight::Semibold))
-            .color(ColorToken::TextPrimary.color(theme))]
+        let mut list = column![
+            text("冲突列表")
+                .size(11)
+                .font(ui(theme, font::Weight::Semibold))
+                .color(ColorToken::TextPrimary.color(theme)),
+            button(
+                text("待裁决")
+                    .size(10.5)
+                    .color(ColorToken::Accent.color(theme)),
+            )
+            .padding([2, 6])
+            .style(bare)
+            .on_press(PidCollabMsg::ShowPendingConflicts.message()),
+            button(
+                text("已裁决")
+                    .size(10.5)
+                    .color(ColorToken::Accent.color(theme)),
+            )
+            .padding([2, 6])
+            .style(bare)
+            .on_press(PidCollabMsg::ShowRuledConflicts.message()),
+        ]
         .spacing(4);
-        if items.is_empty() {
+        if items.is_empty() && !app.pid_collab_list_ruled {
             list = list.push(
                 text(NO_PENDING_CONFLICTS)
                     .size(11)
@@ -1012,7 +1030,12 @@ pub(crate) fn inspector_collab_section<'a>(
         }
         for item in items {
             let mut lines = column![].spacing(1);
-            for line in item.lines() {
+            for line in item.lines().into_iter().chain(
+                (item.status == "已裁决")
+                    .then(|| item.ruling_lines())
+                    .into_iter()
+                    .flatten(),
+            ) {
                 lines = lines.push(
                     text(line)
                         .size(10.5)
@@ -2003,6 +2026,9 @@ mod tests {
             value_b: "2.5MPa".to_owned(),
             base_revision: 4,
             status: "待裁决".to_owned(),
+            resolution: String::new(),
+            resolved_value: String::new(),
+            resolved_by: String::new(),
         };
         let second = ConflictListItem {
             conflict_id: "c-8a01".to_owned(),
@@ -2012,6 +2038,9 @@ mod tests {
             value_b: "from B".to_owned(),
             base_revision: 4,
             status: "待裁决".to_owned(),
+            resolution: String::new(),
+            resolved_value: String::new(),
+            resolved_by: String::new(),
         };
         let mut app = pid_app();
         app.collab.server_url = "ws://127.0.0.1:3240/ws".into();
@@ -2126,6 +2155,9 @@ mod tests {
             value_b: "2.5MPa".to_owned(),
             base_revision: 4,
             status: "待裁决".to_owned(),
+            resolution: String::new(),
+            resolved_value: String::new(),
+            resolved_by: String::new(),
         };
         let rec = Arc::new(Rec {
             item: item.clone(),
@@ -2211,6 +2243,9 @@ mod tests {
                         value_b: "2.5MPa".to_owned(),
                         base_revision: 4,
                         status: "待裁决".to_owned(),
+                        resolution: String::new(),
+                        resolved_value: String::new(),
+                        resolved_by: String::new(),
                     })
                     .collect())
             }
@@ -2343,6 +2378,127 @@ mod tests {
             .as_deref()
             .is_some_and(|text| text.contains("角色不允许")));
         assert!(still(&app, "c-perm"));
+    }
+
+    /// #84: 待裁决 and 已裁决 are two pages of the same list. A ruled row
+    /// shows the result, the value that stood, and who ruled, matching the query.
+    #[test]
+    fn the_conflict_list_switches_to_the_ruled_page() {
+        use crate::app::collab::query::{CollabQueryClient, ConflictListItem, QueryError};
+        use crate::ui::window::pid_collab::PidCollabMsg;
+
+        #[derive(Debug)]
+        struct Pages;
+
+        fn row(status: &str) -> ConflictListItem {
+            ConflictListItem {
+                conflict_id: "c-7f3a".into(),
+                object_ref: "P-1001".into(),
+                field: "设计压力".into(),
+                value_a: "1.6MPa".into(),
+                value_b: "2.5MPa".into(),
+                base_revision: 4,
+                status: status.into(),
+                resolution: if status == "已裁决" {
+                    "采用乙方".into()
+                } else {
+                    String::new()
+                },
+                resolved_value: if status == "已裁决" {
+                    "2.5MPa".into()
+                } else {
+                    String::new()
+                },
+                resolved_by: if status == "已裁决" {
+                    "u4".into()
+                } else {
+                    String::new()
+                },
+            }
+        }
+
+        impl CollabQueryClient for Pages {
+            fn fetch_pending_conflicts(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Vec<PendingConflict>, QueryError> {
+                Ok(Vec::new())
+            }
+            fn fetch_conflict_list(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Vec<ConflictListItem>, QueryError> {
+                Ok(vec![row("待裁决")])
+            }
+            fn fetch_ruled_conflicts(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Vec<ConflictListItem>, QueryError> {
+                Ok(vec![row("已裁决")])
+            }
+            fn resolve_conflict(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Option<&str>,
+            ) -> Result<crate::app::collab::query::ResolveOutcome, QueryError> {
+                Err(QueryError::transport("stub"))
+            }
+            fn fetch_audit(
+                &self,
+                _: &str,
+                _: &crate::app::collab::query::AuditFilter,
+            ) -> Result<Vec<crate::app::collab::query::AuditItem>, QueryError> {
+                Ok(Vec::new())
+            }
+            fn fetch_drawing_objects(
+                &self,
+                _: &str,
+                drawing_id: &str,
+                _: Option<&str>,
+            ) -> Result<crate::app::collab::query::DrawingObjectsPage, QueryError> {
+                Ok(crate::app::collab::query::DrawingObjectsPage {
+                    drawing_id: drawing_id.into(),
+                    revision: 0,
+                    items: Vec::new(),
+                })
+            }
+        }
+
+        let mut app = pid_app();
+        app.collab.server_url = "ws://127.0.0.1:3240/ws".into();
+        app.collab.drawing_id = "PID-1101".into();
+        app.collab.set_query_client(std::sync::Arc::new(Pages));
+        let _ = app.on_pid_collab(PidCollabMsg::OpenConflictList);
+        assert_eq!(
+            app.pid_collab_conflict_list.as_ref().unwrap()[0].status,
+            "待裁决"
+        );
+        let _ = app.on_pid_collab(PidCollabMsg::ShowRuledConflicts);
+        let shown = &app.pid_collab_conflict_list.as_ref().unwrap()[0];
+        assert_eq!(shown.resolution, "采用乙方");
+        assert_eq!(shown.resolved_value, "2.5MPa");
+        assert_eq!(shown.resolved_by, "u4");
+        let element = inspector_collab_section(&app, None).unwrap();
+        let mut ui = iced_test::simulator::Simulator::with_size(
+            iced::Settings::default(),
+            (280.0, 900.0),
+            element,
+        );
+        for label in ["结果 采用乙方", "最终值 2.5MPa", "裁决人 u4"] {
+            assert!(ui.find(label).is_ok(), "missing {label}");
+        }
+        drop(ui);
+        let _ = app.on_pid_collab(PidCollabMsg::ShowPendingConflicts);
+        assert_eq!(
+            app.pid_collab_conflict_list.as_ref().unwrap()[0].status,
+            "待裁决"
+        );
     }
 
     #[test]

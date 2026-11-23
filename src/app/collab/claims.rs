@@ -412,7 +412,9 @@ impl OpenCADStudio {
                 self.realign_collab_session();
                 Task::none()
             }
-            PidCollabMsg::OpenConflictList => self.fetch_conflict_list(),
+            PidCollabMsg::OpenConflictList => self.fetch_conflict_list(false),
+            PidCollabMsg::ShowPendingConflicts => self.fetch_conflict_list(false),
+            PidCollabMsg::ShowRuledConflicts => self.fetch_conflict_list(true),
             PidCollabMsg::CloseConflictList => {
                 self.pid_collab_conflict_list = None;
                 self.pid_collab_ruling = None;
@@ -467,7 +469,8 @@ impl OpenCADStudio {
     /// Open the conflict list from the query, not from the frames already
     /// on screen (#81). A stub client answers here; a live server answers
     /// on a background thread.
-    pub(in crate::app) fn fetch_conflict_list(&mut self) -> Task<Message> {
+    pub(in crate::app) fn fetch_conflict_list(&mut self, ruled: bool) -> Task<Message> {
+        self.pid_collab_list_ruled = ruled;
         let Ok(base_url) = super::query::http_base_from_ws(&self.collab.server_url) else {
             return Task::none();
         };
@@ -477,7 +480,11 @@ impl OpenCADStudio {
         }
         let client = self.collab.query_client();
         if self.collab.query_client.is_some() {
-            let result = client.fetch_conflict_list(&base_url, &drawing_id);
+            let result = if ruled {
+                client.fetch_ruled_conflicts(&base_url, &drawing_id)
+            } else {
+                client.fetch_conflict_list(&base_url, &drawing_id)
+            };
             self.on_collab_query_done(super::query::CollabQueryReply::ConflictList(result));
             return Task::none();
         }
@@ -485,7 +492,11 @@ impl OpenCADStudio {
         {
             let (tx, rx) = iced::futures::channel::oneshot::channel();
             std::thread::spawn(move || {
-                let result = client.fetch_conflict_list(&base_url, &drawing_id);
+                let result = if ruled {
+                    client.fetch_ruled_conflicts(&base_url, &drawing_id)
+                } else {
+                    client.fetch_conflict_list(&base_url, &drawing_id)
+                };
                 let _ = tx.send(super::query::CollabQueryReply::ConflictList(result));
             });
             Task::future(rx).then(|res| match res {

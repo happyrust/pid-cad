@@ -1641,6 +1641,8 @@ pub(super) struct OpenCADStudio {
     pub(crate) pid_collab_conflict_list: Option<Vec<crate::app::collab::query::ConflictListItem>>,
     /// The ruling dialog, while a list row is open in it (#82).
     pub(crate) pid_collab_ruling: Option<crate::ui::window::pid_collab::RulingDialog>,
+    /// The conflict list is showing 已裁决 rather than 待裁决 (#84).
+    pub(crate) pid_collab_list_ruled: bool,
     /// Whether the first live session has already brought the panel out. One
     /// shot, so closing it by hand is not undone by the next reconnect.
     pub(crate) pid_collab_auto_shown: bool,
@@ -6822,6 +6824,7 @@ impl OpenCADStudio {
             pid_collab_claims_open: true,
             pid_collab_conflict_list: None,
             pid_collab_ruling: None,
+            pid_collab_list_ruled: false,
             pid_collab_auto_shown: false,
             show_pid_verify: false,
             pid_verify_ui: Default::default(),

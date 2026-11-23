@@ -53,6 +53,10 @@ pub enum PidCollabMsg {
     ConfirmRuling,
     /// The value typed for 人工改值 (#83).
     SetRulingManual(String),
+    /// The pending page of the conflict list (#84).
+    ShowPendingConflicts,
+    /// The ruled page of the same list (#84).
+    ShowRuledConflicts,
 }
 
 impl PidCollabMsg {
@@ -407,6 +411,19 @@ fn conflict_row<'a>(entry: &'a ConflictRow) -> Element<'a, Message> {
 /// The read-only list: one row per query item, or the empty sentence.
 fn conflict_list_body<'a>(items: &'a [ConflictListItem]) -> Element<'a, Message> {
     let mut rows = column![].spacing(4);
+    rows = rows.push(
+        row![
+            button(text("待裁决").size(10))
+                .on_press(PidCollabMsg::ShowPendingConflicts.message())
+                .style(button::text)
+                .padding([2, 4]),
+            button(text("已裁决").size(10))
+                .on_press(PidCollabMsg::ShowRuledConflicts.message())
+                .style(button::text)
+                .padding([2, 4]),
+        ]
+        .spacing(6),
+    );
     if items.is_empty() {
         rows = rows.push(text(NO_PENDING_CONFLICTS).size(11));
         rows = rows.push(text(NO_PENDING_CONFLICTS_WHY).size(10).style(muted));
@@ -416,12 +433,19 @@ fn conflict_list_body<'a>(items: &'a [ConflictListItem]) -> Element<'a, Message>
         for line in item.lines() {
             lines = lines.push(text(line).size(10));
         }
-        lines = lines.push(
-            button(text("裁决").size(10))
-                .on_press(PidCollabMsg::OpenRuling(item.conflict_id.clone()).message())
-                .style(button::secondary)
-                .padding([2, 6]),
-        );
+        if item.status == "已裁决" {
+            for line in item.ruling_lines() {
+                lines = lines.push(text(line).size(10));
+            }
+        }
+        if item.status != "已裁决" {
+            lines = lines.push(
+                button(text("裁决").size(10))
+                    .on_press(PidCollabMsg::OpenRuling(item.conflict_id.clone()).message())
+                    .style(button::secondary)
+                    .padding([2, 6]),
+            );
+        }
         rows = rows.push(crate::ui::wrap_bar::PosReport::owned(
             conflict_list_bounds_id(&item.conflict_id),
             lines,
@@ -897,6 +921,9 @@ mod tests {
             value_b: "2.5MPa".to_owned(),
             base_revision: 4,
             status: "待裁决".to_owned(),
+            resolution: String::new(),
+            resolved_value: String::new(),
+            resolved_by: String::new(),
         };
         let second = ConflictListItem {
             conflict_id: "c-8a01".to_owned(),
@@ -906,6 +933,9 @@ mod tests {
             value_b: "from B".to_owned(),
             base_revision: 4,
             status: "待裁决".to_owned(),
+            resolution: String::new(),
+            resolved_value: String::new(),
+            resolved_by: String::new(),
         };
         let view_model = CollabView {
             peers: vec![peer("u1", true, false)],

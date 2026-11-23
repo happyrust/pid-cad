@@ -231,6 +231,10 @@ pub struct ConflictListItem {
     pub value_b: String,
     pub base_revision: i64,
     pub status: String,
+    /// Set once the entry is 已裁决 (#84). Empty while it is still pending.
+    pub resolution: String,
+    pub resolved_value: String,
+    pub resolved_by: String,
 }
 
 impl ConflictListItem {
@@ -244,6 +248,15 @@ impl ConflictListItem {
             format!("甲方 {} · 乙方 {}", self.value_a, self.value_b),
             format!("基线修订号 {}", self.base_revision),
             format!("状态 {}", self.status),
+        ]
+    }
+
+    /// What a ruled entry adds: the result, the value that stood, and who ruled.
+    pub fn ruling_lines(&self) -> [String; 3] {
+        [
+            format!("结果 {}", self.resolution),
+            format!("最终值 {}", self.resolved_value),
+            format!("裁决人 {}", self.resolved_by),
         ]
     }
 }
@@ -267,6 +280,9 @@ fn conflict_list_item(row: &Value) -> Option<ConflictListItem> {
         value_b: row["value_b"].as_str()?.to_owned(),
         base_revision: row["base_revision"].as_i64()?,
         status: row["status"].as_str()?.to_owned(),
+        resolution: row["resolution"].as_str().unwrap_or("").to_owned(),
+        resolved_value: row["resolved_value"].as_str().unwrap_or("").to_owned(),
+        resolved_by: row["resolved_by"].as_str().unwrap_or("").to_owned(),
     })
 }
 
@@ -287,6 +303,16 @@ pub trait CollabQueryClient: Send + Sync + fmt::Debug {
     /// working: those rows have no baseline or status, so they are not a
     /// list. The HTTP client reads the query itself.
     fn fetch_conflict_list(
+        &self,
+        base_url: &str,
+        drawing_id: &str,
+    ) -> Result<Vec<ConflictListItem>, QueryError> {
+        let _ = (base_url, drawing_id);
+        Ok(Vec::new())
+    }
+
+    /// `GET /conflicts?status=已裁决` (#84).
+    fn fetch_ruled_conflicts(
         &self,
         base_url: &str,
         drawing_id: &str,
@@ -379,11 +405,11 @@ pub fn encode_query_component(raw: &str) -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn get_pending_conflicts_body(base_url: &str, drawing_id: &str) -> Result<Value, QueryError> {
+fn get_conflicts_body(base_url: &str, drawing_id: &str, status: &str) -> Result<Value, QueryError> {
     let url = format!(
         "{base_url}/conflicts?drawing_id={}&status={}",
         encode_query_component(drawing_id),
-        encode_query_component("待裁决"),
+        encode_query_component(status),
     );
     let resp = http_agent()
         .get(&url)
@@ -410,7 +436,7 @@ impl CollabQueryClient for HttpQueryClient {
         #[cfg(not(target_arch = "wasm32"))]
         {
             Ok(
-                conflict_list_from_query_body(&get_pending_conflicts_body(base_url, drawing_id)?)
+                conflict_list_from_query_body(&get_conflicts_body(base_url, drawing_id, "待裁决")?)
                     .into_iter()
                     .map(|item| PendingConflict {
                         conflict_id: item.conflict_id,
@@ -436,8 +462,30 @@ impl CollabQueryClient for HttpQueryClient {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Ok(conflict_list_from_query_body(&get_pending_conflicts_body(
-                base_url, drawing_id,
+            Ok(conflict_list_from_query_body(&get_conflicts_body(
+                base_url,
+                drawing_id,
+                "待裁决",
+            )?))
+        }
+    }
+
+    fn fetch_ruled_conflicts(
+        &self,
+        base_url: &str,
+        drawing_id: &str,
+    ) -> Result<Vec<ConflictListItem>, QueryError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (base_url, drawing_id);
+            Err(QueryError::transport("网页版不支持协同查询"))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Ok(conflict_list_from_query_body(&get_conflicts_body(
+                base_url,
+                drawing_id,
+                "已裁决",
             )?))
         }
     }
@@ -715,6 +763,31 @@ mod tests {
                 "value_a": "1.6MPa", "value_b": "2.5MPa"}]
         }))
         .is_empty());
+        let ruled = conflict_list_from_query_body(&serde_json::json!({
+            "items": [{
+                "conflict_id": "c-7f3a",
+                "object_ref": "P-1001",
+                "field": "设计压力",
+                "value_a": "1.6MPa",
+                "value_b": "2.5MPa",
+                "base_revision": 4,
+                "status": "已裁决",
+                "resolution": "采用乙方",
+                "resolved_value": "2.5MPa",
+                "resolved_by": "u4"
+            }]
+        }));
+        assert_eq!(ruled[0].resolution, "采用乙方");
+        assert_eq!(ruled[0].resolved_value, "2.5MPa");
+        assert_eq!(ruled[0].resolved_by, "u4");
+        assert_eq!(
+            ruled[0].ruling_lines(),
+            [
+                "结果 采用乙方".to_owned(),
+                "最终值 2.5MPa".to_owned(),
+                "裁决人 u4".to_owned(),
+            ]
+        );
     }
 
     #[test]
