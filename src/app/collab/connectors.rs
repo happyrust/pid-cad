@@ -522,4 +522,64 @@ impl OpenCADStudio {
             _ => Err(name()),
         }
     }
+
+    /// Fill the target drawing of a connector that is already on the drawing
+    /// and tell the server, which pairs it (#92). An empty number is refused
+    /// here, before anything is sent.
+    pub(crate) fn set_connector_target(
+        &mut self,
+        i: usize,
+        handle: Handle,
+        drawing: &str,
+    ) -> Result<(), String> {
+        let drawing = drawing.trim();
+        if drawing.is_empty() {
+            return Err("请填写目标图号".to_owned());
+        }
+        let (kind, at, line_tag, line_props, table) = {
+            let document = &self.tabs[i].scene.document;
+            let entity = document
+                .entities()
+                .find(|entity| entity.common().handle == handle)
+                .ok_or_else(|| "没有这个页间连接符".to_owned())?;
+            let author =
+                PidAuthor::from_entity(entity).ok_or_else(|| "没有这个页间连接符".to_owned())?;
+            let kind = kind_of(&author).ok_or_else(|| "不是页间连接符".to_owned())?;
+            let at = centre(entity).ok_or_else(|| "读不出连接符的位置".to_owned())?;
+            let mut table = TopologyTable::load(document);
+            let record = table
+                .connector_by_handle_mut(handle)
+                .ok_or_else(|| "拓扑表里没有这个页间连接符".to_owned())?;
+            let line_tag = record.line_tag.clone();
+            record.peer_drawing = Some(drawing.to_owned());
+            record.peer = None;
+            let line_props = line_entity(document, kind.host_role(), &line_tag)
+                .map(|line| crate::pid::propagate::props_of(document, line))
+                .map(|props| {
+                    carried(kind)
+                        .iter()
+                        .filter_map(|field| {
+                            let value = props.get(*field)?;
+                            (!value.is_empty()).then(|| ((*field).to_owned(), value.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            (kind, at, line_tag, line_props, table)
+        };
+        table.store(&mut self.tabs[i].scene.document);
+        self.tabs[i].dirty = true;
+        let said = ConnectorSaid {
+            connector: kind.as_str().to_owned(),
+            at: Some(at),
+            target_drawing: Some(drawing.to_owned()),
+            line_props,
+            peer: None,
+        };
+        let change = statement(KIND_CREATE_CONNECTOR, line_tag, said.clone());
+        let payload = to_json(&change, &said);
+        self.collab
+            .queue_op(payload, Vec::new(), true, "connector-target")
+            .map(|_| ())
+    }
 }

@@ -217,6 +217,11 @@ pub enum Message {
     DismissToast(u64),
     /// Jump from a page connector to its paired peer drawing/line (#64).
     JumpConnector(document::Handle),
+    /// Fill a placed connector's target drawing and ask the server to pair it (#92).
+    SetConnectorTarget {
+        handle: document::Handle,
+        drawing: String,
+    },
     /// Open inline modification history for `tag` (#66).
     OpenHistory(String),
     /// Close the inline modification history view (#66).
@@ -290,6 +295,13 @@ pub(crate) fn update(app: &mut OpenCADStudio, message: Message) -> Task<AppMessa
         Message::JumpConnector(handle) => {
             let i = app.active_tab;
             let _ = app.jump_to_connector_peer(i, Some(handle));
+            Task::none()
+        }
+        Message::SetConnectorTarget { handle, drawing } => {
+            let i = app.active_tab;
+            if let Err(err) = app.set_connector_target(i, handle, &drawing) {
+                app.command_line.push_error(&err);
+            }
             Task::none()
         }
         Message::OpenHistory(tag) => {
@@ -1857,8 +1869,19 @@ fn inspector(app: &OpenCADStudio) -> Element<'_, AppMessage> {
             ];
             if let Some(connector) = &object.connector {
                 blocks = blocks.push(hairline(theme));
+                let draft = app
+                    .pid_shell
+                    .editor
+                    .editing
+                    .as_ref()
+                    .filter(|(handle, field, _)| {
+                        *handle == connector.handle && field == "connector_target"
+                    })
+                    .map(|(_, _, text)| text.clone())
+                    .or_else(|| connector.target_drawing.clone())
+                    .unwrap_or_default();
                 blocks = blocks.push(super::collab_ui::connector_inspector_section(
-                    theme, connector,
+                    theme, connector, draft,
                 ));
             }
             // 拓扑: only what the topology table records.

@@ -521,6 +521,7 @@ pub(crate) fn inspect_connector(
 pub(crate) fn connector_inspector_section<'a>(
     theme: PidTheme,
     info: &ConnectorInspectorInfo,
+    draft: String,
 ) -> Element<'a, AppMessage> {
     let kv = |k: &'static str, v: String| {
         row![
@@ -588,6 +589,37 @@ pub(crate) fn connector_inspector_section<'a>(
                 .unwrap_or_else(|| "（未指定）".to_owned()),
         ),
         kv("对端状态", status_text),
+        {
+            let submitted = draft.clone();
+            let handle = info.handle;
+            text_input("目标图号", &draft)
+                .on_input(move |text| {
+                    send_editor(EditorMsg::FieldInput {
+                        handle,
+                        field: "connector_target".to_owned(),
+                        text,
+                    })
+                })
+                .on_submit(send_editor(EditorMsg::SetConnectorTarget {
+                    handle,
+                    drawing: submitted,
+                }))
+        },
+        {
+            let drawing = draft.clone();
+            button(
+                text("配对")
+                    .size(11)
+                    .font(ui(theme, font::Weight::Medium))
+                    .color(ColorToken::Accent.color(theme)),
+            )
+            .padding([2, 8])
+            .style(bare)
+            .on_press(send_editor(EditorMsg::SetConnectorTarget {
+                handle: info.handle,
+                drawing,
+            }))
+        },
     ]
     .spacing(6);
 

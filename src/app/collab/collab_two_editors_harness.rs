@@ -1331,3 +1331,117 @@ fn harness_65_all_three_unpaired_connector_reasons_flow_from_server_to_client_to
     );
 }
 
+/// #92: a connector placed with no target gets one from the inspector path.
+/// A missing drawing and a drawing with nothing to pair are said at once;
+/// a matching inflow is then paired.
+#[test]
+fn harness_92_the_inspector_sets_a_connectors_target_drawing() {
+    use crate::pid::topology::parse_handle;
+
+    let server = RealServer::start(standard_seed(), 0, 300);
+    let mut a = HeadlessClient::connect(&server.ws_url(), "u1", "PID-1101");
+    let mut b = HeadlessClient::connect(&server.ws_url(), "u2", "PID-1102");
+    assert!(wait_both(&mut a, &mut b, Duration::from_secs(5), |a, b| {
+        a.collab.connected && b.collab.connected
+    }));
+    let err = a
+        .app
+        .set_connector_target(a.app.active_tab, document::Handle::new(0), "  ")
+        .expect_err("an empty drawing number is refused before it is sent");
+    assert!(err.contains("请填写目标图号"), "{err}");
+
+    a.draw_points("PIDPIPE signal S-SET", &[[0.0, 0.0], [100.0, 0.0]]);
+    a.draw_points("PIDCONNECTOR signal_out", &[[100.0, 0.0]]);
+    let handle = {
+        let doc = &a.app.tabs[a.app.active_tab].scene.document;
+        TopologyTable::load(doc)
+            .connectors
+            .iter()
+            .find(|c| c.line_tag == "S-SET")
+            .and_then(|c| parse_handle(&c.handle))
+            .expect("the connector")
+    };
+    a.app
+        .set_connector_target(a.app.active_tab, handle, "PID-9999")
+        .expect("send the unregistered drawing");
+    assert!(
+        a.wait_until(Duration::from_secs(5), |app| {
+            app.collab
+                .toasts
+                .items()
+                .iter()
+                .any(|t| t.message.contains("S-SET") && t.message.contains("目标图纸没有登记"))
+        }),
+        "an unknown drawing is said at once; got {:?}",
+        a.app.collab.toasts.items()
+    );
+
+    a.draw_points("PIDPIPE signal S-NONE", &[[0.0, 40.0], [100.0, 40.0]]);
+    a.draw_points("PIDCONNECTOR signal_out", &[[100.0, 40.0]]);
+    let none = {
+        let doc = &a.app.tabs[a.app.active_tab].scene.document;
+        TopologyTable::load(doc)
+            .connectors
+            .iter()
+            .find(|c| c.line_tag == "S-NONE")
+            .and_then(|c| parse_handle(&c.handle))
+            .expect("the unmatched connector")
+    };
+    a.app
+        .set_connector_target(a.app.active_tab, none, "PID-1102")
+        .expect("send the drawing that has no inflow yet");
+    assert!(
+        a.wait_until(Duration::from_secs(5), |app| {
+            app.collab.toasts.items().iter().any(|t| {
+                t.message.contains("S-NONE") && t.message.contains("没有同一线号的流入页间连接符")
+            })
+        }),
+        "a drawing with nothing to pair is said at once; got {:?}",
+        a.app.collab.toasts.items()
+    );
+
+    b.draw_points("PIDPIPE signal S-SET", &[[0.0, 0.0], [100.0, 0.0]]);
+    b.draw_points("PIDCONNECTOR signal_in PID-1101", &[[0.0, 0.0]]);
+    assert!(
+        b.wait_until(Duration::from_secs(5), |app| app.collab.outbox.is_empty()),
+        "B's inflow must reach the server before A names the drawing"
+    );
+    a.app
+        .set_connector_target(a.app.active_tab, handle, "PID-1102")
+        .expect("send the drawing that can pair");
+    assert!(
+        wait_both(&mut a, &mut b, Duration::from_secs(6), |a, b| {
+            connector_peer(a, "S-SET") == "PID-1102:S-SET/signal_in"
+                && connector_peer(b, "S-SET") == "PID-1101:S-SET/signal_out"
+        }),
+        "both drawings land on the pair; A={} B={}",
+        connector_peer(&a.app, "S-SET"),
+        connector_peer(&b.app, "S-SET"),
+    );
+    assert!(
+        connector_peer(&a.app, "S-NONE").is_empty(),
+        "the unmatched connector stays unpaired; peer={}",
+        connector_peer(&a.app, "S-NONE")
+    );
+}
+
+/// What the connector of `line` says of its other end (`drawing:line/kind`).
+/// Empty when it has none. Across drawings this is the entity's
+/// `connector_peer`; the table's `peer` handle is only for two drawings
+/// open in one process.
+fn connector_peer(app: &OpenCADStudio, line: &str) -> String {
+    use crate::pid::topology::parse_handle;
+    let doc = &app.tabs[app.active_tab].scene.document;
+    let table = TopologyTable::load(doc);
+    let Some(handle) = table
+        .connectors
+        .iter()
+        .find(|record| record.line_tag == line)
+        .and_then(|record| parse_handle(&record.handle))
+    else {
+        return String::new();
+    };
+    PidAuthor::load(doc, handle)
+        .map(|author| author.connector_peer)
+        .unwrap_or_default()
+}
