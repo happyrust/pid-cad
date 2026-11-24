@@ -220,46 +220,7 @@ pub struct DrawingObjectsPage {
     pub items: Vec<ObjectSnapshot>,
 }
 
-/// One pending conflict as `GET /conflicts` returns it (#81). The fields are
-/// the ones the list shows, and they are the server row's own fields.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConflictListItem {
-    pub conflict_id: String,
-    pub object_ref: String,
-    pub field: String,
-    pub value_a: String,
-    pub value_b: String,
-    pub base_revision: i64,
-    pub status: String,
-    /// Set once the entry is 已裁决 (#84). Empty while it is still pending.
-    pub resolution: String,
-    pub resolved_value: String,
-    pub resolved_by: String,
-}
-
-impl ConflictListItem {
-    /// The six facts the list draws, one line each, in the order a reader
-    /// meets them.
-    pub fn lines(&self) -> [String; 6] {
-        [
-            self.conflict_id.clone(),
-            format!("对象 {}", self.object_ref),
-            format!("字段 {}", self.field),
-            format!("甲方 {} · 乙方 {}", self.value_a, self.value_b),
-            format!("基线修订号 {}", self.base_revision),
-            format!("状态 {}", self.status),
-        ]
-    }
-
-    /// What a ruled entry adds: the result, the value that stood, and who ruled.
-    pub fn ruling_lines(&self) -> [String; 3] {
-        [
-            format!("结果 {}", self.resolution),
-            format!("最终值 {}", self.resolved_value),
-            format!("裁决人 {}", self.resolved_by),
-        ]
-    }
-}
+pub use crate::ui::window::pid_collab::ConflictListItem;
 
 /// The `items` of a `GET /conflicts` body. A row that omits one of the six
 /// fields is left out: the list does not invent a value the query did not

@@ -1662,14 +1662,16 @@ mod tests {
         (url, handle)
     }
 
-    /// A one-connection server that records every client frame it reads, so a
-    /// test can assert what the client actually put on the wire.
-    fn recording_server() -> (
+    type RecordingServer = (
         String,
         std::sync::Arc<Mutex<Vec<String>>>,
         std::sync::Arc<AtomicBool>,
         std::thread::JoinHandle<()>,
-    ) {
+    );
+
+    /// A one-connection server that records every client frame it reads, so a
+    /// test can assert what the client actually put on the wire.
+    fn recording_server() -> RecordingServer {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let url = format!("ws://{addr}/ws");
@@ -1885,7 +1887,7 @@ mod tests {
             session_came_up(&mut receiver),
             "opening the drawing must join again"
         );
-        let hello_count = hellos.lock().expect("hello count").clone();
+        let hello_count = *hellos.lock().expect("hello count");
         assert!(hello_count >= 2, "a new session says hello again, saw {hello_count}");
 
         link.request_stop();
@@ -2421,11 +2423,11 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut arrived = false;
         while Instant::now() < deadline && !arrived {
-            match receiver.try_next() {
-                Ok(Some(CollabEvent::OpApplied { op_id, .. })) => arrived = op_id == "op-peer",
-                Ok(Some(_)) => {}
-                Ok(None) => break,
-                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            match receiver.try_recv() {
+                Ok(CollabEvent::OpApplied { op_id, .. }) => arrived = op_id == "op-peer",
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Closed) => break,
+                Err(mpsc::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(5)),
             }
         }
         assert!(arrived, "the change never reached the UI");

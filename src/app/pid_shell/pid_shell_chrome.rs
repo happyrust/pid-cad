@@ -1142,7 +1142,7 @@ fn pid_shell_snapshot_capture_when_requested() {
     let _ = std::fs::create_dir_all(&dir);
     let _one = crate::headless_ui_lock();
 
-    let mut save_shot = |name: &str, app: &mut OpenCADStudio| {
+    let save_shot = |name: &str, app: &mut OpenCADStudio| {
         let pixels = picture(app, WINDOW, &[]);
         let img = image::RgbaImage::from_raw(WINDOW.width as u32, WINDOW.height as u32, pixels)
             .expect("valid RGBA frame");

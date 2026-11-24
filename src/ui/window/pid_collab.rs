@@ -24,7 +24,6 @@
 //! state of its own beyond which section is expanded, so a reconnect or a
 //! server push is reflected on the next frame without any sync code.
 
-use crate::app::collab::query::ConflictListItem;
 use crate::app::Message;
 use crate::ui::dock::{Chrome, PanelId};
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
@@ -228,6 +227,46 @@ pub const ADOPT_A: &str = "采用甲方";
 pub const ADOPT_B: &str = "采用乙方";
 pub const ADOPT_MANUAL: &str = "人工改值";
 pub const CONFIRM_RULING: &str = "确认";
+
+/// One pending or ruled conflict row as `GET /conflicts` returns it (#81, #84).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictListItem {
+    pub conflict_id: String,
+    pub object_ref: String,
+    pub field: String,
+    pub value_a: String,
+    pub value_b: String,
+    pub base_revision: i64,
+    pub status: String,
+    /// Set once the entry is 已裁决 (#84). Empty while it is still pending.
+    pub resolution: String,
+    pub resolved_value: String,
+    pub resolved_by: String,
+}
+
+impl ConflictListItem {
+    /// The six facts the list draws, one line each, in the order a reader
+    /// meets them.
+    pub fn lines(&self) -> [String; 6] {
+        [
+            self.conflict_id.clone(),
+            format!("对象 {}", self.object_ref),
+            format!("字段 {}", self.field),
+            format!("甲方 {} · 乙方 {}", self.value_a, self.value_b),
+            format!("基线修订号 {}", self.base_revision),
+            format!("状态 {}", self.status),
+        ]
+    }
+
+    /// What a ruled entry adds: the result, the value that stood, and who ruled.
+    pub fn ruling_lines(&self) -> [String; 3] {
+        [
+            format!("结果 {}", self.resolution),
+            format!("最终值 {}", self.resolved_value),
+            format!("裁决人 {}", self.resolved_by),
+        ]
+    }
+}
 
 /// The dialog for one conflict: the query row, which side is picked, and a
 /// value typed by hand.

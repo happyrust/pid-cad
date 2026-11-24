@@ -954,7 +954,7 @@ pub(crate) struct State {
     /// Every answer this state gave about the drawing's tags, `(ask, said)`:
     /// for tests, for the same reason as `sent`.
     #[cfg(test)]
-    pub tags_said: Vec<(u64, TagsSaid)>,
+    pub(super) tags_said: Vec<(u64, TagsSaid)>,
     /// Every claim this state asked the transport for, `(session, tag)`: for
     /// tests, for the same reason as `sent`.
     #[cfg(test)]
@@ -1407,7 +1407,7 @@ impl State {
     /// Attach a detached per-instance transport link for in-process multi-editor
     /// tests (#20, #33).
     #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(super) fn attach_detached_link(&mut self) -> transport::Link {
+    fn attach_detached_link(&mut self) -> transport::Link {
         let link = transport::Link::detached_with_tags(self.client_config());
         self.link = Some(link.clone());
         link
