@@ -2756,7 +2756,9 @@ mod tests {
 
     /// What a `hello` was answered with on its own socket: the revision the
     /// room is at, where the replay starts, and the ops replayed, in order.
-    fn welcomed(reactions: &[Reaction]) -> (i64, Option<i64>, Vec<(String, i64, Vec<Value>)>) {
+    type ReplayedOp = (String, i64, Vec<Value>);
+
+    fn welcomed(reactions: &[Reaction]) -> (i64, Option<i64>, Vec<ReplayedOp>) {
         let mut told = None;
         let mut replayed = Vec::new();
         for reaction in reactions {

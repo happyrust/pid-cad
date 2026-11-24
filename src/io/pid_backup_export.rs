@@ -691,6 +691,7 @@ fn codelist_gap_lines(gaps: &CodelistGaps) -> Vec<String> {
 }
 
 /// What [`codelist_gap_lines`] says when nothing was left out.
+#[cfg(test)]
 pub(crate) const NO_CODELIST_GAPS: &str = "codelist gaps: 0 object(s) whose leaf is outside the level table, 0 specialty code(s) outside 1 and 2, 0 plant-added instrument(s) skipped";
 
 /// Add to `lines` how many `sentences` there are of `what`, and the first

@@ -983,47 +983,51 @@ fn acl_permission_known(text: &str) -> bool {
 }
 
 /// 授权配置 on `node_id`, skipping the drawing-state tier (#75).
-fn require_configure(store: &crate::store::Store, actor: &str, node_id: &str) -> Result<(), Response> {
+fn require_configure(
+    store: &crate::store::Store,
+    actor: &str,
+    node_id: &str,
+) -> Result<(), Box<Response>> {
     let role_text = match store.user_role(actor) {
         Ok(Some((role, _))) => role,
         Ok(None) => {
-            return Err(error_response(
+            return Err(Box::new(error_response(
                 StatusCode::BAD_REQUEST,
                 codes::PERM_UNKNOWN_SUBJECT,
                 "用户不存在",
-            ))
+            )))
         }
         Err(err) => {
-            return Err(error_response(
+            return Err(Box::new(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 codes::INVALID_MESSAGE,
                 &err,
-            ))
+            )))
         }
     };
     let Some(role) = ocs_collab::Role::parse(&role_text) else {
-        return Err(error_response(
+        return Err(Box::new(error_response(
             StatusCode::BAD_REQUEST,
             codes::PERM_UNKNOWN_SUBJECT,
             "用户角色非法",
-        ));
+        )));
     };
     let nodes = match perm::load_acl_tree(store) {
         Ok(nodes) => nodes,
         Err(err) => {
-            return Err(error_response(
+            return Err(Box::new(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 codes::INVALID_MESSAGE,
                 &err,
-            ))
+            )))
         }
     };
     if !nodes.iter().any(|node| node.node_id == node_id) {
-        return Err(error_response(
+        return Err(Box::new(error_response(
             StatusCode::NOT_FOUND,
             codes::INVALID_MESSAGE,
             "节点不存在",
-        ));
+        )));
     }
     let decision = ocs_collab::decide_without_state(&ocs_collab::PermissionRequest {
         user_id: actor,
@@ -1041,7 +1045,9 @@ fn require_configure(store: &crate::store::Store, actor: &str, node_id: &str) ->
             status: StatusCode::FORBIDDEN,
             holder: None,
         };
-        Err((outcome.status, Json(decision_json(&outcome))).into_response())
+        Err(Box::new(
+            (outcome.status, Json(decision_json(&outcome))).into_response(),
+        ))
     }
 }
 
@@ -1167,7 +1173,7 @@ async fn pbs_acl_put(
         );
     }
     if let Err(response) = require_configure(&store, &actor, &node_id) {
-        return response;
+        return *response;
     }
     let before = writable_snapshot(&state).await;
     if let Err(err) = store.upsert_pbs_acl(&node_id, &subject, &permission, allowed) {
@@ -1226,7 +1232,7 @@ async fn pbs_acl_delete(
         return error_response(StatusCode::BAD_REQUEST, codes::INVALID_MESSAGE, "缺少必填字段");
     };
     if let Err(response) = require_configure(&store, &actor, &node_id) {
-        return response;
+        return *response;
     }
     let before = writable_snapshot(&state).await;
     let removed = match store.delete_pbs_acl(&node_id, &subject, &permission) {
@@ -1303,7 +1309,7 @@ async fn user_role_set(
         },
     };
     if let Err(response) = require_configure(&store, &actor, &node_id) {
-        return response;
+        return *response;
     }
     let before = writable_snapshot(&state).await;
     let updated = match store.set_user_role(&target, &role) {

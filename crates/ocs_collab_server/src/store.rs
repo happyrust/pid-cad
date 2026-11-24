@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use ocs_collab::SessionStatus;
 
+/// `(node_id, name, node_type, parent_id)` returned by [`Store::list_pbs_node_details`].
+pub type PbsNodeDetail = (String, String, String, Option<String>);
+
 /// The session `mode` that never counts as an editing session (appendix A.3).
 ///
 /// Same spelling as the drawing `state` value, but a different column: this one
@@ -866,9 +869,7 @@ impl Store {
     }
 
     /// `(node_id, name, node_type, parent_id)` for every PBS node.
-    pub fn list_pbs_node_details(
-        &self,
-    ) -> Result<Vec<(String, String, String, Option<String>)>, String> {
+    pub fn list_pbs_node_details(&self) -> Result<Vec<PbsNodeDetail>, String> {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare("SELECT node_id, name, node_type, parent_id FROM pbs_nodes ORDER BY node_id")

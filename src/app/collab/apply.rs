@@ -193,6 +193,7 @@ impl OpenCADStudio {
     ///
     /// The first drawing uses the app's session. Each further open drawing
     /// gets a session of its own: its own roster and its own claims.
+    #[cfg(test)]
     pub(in crate::app) fn begin_drawing_session(&mut self, tab_index: usize, drawing_id: &str) {
         let Some(tab) = self.tabs.get(tab_index).map(|tab| tab.id) else {
             return;
@@ -265,6 +266,7 @@ impl OpenCADStudio {
 
     /// Deliver `event` to the session of tab `tab_index`, not to another
     /// drawing's session.
+    #[cfg(test)]
     pub(in crate::app) fn apply_drawing_event(
         &mut self,
         tab_index: usize,
@@ -283,6 +285,7 @@ impl OpenCADStudio {
     }
 
     /// The session bound to tab `tab_index`, when one has been begun.
+    #[cfg(test)]
     pub(in crate::app) fn drawing_session(&self, tab_index: usize) -> Option<&super::State> {
         let tab = self.tabs.get(tab_index)?.id;
         if self.collab.document == Some(tab) {
@@ -580,11 +583,11 @@ impl OpenCADStudio {
             .tabs
             .get(i)
             .and_then(|tab| self.drawing_sessions.iter().position(|session| session.tab == tab.id));
-        if extra.is_some() {
+        if let Some(extra) = extra {
             let Some(payload) = broadcast::payload_for(&changes) else {
                 return;
             };
-            let readonly = self.drawing_sessions[extra.unwrap()].state.readonly;
+            let readonly = self.drawing_sessions[extra].state.readonly;
             if readonly {
                 self.command_line.push_warning(&format!(
                     "协同：当前会话只读，本地的 {} 项变更没有广播，本图与其他人的图已不一致",
@@ -593,7 +596,7 @@ impl OpenCADStudio {
                 self.keep_unqueued(i, &changes, label, "当前会话只读");
                 return;
             }
-            match self.drawing_sessions[extra.unwrap()]
+            match self.drawing_sessions[extra]
                 .state
                 .queue_op(payload, steps, on, label)
             {

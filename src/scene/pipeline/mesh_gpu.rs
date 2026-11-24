@@ -2686,13 +2686,16 @@ pub fn build_mesh_batch_filtered(
 
 /// How many depths coincident faces are spread across. The whole set has
 /// to stay inside one draw-order step (`0.02` of clip `w`).
+#[cfg(test)]
 const COINCIDENT_FACE_SLOTS: u32 = 32;
 /// One slot, in NDC: four steps of a 24-bit depth buffer (about `6e-8`).
+#[cfg(test)]
 const COINCIDENT_FACE_SLOT_NDC: f32 = 2.4e-7;
 
 /// Which depth slot a face lands on. `normal` is the shaded normal and
 /// `origin` is the instance translation (high and low parts summed), the
 /// same inputs `separate_coincident_face` in `mesh.wgsl` hashes.
+#[cfg(test)]
 pub(crate) fn coincident_face_slot(normal: [f32; 3], origin: [f32; 3]) -> u32 {
     let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
     let n = if length < 1.0e-6 {
@@ -2712,6 +2715,7 @@ pub(crate) fn coincident_face_slot(normal: [f32; 3], origin: [f32; 3]) -> u32 {
 
 /// Signed NDC shift for `slot`. Subtract `bias * clip.w` from clip `z`
 /// (smaller clip `z` is closer), matching the shader.
+#[cfg(test)]
 pub(crate) fn coincident_face_ndc_bias(slot: u32) -> f32 {
     (slot as f32 - 15.5) * COINCIDENT_FACE_SLOT_NDC
 }

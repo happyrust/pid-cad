@@ -168,6 +168,7 @@ impl Link {
 
     /// A link for one drawing's session, sharing nothing with the app's
     /// other sessions (#102).
+    #[cfg(test)]
     pub(super) fn owned(config: ClientConfig) -> Self {
         Self {
             config: Arc::new(Mutex::new(config)),

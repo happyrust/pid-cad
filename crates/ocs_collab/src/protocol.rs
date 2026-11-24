@@ -61,6 +61,7 @@ impl Libraries {
 /// A message sent by a client to the server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ClientMessage {
     /// Opens a session. Answered with [`ServerMessage::Welcome`].
     Hello {

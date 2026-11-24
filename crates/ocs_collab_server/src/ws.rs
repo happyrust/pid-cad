@@ -662,17 +662,19 @@ pub async fn handle_message(
         return hello(
             state,
             conn,
-            user_id,
-            drawing_id,
-            mode,
-            workspace,
-            repo_id.as_deref(),
-            *since,
-            existing_tags,
-            resume_session_id.as_deref(),
-            credential.as_deref(),
-            libraries.as_ref(),
-            now,
+            HelloParams {
+                user_id,
+                drawing_id,
+                mode,
+                workspace,
+                repo_id: repo_id.as_deref(),
+                since: *since,
+                existing_tags,
+                resume_session_id: resume_session_id.as_deref(),
+                credential: credential.as_deref(),
+                libraries: libraries.as_ref(),
+                now,
+            },
         )
         .await;
     }
@@ -826,21 +828,34 @@ async fn library_mismatch(
         .collect()
 }
 
-async fn hello(
-    state: &AppState,
-    conn: &mut Connection,
-    user_id: &str,
-    drawing_id: &str,
-    mode: &str,
-    workspace: &str,
-    repo_id: Option<&str>,
+struct HelloParams<'a> {
+    user_id: &'a str,
+    drawing_id: &'a str,
+    mode: &'a str,
+    workspace: &'a str,
+    repo_id: Option<&'a str>,
     since: Option<i64>,
-    existing_tags: &[String],
-    resume_session_id: Option<&str>,
-    credential: Option<&str>,
-    libraries: Option<&ocs_collab::protocol::Libraries>,
+    existing_tags: &'a [String],
+    resume_session_id: Option<&'a str>,
+    credential: Option<&'a str>,
+    libraries: Option<&'a ocs_collab::protocol::Libraries>,
     now: i64,
-) -> Vec<Reaction> {
+}
+
+async fn hello(state: &AppState, conn: &mut Connection, params: HelloParams<'_>) -> Vec<Reaction> {
+    let HelloParams {
+        user_id,
+        drawing_id,
+        mode,
+        workspace,
+        repo_id,
+        since,
+        existing_tags,
+        resume_session_id,
+        credential,
+        libraries,
+        now,
+    } = params;
     if let Some(store) = &state.store {
         // #67 + #68: Strict registration check (default) and credential check.
         // Credentials are never logged.

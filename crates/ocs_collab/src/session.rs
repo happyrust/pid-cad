@@ -88,6 +88,7 @@ impl Session {
 
 /// Result of opening a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum OpenOutcome {
     /// Session created; `taken_over` lists sessions it displaced.
     Opened {
