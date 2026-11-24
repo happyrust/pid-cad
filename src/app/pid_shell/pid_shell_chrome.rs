@@ -1128,3 +1128,66 @@ fn a_point_picked_in_the_shell_is_the_point_picked_without_it() {
         "a real line"
     );
 }
+
+/// Optional capture helper for #45 side-by-side design/implementation
+/// comparison: when `OCS_PID_SHELL_SNAPSHOT_DIR` is set, writes real headless
+/// rendered PNGs (`app-editor-dark.png`, `app-editor-light.png`,
+/// `app-editor-readonly-dark.png`) at the design's 1600x1000 frame size.
+#[test]
+fn pid_shell_snapshot_capture_when_requested() {
+    let Some(dir) = std::env::var_os("OCS_PID_SHELL_SNAPSHOT_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let _one = crate::headless_ui_lock();
+
+    let mut save_shot = |name: &str, app: &mut OpenCADStudio| {
+        let pixels = picture(app, WINDOW, &[]);
+        let img = image::RgbaImage::from_raw(WINDOW.width as u32, WINDOW.height as u32, pixels)
+            .expect("valid RGBA frame");
+        img.save(dir.join(name)).expect("write screenshot PNG");
+    };
+
+    // 1. Connected collaborative editor (dark)
+    let mut app = shell();
+    let _ = app.dispatch_command("COLORTHEME 0");
+    app.collab.server_url = "ws://127.0.0.1:3240/ws".to_owned();
+    app.collab.user_id = "u1".to_owned();
+    app.collab.display_name = "王工".to_owned();
+    app.collab.drawing_id = "PID-1001-01".to_owned();
+    app.collab.connected = true;
+    app.collab.session_id = Some("s-u1".to_owned());
+    app.collab.base_revision = 128;
+    app.collab.peers = vec![
+        crate::app::collab::PeerInfo {
+            session_id: "s-u2".to_owned(),
+            user_id: "u2".to_owned(),
+            display_name: "李工".to_owned(),
+            disconnected: false,
+            hold_until: None,
+        },
+        crate::app::collab::PeerInfo {
+            session_id: "s-u3".to_owned(),
+            user_id: "u3".to_owned(),
+            display_name: "赵工".to_owned(),
+            disconnected: false,
+            hold_until: None,
+        },
+    ];
+    app.collab.claims.insert("P-1001A".to_owned(), "u2".to_owned());
+    app.collab.claims.insert("XV-1012".to_owned(), "u1".to_owned());
+    save_shot("app-editor-dark.png", &mut app);
+
+    // 2. Connected collaborative editor (light)
+    let _ = app.dispatch_command("COLORTHEME 1");
+    save_shot("app-editor-light.png", &mut app);
+
+    // 3. Read-only collaborative editor (dark)
+    let _ = app.dispatch_command("COLORTHEME 0");
+    app.collab.readonly = true;
+    app.collab.readonly_level = Some("state".to_owned());
+    app.collab.readonly_reason = Some("图纸处于「单人编辑」，当前会话只读".to_owned());
+    app.collab.readonly_holder = Some("s-u2".to_owned());
+    save_shot("app-editor-readonly-dark.png", &mut app);
+}

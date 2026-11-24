@@ -1,0 +1,33 @@
+# #45 设计稿与程序实现并排对照与差别清单
+
+- **对照基线**：`docs/pid-platform/design/pid-platform.pen`（画框 15–21 与新增状态板 33–36，含暗色与亮色实例） vs `OpenCADStudio` P&ID 外壳与编辑器（`src/app/pid_shell/chrome.rs`、`editor.rs`、`collab_ui.rs`）。
+- **窗口与三栏尺寸**：双方严格一致——`1600×1000` 窗口、标题栏高 `44px`、左侧导航宽 `208px`、状态栏高 `26px`、工具条高 `44px`、左侧迷你调色板宽 `56px`、右侧检视面板宽 `300px`、图纸标签条高 `32px`（由 `pid_shell_chrome::the_three_bars_have_the_sizes_the_design_gives_them` 与 `pid_editor_screen::the_parts_of_the_editor_have_the_sizes_the_design_gives_them` 单元测试持续守门）。
+
+## 并排图索引
+
+- `docs/pid-platform/design/side-by-side/15-editor-collab-dark-side-by-side.png` — 画框 15（暗色）与程序实绘并排
+- `docs/pid-platform/design/side-by-side/15-editor-collab-light-side-by-side.png` — 画框 15（亮色）与程序实绘并排
+- `docs/pid-platform/design/side-by-side/16-editor-readonly-dark-side-by-side.png` — 画框 16（只读会话·暗色）与程序实绘并排
+
+## 逐项对照与差别清单
+
+| 区域 | 原始设计稿（对齐前） | 本次对齐后设计稿（`.pen`） | 程序真实实现 | 当前差别 |
+| --- | --- | --- | --- | --- |
+| 标题栏 · 项目下拉 | 画有 `PRJ-2025-018 · 乙烯裂解装置` 下拉选择器 | 去掉下拉箭头与项目图标，改为协同服务器地址芯片 `ws://127.0.0.1:3240/ws` | `chrome::server_address` 显示 `ws://127.0.0.1:3240/ws`，未配置时不画 | **无差别** |
+| 标题栏 · 搜索 / 铃铛 | 画有全局搜索框 `Ctrl K` 与通知铃铛 | 已隐藏（`enabled: false`），保留帮助与头像 | 不画搜索与铃铛，仅保留帮助（`HELP`）与用户首字母头像 | **无差别** |
+| 标题栏 · 头像字形 | 静态汉字「王」 | 汉字「王」 | `chrome::user_initial` 取 `user_id` 首字符大写（`u1` → `U`） | 演示数据字形差异（实现取 `user_id` 首字符） |
+| 左侧导航 | 4 组 15 项全画；19/20 高亮未实现的「权限管理」 | 协同画框仅启用已实现的 2 项（`P&ID 编辑器`、`备份数据包`，归属 `设计` 组）；19/20 不高亮未实现项；保留 `component/App Shell` 基组件完整节点以维持 `pid_shell_startup` 契约测试 | `chrome::nav_groups()` 仅绘制已实现的 `P&ID 编辑器` 与 `备份数据包` | **无差别** |
+| 导航底部同步状态 | 静态「数据中心已同步」 | 改为真实六态之一（`已连接 · 修订 128` / `已连接 · 只读 · 修订 128` / `与服务器上的图纸不一致，已停止同步` 等） | `SyncStatus::label()` 渲染真实六态及排队/补发后缀 | **无差别** |
+| 状态栏 | 左侧画 `L1–L5` 五段，右侧含「自动保存 10:42」与「V25R4 兼容」 | 隐藏 `L1–L5`；右侧改为 `编辑中 · 捕捉 开 · 正交 关` / `只读 · 捕捉 开 · 正交 关` | `chrome::status_parts()` 仅绘制右侧状态与捕捉/正交开关 | **无差别** |
+| 编辑器 · 工具条 | 含未实现的 `仪表回路`、`标注`、`尺寸`、`设计规则检查` 与 `协同编辑` 徽标 | 隐藏未实现项，保留 `选择`、`管线/分支/信号线`、`设备/阀门/仪表/页间连接`、在线头像组、`保存` | `editor::toolbar()` 渲染相同 3 组工具、在线头像组（>=2 人）与 `保存` | 仅图标字体矢量与 SVG 样式细微差异 |
+| 编辑器 · 图纸标签条 | 缺失 32px 标签条 | 在画布上方补齐 `32px` 标签条（当前图标签 + `新建` + `打开`） | `editor::tabs()` 在画布上方绘制 `32px` 标签条，右侧带「收起命令行」按钮 | 实装标签条右端多一个「收起命令行」切换键（设计稿画布中不含命令行，属已知有意保留） |
+| 编辑器 · 画布命令栏 | 设计稿不画底部命令行 | 不画底部命令行（保持 P&ID 画布整洁视图） | 画布底部保留通用 CAD 命令行（可收起，供所有通用命令与协同命令使用） | 已知设计决策差异（实现保留可收起命令行） |
+| 编辑器 · 检视面板协同区 | 位于检视面板下半 | 位于检视面板下半（状态、在线用户、待裁决冲突、位号占用、本次消息） | `collab_ui::inspector_collab_section()` 位于检视面板下半 | **无差别**（布局与配色变量完全一致） |
+| 画框 21 · 修改历史入口 | 面包屑 `平台 / 权限管理 / 修改历史`，高亮「权限管理」 | 面包屑改为 `P&ID 编辑器 / V-1001 · 修改历史`，高亮 `P&ID 编辑器`，顶部改为「返回对象 V-1001」 | 从检视面板选中对象打开内联修改历史视图 | 入口语义对齐（实现为检视面板内联抽屉，设计稿为整屏展开视图便于展示 9 列审计明细） |
+
+## 自动化验证记录
+
+- `python scripts/pid-platform/gen_pid_tokens.py --check`：37 个变量、Dark/Light 双主题一致。
+- `cargo test --offline --locked --lib -- pid_shell_chrome:: pid_editor_screen:: pid_tokens:: pid_fonts:: pid_shell_startup:: pid_editor_screen_canvas::`：62 passed, 0 failed。
+- 无头 Chromium 对 22 张协同画框（15–21 及状态板 33–36，暗/亮各 11 张）执行 `scrollWidth/scrollHeight` 溢出检测：`TOTAL_OVERFLOWS=0`。
+- 本机未安装 Pencil 桌面端；在 Pencil 应用内打开 `docs/pid-platform/design/pid-platform.pen` 做一次目视复核并重存，仍为人工确认步骤。
