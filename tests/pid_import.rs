@@ -1016,7 +1016,7 @@ fn lettering_carries_the_colour_the_drawing_states() {
 /// left ones do not (a stray point there would be equally wrong).
 #[test]
 fn lettering_starts_from_the_side_the_drawing_states() {
-    use document::entities::TextHorizontalAlignment as HA;
+    use document::entities::{TextHorizontalAlignment as HA, TextVerticalAlignment as VA};
 
     let Some(doc) = import("DWG-0201GP06-01.pid") else {
         return;
@@ -1038,15 +1038,25 @@ fn lettering_starts_from_the_side_the_drawing_states() {
             }
         };
         *sides.entry(key.to_string()).or_default() += 1;
-        // The authored anchor is the run's line-box top, which the importer
-        // states as `Top` vertical alignment; every justification therefore
-        // anchors on `alignment_point`, seeded from the insertion point. A
-        // missing point drops a non-left label at the origin; a stray one
-        // that disagrees with the insertion moves the run off its anchor.
+        // Per RD-14, sheet text runs shift to `Baseline` vertical alignment
+        // and `sync_text_alignment_point` clears `alignment_point` for the
+        // DXF default `(Left, Baseline)`. Every other justification anchors
+        // on `alignment_point`, seeded from `insertion_point`: a missing
+        // point drops a non-left label at the origin, while a stray or
+        // disagreeing point moves the run off its anchor.
+        if text.horizontal_alignment == HA::Left && text.vertical_alignment == VA::Baseline {
+            if let Some(point) = text.alignment_point {
+                misplaced.push(format!(
+                    "Left/Baseline label {:?} carries stray alignment_point {point:?}",
+                    text.value
+                ));
+            }
+            continue;
+        }
         let Some(point) = text.alignment_point else {
             misplaced.push(format!(
-                "{:?} label {:?} carries no alignment_point",
-                text.horizontal_alignment, text.value
+                "{:?}/{:?} label {:?} carries no alignment_point",
+                text.horizontal_alignment, text.vertical_alignment, text.value
             ));
             continue;
         };
@@ -1054,15 +1064,19 @@ fn lettering_starts_from_the_side_the_drawing_states() {
             || (point.y - text.insertion_point.y).abs() > 1.0e-6
         {
             misplaced.push(format!(
-                "{:?} label {:?} anchors at {:?}, not its insertion {:?}",
-                text.horizontal_alignment, text.value, point, text.insertion_point
+                "{:?}/{:?} label {:?} anchors at {:?}, not its insertion {:?}",
+                text.horizontal_alignment,
+                text.vertical_alignment,
+                text.value,
+                point,
+                text.insertion_point
             ));
         }
     }
 
     assert!(
         misplaced.is_empty(),
-        "every label anchors on an alignment point seeded from its insertion: {misplaced:?}"
+        "every label follows DXF alignment_point rules seeded from its insertion: {misplaced:?}"
     );
     // This sheet letters 20 of its 48 labels from somewhere other than the
     // left -- every one of which used to render half a label off. The two
@@ -1500,8 +1514,50 @@ fn import_frames_the_drawing_on_its_sheet() {
 /// opening view agree by construction.
 #[test]
 fn the_sheet_border_is_drawn_at_the_page_the_drawing_states() {
-    let Some(doc) = import("DWG-0201GP06-01.pid") else {
+    let Some(path) = fixture("DWG-0201GP06-01.pid") else {
         return;
+    };
+    let parsed = pid_parse::PidParser::new()
+        .parse_file(&path)
+        .unwrap_or_else(|error| panic!("DWG-0201GP06-01.pid: pid-parse: {error}"));
+    let doc = OpenCADStudio::io::load_file(&path)
+        .unwrap_or_else(|error| panic!("DWG-0201GP06-01.pid: import: {error}"));
+
+    // Per RD-13 (`FramePlacement`), the sheet border starts at the drawing's
+    // own `igSmartFrame2d` range origin (and template frame at its content
+    // translation), rather than forcing the page corner onto `(0, 0)`.
+    let mut frame_origins: Vec<((f64, f64), (f64, f64))> = Vec::new();
+    for frame in parsed
+        .sheet_streams
+        .iter()
+        .filter_map(|sheet| sheet.geometry.as_ref())
+        .flat_map(|geometry| &geometry.decoded_igsmartframes)
+    {
+        if frame.page_extent_m().is_none() {
+            continue;
+        }
+        let (Some(transform), Some(origin_m)) = (frame.content_transform, frame.range_origin_m)
+        else {
+            continue;
+        };
+        if !transform.linear_is_identity() {
+            frame_origins.clear();
+            break;
+        }
+        let pair = (
+            (origin_m[0] * 1000.0, origin_m[1] * 1000.0),
+            (
+                transform.translation_m[0] * 1000.0,
+                transform.translation_m[1] * 1000.0,
+            ),
+        );
+        if !frame_origins.contains(&pair) {
+            frame_origins.push(pair);
+        }
+    }
+    let (expected_corner, expected_template_offset) = match frame_origins.as_slice() {
+        [only] => *only,
+        _ => ((0.0, 0.0), (0.0, 0.0)),
     };
 
     // With the linked `.igr` border template on disk the template draws the
@@ -1546,11 +1602,17 @@ fn the_sheet_border_is_drawn_at_the_page_the_drawing_states() {
     let height = ys.iter().copied().fold(f64::MIN, f64::max) - min_y;
 
     // The template's coordinates come through its own projection, which
-    // leaves a few hundred-thousandths of float noise at the origin.
+    // leaves a few hundred-thousandths of float noise at the frame corner.
+    let (expected_x, expected_y) = if from_template == 0 {
+        expected_corner
+    } else {
+        expected_template_offset
+    };
     let origin_tolerance = if from_template == 0 { 1.0e-9 } else { 1.0e-3 };
     assert!(
-        min_x.abs() < origin_tolerance && min_y.abs() < origin_tolerance,
-        "the page starts at the origin, this one at ({min_x}, {min_y})"
+        (min_x - expected_x).abs() < origin_tolerance
+            && (min_y - expected_y).abs() < origin_tolerance,
+        "the page starts at the drawing's igSmartFrame2d origin ({expected_x}, {expected_y}), this one at ({min_x}, {min_y})"
     );
     // DWG-0201 is an A2 whose own frame measures 594.3 x 420.3mm. The
     // template's frame is its own nominal 594 x 420, within the 2mm the
