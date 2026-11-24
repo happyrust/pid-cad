@@ -1,5 +1,5 @@
 {
-  "version": "2.21",
+  "version": "2.22",
   "children": [
     {
       "type": "frame",
@@ -40090,8 +40090,29 @@
       "x": 3400,
       "y": 3300,
       "descendants": {
+        "WFOqz": {
+          "enabled": false
+        },
+        "sW8Z8": {
+          "content": "ws://127.0.0.1:3240/ws"
+        },
+        "ZJWPH": {
+          "enabled": false
+        },
         "B8ceQ": {
           "content": "P&ID 编辑器"
+        },
+        "d8apIX": {
+          "enabled": false
+        },
+        "dUsBY": {
+          "enabled": false
+        },
+        "qelzh": {
+          "enabled": false
+        },
+        "T6Pno": {
+          "enabled": false
         },
         "Q1rti": {
           "fill": "$accent-soft"
@@ -40102,6 +40123,54 @@
         "XY14O": {
           "fill": "$text-primary",
           "fontWeight": "600"
+        },
+        "UaESQ": {
+          "enabled": false
+        },
+        "TF9P1": {
+          "enabled": false
+        },
+        "Y6lo1S": {
+          "enabled": false
+        },
+        "U5aSD9": {
+          "enabled": false
+        },
+        "E0T5dQ": {
+          "enabled": false
+        },
+        "cZ2b8": {
+          "enabled": false
+        },
+        "xRIzm": {
+          "enabled": false
+        },
+        "ufLE2": {
+          "enabled": false
+        },
+        "bQMFl": {
+          "enabled": false
+        },
+        "Fkp35": {
+          "enabled": false
+        },
+        "S5dfv": {
+          "enabled": false
+        },
+        "fOiJz": {
+          "enabled": false
+        },
+        "jQaUS": {
+          "enabled": false
+        },
+        "jFWz0": {
+          "enabled": false
+        },
+        "NCR5J": {
+          "fill": "$success"
+        },
+        "OgfUi": {
+          "content": "已连接 · 修订 128"
         },
         "tqvXC": {
           "type": "frame",
@@ -40409,7 +40478,10 @@
                     {
                       "type": "frame",
                       "id": "gwJ0G",
+                      "x": 0,
+                      "y": 0,
                       "name": "Tool 仪表回路",
+                      "enabled": false,
                       "fill": "#00000000",
                       "cornerRadius": 3,
                       "gap": 6,
@@ -40439,8 +40511,7 @@
                           "fontSize": 11.5,
                           "fontWeight": "normal"
                         }
-                      ],
-                      "enabled": false
+                      ]
                     },
                     {
                       "type": "frame",
@@ -40482,7 +40553,10 @@
                 {
                   "type": "frame",
                   "id": "ITRVA",
+                  "x": 0,
+                  "y": 0,
                   "name": "Tool Group",
+                  "enabled": false,
                   "fill": "$bg-app",
                   "cornerRadius": "$radius-sm",
                   "gap": 2,
@@ -40558,8 +40632,7 @@
                         }
                       ]
                     }
-                  ],
-                  "enabled": false
+                  ]
                 },
                 {
                   "type": "frame",
@@ -40578,7 +40651,10 @@
                     {
                       "type": "frame",
                       "id": "efjqe",
+                      "x": 0,
+                      "y": 0,
                       "name": "Badge 协同编辑",
+                      "enabled": false,
                       "fill": "$accent-soft",
                       "cornerRadius": 10,
                       "gap": 5,
@@ -40608,8 +40684,7 @@
                           "fontSize": 11,
                           "fontWeight": "500"
                         }
-                      ],
-                      "enabled": false
+                      ]
                     },
                     {
                       "type": "frame",
@@ -40717,7 +40792,10 @@
                 {
                   "type": "frame",
                   "id": "v6iFL",
+                  "x": 0,
+                  "y": 0,
                   "name": "Button 设计规则检查",
+                  "enabled": false,
                   "fill": "$bg-raised",
                   "cornerRadius": "$radius-sm",
                   "stroke": "$border-strong",
@@ -40749,8 +40827,7 @@
                       "fontSize": 12,
                       "fontWeight": "500"
                     }
-                  ],
-                  "enabled": false
+                  ]
                 },
                 {
                   "type": "frame",
@@ -41011,11 +41088,11 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "gap": 6,
                       "padding": [
                         0,
                         10
                       ],
-                      "gap": 6,
                       "alignItems": "center",
                       "children": [
                         {
@@ -42078,6 +42155,7 @@
                           "x": 324,
                           "y": 403,
                           "name": "Violation Pin",
+                          "enabled": false,
                           "fill": "$danger",
                           "cornerRadius": 10,
                           "gap": 5,
@@ -42107,8 +42185,7 @@
                               "fontSize": 10,
                               "fontWeight": "600"
                             }
-                          ],
-                          "enabled": false
+                          ]
                         },
                         {
                           "type": "frame",
@@ -43572,24 +43649,6 @@
             }
           ]
         },
-        "qPf59": {
-          "content": "编辑中 · 捕捉 开 · 正交 关"
-        },
-        "sW8Z8": {
-          "content": "ws://127.0.0.1:3240/ws"
-        },
-        "WFOqz": {
-          "enabled": false
-        },
-        "ZJWPH": {
-          "enabled": false
-        },
-        "d8apIX": {
-          "enabled": false
-        },
-        "dUsBY": {
-          "enabled": false
-        },
         "C59XhI": {
           "enabled": false
         },
@@ -43605,11 +43664,56 @@
         "F6anRU": {
           "enabled": false
         },
+        "qPf59": {
+          "content": "编辑中 · 捕捉 开 · 正交 关"
+        }
+      }
+    },
+    {
+      "id": "QS0qo",
+      "type": "ref",
+      "reusable": true,
+      "ref": "p0zWw",
+      "name": "16 协同 · 只读会话",
+      "x": 5100,
+      "y": 3300,
+      "descendants": {
+        "WFOqz": {
+          "enabled": false
+        },
+        "sW8Z8": {
+          "content": "ws://127.0.0.1:3240/ws"
+        },
+        "ZJWPH": {
+          "enabled": false
+        },
+        "B8ceQ": {
+          "content": "P&ID 编辑器"
+        },
+        "d8apIX": {
+          "enabled": false
+        },
+        "dUsBY": {
+          "enabled": false
+        },
+        "P69cme": {
+          "content": "赵"
+        },
         "qelzh": {
           "enabled": false
         },
         "T6Pno": {
           "enabled": false
+        },
+        "Q1rti": {
+          "fill": "$accent-soft"
+        },
+        "CYNJA": {
+          "fill": "$accent"
+        },
+        "XY14O": {
+          "fill": "$text-primary",
+          "fontWeight": "600"
         },
         "UaESQ": {
           "enabled": false
@@ -43654,37 +43758,10 @@
           "enabled": false
         },
         "NCR5J": {
-          "fill": "$success"
+          "fill": "$amber"
         },
         "OgfUi": {
-          "content": "已连接 · 修订 128"
-        }
-      }
-    },
-    {
-      "id": "QS0qo",
-      "type": "ref",
-      "reusable": true,
-      "ref": "p0zWw",
-      "name": "16 协同 · 只读会话",
-      "x": 5100,
-      "y": 3300,
-      "descendants": {
-        "B8ceQ": {
-          "content": "P&ID 编辑器"
-        },
-        "P69cme": {
-          "content": "赵"
-        },
-        "Q1rti": {
-          "fill": "$accent-soft"
-        },
-        "CYNJA": {
-          "fill": "$accent"
-        },
-        "XY14O": {
-          "fill": "$text-primary",
-          "fontWeight": "600"
+          "content": "已连接 · 只读 · 修订 128"
         },
         "tqvXC": {
           "type": "frame",
@@ -43992,7 +44069,10 @@
                     {
                       "type": "frame",
                       "id": "m88sly",
+                      "x": 0,
+                      "y": 0,
                       "name": "Tool 仪表回路",
+                      "enabled": false,
                       "fill": "#00000000",
                       "cornerRadius": 3,
                       "gap": 6,
@@ -44022,8 +44102,7 @@
                           "fontSize": 11.5,
                           "fontWeight": "normal"
                         }
-                      ],
-                      "enabled": false
+                      ]
                     },
                     {
                       "type": "frame",
@@ -44065,7 +44144,10 @@
                 {
                   "type": "frame",
                   "id": "s1bhVD",
+                  "x": 0,
+                  "y": 0,
                   "name": "Tool Group",
+                  "enabled": false,
                   "fill": "$bg-app",
                   "cornerRadius": "$radius-sm",
                   "gap": 2,
@@ -44141,8 +44223,7 @@
                         }
                       ]
                     }
-                  ],
-                  "enabled": false
+                  ]
                 },
                 {
                   "type": "frame",
@@ -44154,7 +44235,10 @@
                 {
                   "type": "frame",
                   "id": "gXAxX",
+                  "x": 0,
+                  "y": 0,
                   "name": "Button 设计规则检查",
+                  "enabled": false,
                   "fill": "$bg-raised",
                   "cornerRadius": "$radius-sm",
                   "stroke": "$border-strong",
@@ -44186,8 +44270,155 @@
                       "fontSize": 12,
                       "fontWeight": "500"
                     }
-                  ],
-                  "enabled": false
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "AdtW0",
+                  "name": "Presence",
+                  "gap": 8,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "A8I0J",
+                      "x": 0,
+                      "y": 0,
+                      "name": "Badge 协同编辑",
+                      "enabled": false,
+                      "fill": "$accent-soft",
+                      "cornerRadius": 10,
+                      "gap": 5,
+                      "padding": [
+                        2,
+                        8
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "icon",
+                          "id": "NB12e",
+                          "name": "Icon",
+                          "width": 11,
+                          "height": 11,
+                          "icon": "users",
+                          "library": "lucide",
+                          "fill": "$accent"
+                        },
+                        {
+                          "type": "text",
+                          "id": "Bsj0C",
+                          "name": "Label",
+                          "fill": "$accent",
+                          "content": "协同编辑",
+                          "fontFamily": "$font-ui",
+                          "fontSize": 11,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "PUfTH",
+                      "name": "Avatars",
+                      "gap": -6,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "Dq6kY",
+                          "name": "Av 赵",
+                          "width": 22,
+                          "height": 22,
+                          "fill": "$bg-hover",
+                          "cornerRadius": 11,
+                          "stroke": "$accent",
+                          "strokeWidth": 2,
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "SfzSP",
+                              "name": "赵",
+                              "fill": "$text-primary",
+                              "content": "赵",
+                              "fontFamily": "$font-ui",
+                              "fontSize": 10,
+                              "fontWeight": "600"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "VMAIw",
+                          "name": "Av 李",
+                          "width": 22,
+                          "height": 22,
+                          "fill": "$bg-hover",
+                          "cornerRadius": 11,
+                          "stroke": "$bg-panel",
+                          "strokeWidth": 2,
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "cxN8A",
+                              "name": "李",
+                              "fill": "$text-primary",
+                              "content": "李",
+                              "fontFamily": "$font-ui",
+                              "fontSize": 10,
+                              "fontWeight": "600"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "b9snB9",
+                          "name": "Av 王",
+                          "width": 22,
+                          "height": 22,
+                          "fill": "$bg-hover",
+                          "cornerRadius": 11,
+                          "stroke": "$bg-panel",
+                          "strokeWidth": 2,
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "ysf9t",
+                              "name": "王",
+                              "fill": "$text-primary",
+                              "content": "王",
+                              "fontFamily": "$font-ui",
+                              "fontSize": 10,
+                              "fontWeight": "600"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "cgk21",
+                      "name": "3 人在线",
+                      "fill": "$text-secondary",
+                      "content": "3 人在线",
+                      "fontFamily": "$font-ui",
+                      "fontSize": 11.5,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "rectangle",
+                      "id": "tCVIr",
+                      "name": "Sep",
+                      "fill": "$border",
+                      "width": 1,
+                      "height": 20
+                    }
+                  ]
                 },
                 {
                   "type": "frame",
@@ -44225,119 +44456,6 @@
                       "fontWeight": "500"
                     }
                   ]
-                }
-              ]
-            },
-            {
-              "type": "frame",
-              "id": "b9pVlk",
-              "name": "Readonly Banner",
-              "width": "fill_container",
-              "fill": "$amber-soft",
-              "stroke": "$border",
-              "strokeWidth": {
-                "bottom": 1
-              },
-              "gap": 10,
-              "padding": [
-                8,
-                16
-              ],
-              "alignItems": "center",
-              "children": [
-                {
-                  "type": "icon",
-                  "id": "elmr9",
-                  "name": "I",
-                  "width": 14,
-                  "height": 14,
-                  "icon": "lock",
-                  "library": "lucide",
-                  "fill": "$amber"
-                },
-                {
-                  "type": "text",
-                  "id": "L1tDj",
-                  "name": "只读",
-                  "fill": "$amber",
-                  "content": "只读",
-                  "fontFamily": "$font-ui",
-                  "fontSize": 12,
-                  "fontWeight": "600"
-                },
-                {
-                  "type": "text",
-                  "id": "DCu3d",
-                  "name": "Reason",
-                  "fill": "$text-primary",
-                  "content": "图纸处于「单人编辑」，编辑权在 李工（u2）；仅单人编辑显示编辑权持有者，图纸状态「只读」时不显示。",
-                  "fontFamily": "$font-ui",
-                  "fontSize": 12,
-                  "fontWeight": "normal"
-                },
-                {
-                  "type": "frame",
-                  "id": "HuVWe",
-                  "name": "Spacer",
-                  "width": "fill_container",
-                  "height": 1
-                },
-                {
-                  "type": "text",
-                  "id": "zNxV4",
-                  "name": "Cause",
-                  "fill": "$text-secondary",
-                  "content": "三级拒绝：图纸状态",
-                  "fontFamily": "$font-ui",
-                  "fontSize": 11,
-                  "fontWeight": "normal"
-                },
-                {
-                  "type": "frame",
-                  "id": "jXy2N",
-                  "name": "Button 重新申请写权限",
-                  "fill": "$accent-soft",
-                  "cornerRadius": "$radius-sm",
-                  "stroke": "$accent",
-                  "strokeWidth": 1,
-                  "gap": 6,
-                  "padding": [
-                    3,
-                    8
-                  ],
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "icon",
-                      "id": "vJmRM",
-                      "name": "Icon",
-                      "width": 12,
-                      "height": 12,
-                      "icon": "key-round",
-                      "library": "lucide",
-                      "fill": "$accent"
-                    },
-                    {
-                      "type": "text",
-                      "id": "ztc5f",
-                      "name": "Label",
-                      "fill": "$accent",
-                      "content": "重新申请写权限",
-                      "fontFamily": "$font-ui",
-                      "fontSize": 11,
-                      "fontWeight": "500"
-                    }
-                  ]
-                },
-                {
-                  "type": "text",
-                  "id": "PbQbE",
-                  "name": "Hint",
-                  "fill": "$text-muted",
-                  "content": "点击当场重算（无需人批）",
-                  "fontFamily": "$font-ui",
-                  "fontSize": 10.5,
-                  "fontWeight": "normal"
                 }
               ]
             },
@@ -44563,11 +44681,11 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "gap": 6,
                       "padding": [
                         0,
                         10
                       ],
-                      "gap": 6,
                       "alignItems": "center",
                       "children": [
                         {
@@ -44647,6 +44765,115 @@
                               "fontWeight": "normal"
                             }
                           ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "b9pVlk",
+                      "name": "Readonly Banner",
+                      "width": "fill_container",
+                      "fill": "$amber-soft",
+                      "stroke": "$border",
+                      "strokeWidth": {
+                        "bottom": 1
+                      },
+                      "gap": 8,
+                      "padding": [
+                        6,
+                        12
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "icon",
+                          "id": "elmr9",
+                          "name": "I",
+                          "width": 14,
+                          "height": 14,
+                          "icon": "lock",
+                          "library": "lucide",
+                          "fill": "$amber"
+                        },
+                        {
+                          "type": "text",
+                          "id": "L1tDj",
+                          "name": "只读",
+                          "fill": "$amber",
+                          "content": "只读",
+                          "fontFamily": "$font-ui",
+                          "fontSize": 12,
+                          "fontWeight": "600"
+                        },
+                        {
+                          "type": "text",
+                          "id": "DCu3d",
+                          "name": "Reason",
+                          "fill": "$text-primary",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "图纸处于「单人编辑」，编辑权在 李工（u2）；仅单人编辑显示编辑权持有者，图纸状态「只读」时不显示。",
+                          "lineHeight": 1.35,
+                          "fontFamily": "$font-ui",
+                          "fontSize": 11.5,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "zNxV4",
+                          "name": "Cause",
+                          "fill": "$text-secondary",
+                          "content": "三级拒绝：图纸状态",
+                          "fontFamily": "$font-ui",
+                          "fontSize": 11,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "jXy2N",
+                          "name": "Button 重新申请写权限",
+                          "fill": "$accent-soft",
+                          "cornerRadius": "$radius-sm",
+                          "stroke": "$accent",
+                          "strokeWidth": 1,
+                          "gap": 6,
+                          "padding": [
+                            3,
+                            8
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "icon",
+                              "id": "vJmRM",
+                              "name": "Icon",
+                              "width": 12,
+                              "height": 12,
+                              "icon": "key-round",
+                              "library": "lucide",
+                              "fill": "$accent"
+                            },
+                            {
+                              "type": "text",
+                              "id": "ztc5f",
+                              "name": "Label",
+                              "fill": "$accent",
+                              "content": "重新申请写权限",
+                              "fontFamily": "$font-ui",
+                              "fontSize": 11,
+                              "fontWeight": "500"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "PbQbE",
+                          "name": "Hint",
+                          "fill": "$text-muted",
+                          "content": "点击当场重算（无需人批）",
+                          "fontFamily": "$font-ui",
+                          "fontSize": 10.5,
+                          "fontWeight": "normal"
                         }
                       ]
                     },
@@ -45682,6 +45909,7 @@
                           "x": 324,
                           "y": 403,
                           "name": "Violation Pin",
+                          "enabled": false,
                           "fill": "$danger",
                           "cornerRadius": 10,
                           "gap": 5,
@@ -45711,8 +45939,7 @@
                               "fontSize": 10,
                               "fontWeight": "600"
                             }
-                          ],
-                          "enabled": false
+                          ]
                         },
                         {
                           "type": "frame",
@@ -47035,24 +47262,6 @@
             }
           ]
         },
-        "qPf59": {
-          "content": "只读 · 捕捉 开 · 正交 关"
-        },
-        "sW8Z8": {
-          "content": "ws://127.0.0.1:3240/ws"
-        },
-        "WFOqz": {
-          "enabled": false
-        },
-        "ZJWPH": {
-          "enabled": false
-        },
-        "d8apIX": {
-          "enabled": false
-        },
-        "dUsBY": {
-          "enabled": false
-        },
         "C59XhI": {
           "enabled": false
         },
@@ -47068,11 +47277,53 @@
         "F6anRU": {
           "enabled": false
         },
+        "qPf59": {
+          "content": "只读 · 捕捉 开 · 正交 关"
+        }
+      }
+    },
+    {
+      "id": "zx32y",
+      "type": "ref",
+      "reusable": true,
+      "ref": "p0zWw",
+      "name": "18 协同 · 变更通知",
+      "x": 1700,
+      "y": 4400,
+      "descendants": {
+        "WFOqz": {
+          "enabled": false
+        },
+        "sW8Z8": {
+          "content": "ws://127.0.0.1:3240/ws"
+        },
+        "ZJWPH": {
+          "enabled": false
+        },
+        "B8ceQ": {
+          "content": "P&ID 编辑器"
+        },
+        "d8apIX": {
+          "enabled": false
+        },
+        "dUsBY": {
+          "enabled": false
+        },
         "qelzh": {
           "enabled": false
         },
         "T6Pno": {
           "enabled": false
+        },
+        "Q1rti": {
+          "fill": "$accent-soft"
+        },
+        "CYNJA": {
+          "fill": "$accent"
+        },
+        "XY14O": {
+          "fill": "$text-primary",
+          "fontWeight": "600"
         },
         "UaESQ": {
           "enabled": false
@@ -47117,37 +47368,10 @@
           "enabled": false
         },
         "NCR5J": {
-          "fill": "$amber"
+          "fill": "$success"
         },
         "OgfUi": {
-          "content": "已连接 · 只读 · 修订 128"
-        }
-      }
-    },
-    {
-      "id": "zx32y",
-      "type": "ref",
-      "reusable": true,
-      "ref": "p0zWw",
-      "name": "18 协同 · 变更通知",
-      "x": 1700,
-      "y": 4400,
-      "descendants": {
-        "B8ceQ": {
-          "content": "P&ID 编辑器"
-        },
-        "dUsBY": {
-          "enabled": false
-        },
-        "Q1rti": {
-          "fill": "$accent-soft"
-        },
-        "CYNJA": {
-          "fill": "$accent"
-        },
-        "XY14O": {
-          "fill": "$text-primary",
-          "fontWeight": "600"
+          "content": "已连接 · 修订 129"
         },
         "tqvXC": {
           "type": "frame",
@@ -47455,7 +47679,10 @@
                     {
                       "type": "frame",
                       "id": "K42pV9",
+                      "x": 0,
+                      "y": 0,
                       "name": "Tool 仪表回路",
+                      "enabled": false,
                       "fill": "#00000000",
                       "cornerRadius": 3,
                       "gap": 6,
@@ -47485,8 +47712,7 @@
                           "fontSize": 11.5,
                           "fontWeight": "normal"
                         }
-                      ],
-                      "enabled": false
+                      ]
                     },
                     {
                       "type": "frame",
@@ -47528,7 +47754,10 @@
                 {
                   "type": "frame",
                   "id": "maHaD",
+                  "x": 0,
+                  "y": 0,
                   "name": "Tool Group",
+                  "enabled": false,
                   "fill": "$bg-app",
                   "cornerRadius": "$radius-sm",
                   "gap": 2,
@@ -47604,8 +47833,7 @@
                         }
                       ]
                     }
-                  ],
-                  "enabled": false
+                  ]
                 },
                 {
                   "type": "frame",
@@ -47617,7 +47845,10 @@
                 {
                   "type": "frame",
                   "id": "LgtH0",
+                  "x": 0,
+                  "y": 0,
                   "name": "Button 设计规则检查",
+                  "enabled": false,
                   "fill": "$bg-raised",
                   "cornerRadius": "$radius-sm",
                   "stroke": "$border-strong",
@@ -47649,8 +47880,155 @@
                       "fontSize": 12,
                       "fontWeight": "500"
                     }
-                  ],
-                  "enabled": false
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "dbwRH",
+                  "name": "Presence",
+                  "gap": 8,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "aeuVD",
+                      "x": 0,
+                      "y": 0,
+                      "name": "Badge 协同编辑",
+                      "enabled": false,
+                      "fill": "$accent-soft",
+                      "cornerRadius": 10,
+                      "gap": 5,
+                      "padding": [
+                        2,
+                        8
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "icon",
+                          "id": "XlFGO",
+                          "name": "Icon",
+                          "width": 11,
+                          "height": 11,
+                          "icon": "users",
+                          "library": "lucide",
+                          "fill": "$accent"
+                        },
+                        {
+                          "type": "text",
+                          "id": "T0tZL6",
+                          "name": "Label",
+                          "fill": "$accent",
+                          "content": "协同编辑",
+                          "fontFamily": "$font-ui",
+                          "fontSize": 11,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "ynDDu",
+                      "name": "Avatars",
+                      "gap": -6,
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "q0jnR",
+                          "name": "Av 王",
+                          "width": 22,
+                          "height": 22,
+                          "fill": "$bg-hover",
+                          "cornerRadius": 11,
+                          "stroke": "$accent",
+                          "strokeWidth": 2,
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "WJjXl",
+                              "name": "王",
+                              "fill": "$text-primary",
+                              "content": "王",
+                              "fontFamily": "$font-ui",
+                              "fontSize": 10,
+                              "fontWeight": "600"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "TKbw8",
+                          "name": "Av 李",
+                          "width": 22,
+                          "height": 22,
+                          "fill": "$bg-hover",
+                          "cornerRadius": 11,
+                          "stroke": "$bg-panel",
+                          "strokeWidth": 2,
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "E1YWT",
+                              "name": "李",
+                              "fill": "$text-primary",
+                              "content": "李",
+                              "fontFamily": "$font-ui",
+                              "fontSize": 10,
+                              "fontWeight": "600"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "QKsKW",
+                          "name": "Av 赵",
+                          "width": 22,
+                          "height": 22,
+                          "fill": "$bg-hover",
+                          "cornerRadius": 11,
+                          "stroke": "$bg-panel",
+                          "strokeWidth": 2,
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "K315qd",
+                              "name": "赵",
+                              "fill": "$text-primary",
+                              "content": "赵",
+                              "fontFamily": "$font-ui",
+                              "fontSize": 10,
+                              "fontWeight": "600"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "b5bWhG",
+                      "name": "3 人在线",
+                      "fill": "$text-secondary",
+                      "content": "3 人在线",
+                      "fontFamily": "$font-ui",
+                      "fontSize": 11.5,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "rectangle",
+                      "id": "Ki7wg",
+                      "name": "Sep",
+                      "fill": "$border",
+                      "width": 1,
+                      "height": 20
+                    }
+                  ]
                 },
                 {
                   "type": "frame",
@@ -47911,11 +48289,11 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "gap": 6,
                       "padding": [
                         0,
                         10
                       ],
-                      "gap": 6,
                       "alignItems": "center",
                       "children": [
                         {
@@ -49030,6 +49408,7 @@
                           "x": 324,
                           "y": 403,
                           "name": "Violation Pin",
+                          "enabled": false,
                           "fill": "$danger",
                           "cornerRadius": 10,
                           "gap": 5,
@@ -49059,8 +49438,7 @@
                               "fontSize": 10,
                               "fontWeight": "600"
                             }
-                          ],
-                          "enabled": false
+                          ]
                         },
                         {
                           "type": "frame",
@@ -50238,21 +50616,6 @@
             }
           ]
         },
-        "qPf59": {
-          "content": "编辑中 · 捕捉 开 · 正交 关"
-        },
-        "sW8Z8": {
-          "content": "ws://127.0.0.1:3240/ws"
-        },
-        "WFOqz": {
-          "enabled": false
-        },
-        "ZJWPH": {
-          "enabled": false
-        },
-        "d8apIX": {
-          "enabled": false
-        },
         "C59XhI": {
           "enabled": false
         },
@@ -50268,11 +50631,53 @@
         "F6anRU": {
           "enabled": false
         },
+        "qPf59": {
+          "content": "编辑中 · 捕捉 开 · 正交 关"
+        }
+      }
+    },
+    {
+      "id": "Rssv2",
+      "type": "ref",
+      "reusable": true,
+      "ref": "p0zWw",
+      "name": "17 协同 · 连接状态",
+      "x": 0,
+      "y": 4400,
+      "descendants": {
+        "WFOqz": {
+          "enabled": false
+        },
+        "sW8Z8": {
+          "content": "ws://127.0.0.1:3240/ws"
+        },
+        "ZJWPH": {
+          "enabled": false
+        },
+        "B8ceQ": {
+          "content": "P&ID 编辑器"
+        },
+        "d8apIX": {
+          "enabled": false
+        },
+        "dUsBY": {
+          "enabled": false
+        },
         "qelzh": {
           "enabled": false
         },
         "T6Pno": {
           "enabled": false
+        },
+        "Q1rti": {
+          "fill": "$accent-soft"
+        },
+        "CYNJA": {
+          "fill": "$accent"
+        },
+        "XY14O": {
+          "fill": "$text-primary",
+          "fontWeight": "600"
         },
         "UaESQ": {
           "enabled": false
@@ -50320,31 +50725,7 @@
           "fill": "$success"
         },
         "OgfUi": {
-          "content": "已连接 · 修订 129"
-        }
-      }
-    },
-    {
-      "id": "Rssv2",
-      "type": "ref",
-      "reusable": true,
-      "ref": "p0zWw",
-      "name": "17 协同 · 连接状态",
-      "x": 0,
-      "y": 4400,
-      "descendants": {
-        "B8ceQ": {
-          "content": "P&ID 编辑器"
-        },
-        "Q1rti": {
-          "fill": "$accent-soft"
-        },
-        "CYNJA": {
-          "fill": "$accent"
-        },
-        "XY14O": {
-          "fill": "$text-primary",
-          "fontWeight": "600"
+          "content": "已连接 · 修订 128"
         },
         "tqvXC": {
           "type": "frame",
@@ -53130,24 +53511,6 @@
             }
           ]
         },
-        "qPf59": {
-          "content": "编辑中 · 捕捉 开 · 正交 关"
-        },
-        "sW8Z8": {
-          "content": "ws://127.0.0.1:3240/ws"
-        },
-        "WFOqz": {
-          "enabled": false
-        },
-        "ZJWPH": {
-          "enabled": false
-        },
-        "d8apIX": {
-          "enabled": false
-        },
-        "dUsBY": {
-          "enabled": false
-        },
         "C59XhI": {
           "enabled": false
         },
@@ -53161,6 +53524,38 @@
           "enabled": false
         },
         "F6anRU": {
+          "enabled": false
+        },
+        "qPf59": {
+          "content": "编辑中 · 捕捉 开 · 正交 关"
+        }
+      }
+    },
+    {
+      "id": "lBqaJ",
+      "type": "ref",
+      "reusable": true,
+      "ref": "p0zWw",
+      "name": "19 协同 · 冲突裁决",
+      "x": 3400,
+      "y": 4400,
+      "descendants": {
+        "WFOqz": {
+          "enabled": false
+        },
+        "sW8Z8": {
+          "content": "ws://127.0.0.1:3240/ws"
+        },
+        "ZJWPH": {
+          "enabled": false
+        },
+        "B8ceQ": {
+          "content": "P&ID 编辑器 / 冲突裁决（下一轮界面）"
+        },
+        "d8apIX": {
+          "enabled": false
+        },
+        "dUsBY": {
           "enabled": false
         },
         "qelzh": {
@@ -53216,23 +53611,6 @@
         },
         "OgfUi": {
           "content": "已连接 · 修订 128"
-        }
-      }
-    },
-    {
-      "id": "lBqaJ",
-      "type": "ref",
-      "reusable": true,
-      "ref": "p0zWw",
-      "name": "19 协同 · 冲突裁决",
-      "x": 3400,
-      "y": 4400,
-      "descendants": {
-        "B8ceQ": {
-          "content": "P&ID 编辑器 / 冲突裁决（下一轮界面）"
-        },
-        "jFWz0": {
-          "enabled": false
         },
         "tqvXC": {
           "type": "frame",
@@ -56217,24 +56595,6 @@
             }
           ]
         },
-        "qPf59": {
-          "content": "编辑中 · 捕捉 开 · 正交 关"
-        },
-        "sW8Z8": {
-          "content": "ws://127.0.0.1:3240/ws"
-        },
-        "WFOqz": {
-          "enabled": false
-        },
-        "ZJWPH": {
-          "enabled": false
-        },
-        "d8apIX": {
-          "enabled": false
-        },
-        "dUsBY": {
-          "enabled": false
-        },
         "C59XhI": {
           "enabled": false
         },
@@ -56250,11 +56610,67 @@
         "F6anRU": {
           "enabled": false
         },
+        "qPf59": {
+          "content": "编辑中 · 捕捉 开 · 正交 关"
+        }
+      }
+    },
+    {
+      "id": "I4Mwwx",
+      "type": "ref",
+      "reusable": true,
+      "ref": "lBqaJ",
+      "name": "20 协同 · 裁决对话框",
+      "x": 5100,
+      "y": 4400,
+      "descendants": {
+        "RftYx": {
+          "enabled": true
+        }
+      }
+    },
+    {
+      "id": "im68t",
+      "type": "ref",
+      "reusable": true,
+      "ref": "p0zWw",
+      "name": "21 协同 · 修改历史",
+      "x": 0,
+      "y": 5500,
+      "descendants": {
+        "WFOqz": {
+          "enabled": false
+        },
+        "sW8Z8": {
+          "content": "ws://127.0.0.1:3240/ws"
+        },
+        "ZJWPH": {
+          "enabled": false
+        },
+        "B8ceQ": {
+          "content": "P&ID 编辑器 / V-1001 · 修改历史"
+        },
+        "d8apIX": {
+          "enabled": false
+        },
+        "dUsBY": {
+          "enabled": false
+        },
         "qelzh": {
           "enabled": false
         },
         "T6Pno": {
           "enabled": false
+        },
+        "Q1rti": {
+          "fill": "$accent-soft"
+        },
+        "CYNJA": {
+          "fill": "$accent"
+        },
+        "XY14O": {
+          "fill": "$text-primary",
+          "fontWeight": "600"
         },
         "UaESQ": {
           "enabled": false
@@ -56295,42 +56711,14 @@
         "jQaUS": {
           "enabled": false
         },
+        "jFWz0": {
+          "enabled": false
+        },
         "NCR5J": {
           "fill": "$success"
         },
         "OgfUi": {
-          "content": "已连接 · 修订 128"
-        }
-      }
-    },
-    {
-      "id": "I4Mwwx",
-      "type": "ref",
-      "reusable": true,
-      "ref": "lBqaJ",
-      "name": "20 协同 · 裁决对话框",
-      "x": 5100,
-      "y": 4400,
-      "descendants": {
-        "RftYx": {
-          "enabled": true
-        }
-      }
-    },
-    {
-      "id": "im68t",
-      "type": "ref",
-      "reusable": true,
-      "ref": "p0zWw",
-      "name": "21 协同 · 修改历史",
-      "x": 0,
-      "y": 5500,
-      "descendants": {
-        "B8ceQ": {
-          "content": "P&ID 编辑器 / V-1001 · 修改历史"
-        },
-        "jFWz0": {
-          "enabled": false
+          "content": "已连接 · 修订 130"
         },
         "tqvXC": {
           "type": "frame",
@@ -56434,7 +56822,10 @@
                 {
                   "type": "frame",
                   "id": "X9SHcV",
+                  "x": 0,
+                  "y": 0,
                   "name": "Button 导出",
+                  "enabled": false,
                   "fill": "$bg-raised",
                   "cornerRadius": "$radius-sm",
                   "stroke": "$border-strong",
@@ -56466,8 +56857,7 @@
                       "fontSize": 12,
                       "fontWeight": "500"
                     }
-                  ],
-                  "enabled": false
+                  ]
                 }
               ]
             },
@@ -57469,7 +57859,7 @@
                               "id": "DCiav",
                               "name": "Cell",
                               "clip": true,
-                              "width": 108,
+                              "width": 90,
                               "height": "fill_container",
                               "gap": 6,
                               "padding": [
@@ -57495,7 +57885,7 @@
                               "id": "cndyW",
                               "name": "Cell",
                               "clip": true,
-                              "width": 84,
+                              "width": 108,
                               "height": "fill_container",
                               "gap": 6,
                               "padding": [
@@ -58896,24 +59286,6 @@
             }
           ]
         },
-        "qPf59": {
-          "content": "编辑中 · 捕捉 开 · 正交 关"
-        },
-        "sW8Z8": {
-          "content": "ws://127.0.0.1:3240/ws"
-        },
-        "WFOqz": {
-          "enabled": false
-        },
-        "ZJWPH": {
-          "enabled": false
-        },
-        "d8apIX": {
-          "enabled": false
-        },
-        "dUsBY": {
-          "enabled": false
-        },
         "C59XhI": {
           "enabled": false
         },
@@ -58929,66 +59301,8 @@
         "F6anRU": {
           "enabled": false
         },
-        "qelzh": {
-          "enabled": false
-        },
-        "T6Pno": {
-          "enabled": false
-        },
-        "UaESQ": {
-          "enabled": false
-        },
-        "TF9P1": {
-          "enabled": false
-        },
-        "Y6lo1S": {
-          "enabled": false
-        },
-        "U5aSD9": {
-          "enabled": false
-        },
-        "E0T5dQ": {
-          "enabled": false
-        },
-        "cZ2b8": {
-          "enabled": false
-        },
-        "xRIzm": {
-          "enabled": false
-        },
-        "ufLE2": {
-          "enabled": false
-        },
-        "bQMFl": {
-          "enabled": false
-        },
-        "Fkp35": {
-          "enabled": false
-        },
-        "S5dfv": {
-          "enabled": false
-        },
-        "fOiJz": {
-          "enabled": false
-        },
-        "jQaUS": {
-          "enabled": false
-        },
-        "Q1rti": {
-          "fill": "$accent-soft"
-        },
-        "CYNJA": {
-          "fill": "$accent"
-        },
-        "XY14O": {
-          "fill": "$text-primary",
-          "fontWeight": "600"
-        },
-        "NCR5J": {
-          "fill": "$success"
-        },
-        "OgfUi": {
-          "content": "已连接 · 修订 130"
+        "qPf59": {
+          "content": "编辑中 · 捕捉 开 · 正交 关"
         }
       }
     },
@@ -59099,12 +59413,9 @@
           "height": "fill_container",
           "fill": "$bg-app",
           "layout": "vertical",
-          "alignItems": "center",
+          "padding": 40,
           "justifyContent": "center",
-          "padding": [
-            40,
-            40
-          ],
+          "alignItems": "center",
           "children": [
             {
               "type": "frame",
@@ -59112,15 +59423,15 @@
               "name": "State Card",
               "width": 560,
               "fill": "$bg-panel",
+              "cornerRadius": "$radius-md",
               "stroke": "$border",
               "strokeWidth": 1,
-              "cornerRadius": "$radius-md",
               "layout": "vertical",
+              "gap": 14,
               "padding": [
                 28,
                 32
               ],
-              "gap": 14,
               "children": [
                 {
                   "type": "text",
@@ -59260,12 +59571,9 @@
           "height": "fill_container",
           "fill": "$bg-app",
           "layout": "vertical",
-          "alignItems": "center",
+          "padding": 40,
           "justifyContent": "center",
-          "padding": [
-            40,
-            40
-          ],
+          "alignItems": "center",
           "children": [
             {
               "type": "frame",
@@ -59273,15 +59581,15 @@
               "name": "State Card",
               "width": 560,
               "fill": "$bg-panel",
+              "cornerRadius": "$radius-md",
               "stroke": "$accent",
               "strokeWidth": 1,
-              "cornerRadius": "$radius-md",
               "layout": "vertical",
+              "gap": 14,
               "padding": [
                 28,
                 32
               ],
-              "gap": 14,
               "children": [
                 {
                   "type": "text",
@@ -59307,8 +59615,9 @@
                   "type": "frame",
                   "id": "Br0016",
                   "name": "Actions",
-                  "gap": 10,
-                  "children": []
+                  "width": "fit_content(0)",
+                  "height": "fit_content(0)",
+                  "gap": 10
                 }
               ]
             }
@@ -59644,11 +59953,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 6,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "text",
@@ -59667,11 +59973,11 @@
                       "width": "fill_container",
                       "fill": "$accent-soft",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -59710,11 +60016,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -59753,11 +60059,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -59796,11 +60102,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -59846,11 +60152,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 8,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "frame",
@@ -59858,9 +60161,9 @@
                       "name": "Search Box",
                       "width": "fill_container",
                       "fill": "$bg-input",
+                      "cornerRadius": "$radius-sm",
                       "stroke": "$border-control",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-sm",
                       "padding": [
                         7,
                         10
@@ -59888,12 +60191,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -59927,12 +60230,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -59966,12 +60269,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -60005,12 +60308,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -60044,19 +60347,19 @@
                   "height": "fill_container",
                   "fill": "$bg-app",
                   "layout": "vertical",
+                  "gap": 12,
                   "padding": [
                     16,
                     20
                   ],
-                  "gap": 12,
                   "children": [
                     {
                       "type": "frame",
                       "id": "Ba0081",
                       "name": "Detail Header",
                       "width": "fill_container",
-                      "alignItems": "center",
                       "gap": 10,
+                      "alignItems": "center",
                       "children": [
                         {
                           "type": "text",
@@ -60120,15 +60423,15 @@
                       "name": "DB Fields Card",
                       "width": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 6,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 6,
                       "children": [
                         {
                           "type": "text",
@@ -60159,15 +60462,15 @@
                       "width": "fill_container",
                       "height": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 8,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 8,
                       "children": [
                         {
                           "type": "text",
@@ -60557,11 +60860,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 6,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "text",
@@ -60580,11 +60880,11 @@
                       "width": "fill_container",
                       "fill": "$accent-soft",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -60623,11 +60923,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -60666,11 +60966,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -60709,11 +61009,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -60759,11 +61059,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 8,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "frame",
@@ -60771,9 +61068,9 @@
                       "name": "Search Box",
                       "width": "fill_container",
                       "fill": "$bg-input",
+                      "cornerRadius": "$radius-sm",
                       "stroke": "$border-control",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-sm",
                       "padding": [
                         7,
                         10
@@ -60801,12 +61098,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -60840,12 +61137,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -60879,12 +61176,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -60918,12 +61215,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -60957,19 +61254,19 @@
                   "height": "fill_container",
                   "fill": "$bg-app",
                   "layout": "vertical",
+                  "gap": 12,
                   "padding": [
                     16,
                     20
                   ],
-                  "gap": 12,
                   "children": [
                     {
                       "type": "frame",
                       "id": "Ba0153",
                       "name": "Detail Header",
                       "width": "fill_container",
-                      "alignItems": "center",
                       "gap": 10,
+                      "alignItems": "center",
                       "children": [
                         {
                           "type": "text",
@@ -61033,15 +61330,15 @@
                       "name": "DB Fields Card",
                       "width": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 6,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 6,
                       "children": [
                         {
                           "type": "text",
@@ -61072,15 +61369,15 @@
                       "width": "fill_container",
                       "height": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 8,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 8,
                       "children": [
                         {
                           "type": "frame",
@@ -61088,15 +61385,15 @@
                           "name": "Unreadable Notice",
                           "width": "fill_container",
                           "fill": "$amber-soft",
+                          "cornerRadius": "$radius-sm",
                           "stroke": "$amber",
                           "strokeWidth": 1,
-                          "cornerRadius": "$radius-sm",
+                          "layout": "vertical",
+                          "gap": 4,
                           "padding": [
                             10,
                             12
                           ],
-                          "layout": "vertical",
-                          "gap": 4,
                           "children": [
                             {
                               "type": "text",
@@ -61160,12 +61457,9 @@
           "height": "fill_container",
           "fill": "$bg-app",
           "layout": "vertical",
-          "alignItems": "center",
+          "padding": 40,
           "justifyContent": "center",
-          "padding": [
-            40,
-            40
-          ],
+          "alignItems": "center",
           "children": [
             {
               "type": "frame",
@@ -61173,15 +61467,15 @@
               "name": "State Card",
               "width": 560,
               "fill": "$danger-soft",
+              "cornerRadius": "$radius-md",
               "stroke": "$danger",
               "strokeWidth": 1,
-              "cornerRadius": "$radius-md",
               "layout": "vertical",
+              "gap": 14,
               "padding": [
                 28,
                 32
               ],
-              "gap": 14,
               "children": [
                 {
                   "type": "text",
@@ -61606,8 +61900,8 @@
               "width": "fill_container",
               "height": "fill_container",
               "fill": "$overlay",
-              "alignItems": "center",
               "justifyContent": "center",
+              "alignItems": "center",
               "children": [
                 {
                   "type": "frame",
@@ -61615,15 +61909,15 @@
                   "name": "Dialog Card",
                   "width": 560,
                   "fill": "$bg-panel",
+                  "cornerRadius": "$radius-md",
                   "stroke": "$border-strong",
                   "strokeWidth": 1,
-                  "cornerRadius": "$radius-md",
                   "layout": "vertical",
+                  "gap": 12,
                   "padding": [
                     20,
                     24
                   ],
-                  "gap": 12,
                   "children": [
                     {
                       "type": "text",
@@ -62062,8 +62356,8 @@
               "width": "fill_container",
               "height": "fill_container",
               "fill": "$overlay",
-              "alignItems": "center",
               "justifyContent": "center",
+              "alignItems": "center",
               "children": [
                 {
                   "type": "frame",
@@ -62071,15 +62365,15 @@
                   "name": "Dialog Card",
                   "width": 560,
                   "fill": "$bg-panel",
+                  "cornerRadius": "$radius-md",
                   "stroke": "$border-strong",
                   "strokeWidth": 1,
-                  "cornerRadius": "$radius-md",
                   "layout": "vertical",
+                  "gap": 12,
                   "padding": [
                     20,
                     24
                   ],
-                  "gap": 12,
                   "children": [
                     {
                       "type": "text",
@@ -62511,11 +62805,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 10,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -62667,11 +62961,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 10,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -62833,11 +63127,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 6,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "text",
@@ -62856,11 +63147,11 @@
                       "width": "fill_container",
                       "fill": "$accent-soft",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -62899,11 +63190,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -62942,11 +63233,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -62985,11 +63276,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -63035,11 +63326,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 8,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "frame",
@@ -63047,9 +63335,9 @@
                       "name": "Search Box",
                       "width": "fill_container",
                       "fill": "$bg-input",
+                      "cornerRadius": "$radius-sm",
                       "stroke": "$border-control",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-sm",
                       "padding": [
                         7,
                         10
@@ -63077,12 +63365,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -63116,12 +63404,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -63155,12 +63443,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -63194,12 +63482,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -63233,19 +63521,19 @@
                   "height": "fill_container",
                   "fill": "$bg-app",
                   "layout": "vertical",
+                  "gap": 12,
                   "padding": [
                     16,
                     20
                   ],
-                  "gap": 12,
                   "children": [
                     {
                       "type": "frame",
                       "id": "Ba0335",
                       "name": "Detail Header",
                       "width": "fill_container",
-                      "alignItems": "center",
                       "gap": 10,
+                      "alignItems": "center",
                       "children": [
                         {
                           "type": "text",
@@ -63309,15 +63597,15 @@
                       "name": "DB Fields Card",
                       "width": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 6,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 6,
                       "children": [
                         {
                           "type": "text",
@@ -63348,15 +63636,15 @@
                       "width": "fill_container",
                       "height": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 8,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 8,
                       "children": [
                         {
                           "type": "text",
@@ -63736,11 +64024,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 10,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -63892,11 +64180,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 10,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -64058,11 +64346,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 6,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "text",
@@ -64081,11 +64366,11 @@
                       "width": "fill_container",
                       "fill": "$accent-soft",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -64124,11 +64409,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -64167,11 +64452,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -64210,11 +64495,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -64260,11 +64545,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 8,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "frame",
@@ -64272,9 +64554,9 @@
                       "name": "Search Box",
                       "width": "fill_container",
                       "fill": "$bg-input",
+                      "cornerRadius": "$radius-sm",
                       "stroke": "$border-control",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-sm",
                       "padding": [
                         7,
                         10
@@ -64302,12 +64584,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -64341,12 +64623,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -64380,12 +64662,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -64419,12 +64701,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -64458,19 +64740,19 @@
                   "height": "fill_container",
                   "fill": "$bg-app",
                   "layout": "vertical",
+                  "gap": 12,
                   "padding": [
                     16,
                     20
                   ],
-                  "gap": 12,
                   "children": [
                     {
                       "type": "frame",
                       "id": "Ba0435",
                       "name": "Detail Header",
                       "width": "fill_container",
-                      "alignItems": "center",
                       "gap": 10,
+                      "alignItems": "center",
                       "children": [
                         {
                           "type": "text",
@@ -64534,15 +64816,15 @@
                       "name": "DB Fields Card",
                       "width": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 6,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 6,
                       "children": [
                         {
                           "type": "text",
@@ -64573,15 +64855,15 @@
                       "width": "fill_container",
                       "height": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 8,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 8,
                       "children": [
                         {
                           "type": "text",
@@ -64961,11 +65243,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 10,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -65117,11 +65399,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 10,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -65283,11 +65565,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 6,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "text",
@@ -65306,11 +65585,11 @@
                       "width": "fill_container",
                       "fill": "$accent-soft",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -65349,11 +65628,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -65392,11 +65671,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -65435,11 +65714,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -65485,11 +65764,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 8,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "frame",
@@ -65497,9 +65773,9 @@
                       "name": "Search Box",
                       "width": "fill_container",
                       "fill": "$bg-input",
+                      "cornerRadius": "$radius-sm",
                       "stroke": "$border-control",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-sm",
                       "padding": [
                         7,
                         10
@@ -65527,12 +65803,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -65566,12 +65842,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -65605,12 +65881,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -65644,12 +65920,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -65683,19 +65959,19 @@
                   "height": "fill_container",
                   "fill": "$bg-app",
                   "layout": "vertical",
+                  "gap": 12,
                   "padding": [
                     16,
                     20
                   ],
-                  "gap": 12,
                   "children": [
                     {
                       "type": "frame",
                       "id": "Ba0535",
                       "name": "Detail Header",
                       "width": "fill_container",
-                      "alignItems": "center",
                       "gap": 10,
+                      "alignItems": "center",
                       "children": [
                         {
                           "type": "text",
@@ -65759,15 +66035,15 @@
                       "name": "DB Fields Card",
                       "width": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 6,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 6,
                       "children": [
                         {
                           "type": "text",
@@ -65798,15 +66074,15 @@
                       "width": "fill_container",
                       "height": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 8,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 8,
                       "children": [
                         {
                           "type": "text",
@@ -66186,11 +66462,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 10,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -66352,11 +66628,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 6,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "text",
@@ -66375,11 +66648,11 @@
                       "width": "fill_container",
                       "fill": "$accent-soft",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -66418,11 +66691,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -66461,11 +66734,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -66504,11 +66777,11 @@
                       "width": "fill_container",
                       "fill": "$bg-panel",
                       "cornerRadius": "$radius-sm",
+                      "gap": 8,
                       "padding": [
                         6,
                         10
                       ],
-                      "gap": 8,
                       "alignItems": "center",
                       "children": [
                         {
@@ -66554,11 +66827,8 @@
                     "right": 1
                   },
                   "layout": "vertical",
-                  "padding": [
-                    12,
-                    12
-                  ],
                   "gap": 8,
+                  "padding": 12,
                   "children": [
                     {
                       "type": "frame",
@@ -66566,9 +66836,9 @@
                       "name": "Search Box",
                       "width": "fill_container",
                       "fill": "$bg-input",
+                      "cornerRadius": "$radius-sm",
                       "stroke": "$border-control",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-sm",
                       "padding": [
                         7,
                         10
@@ -66596,12 +66866,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -66635,12 +66905,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -66674,12 +66944,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -66713,12 +66983,12 @@
                       "strokeWidth": {
                         "bottom": 1
                       },
+                      "layout": "vertical",
+                      "gap": 3,
                       "padding": [
                         8,
                         12
                       ],
-                      "layout": "vertical",
-                      "gap": 3,
                       "children": [
                         {
                           "type": "text",
@@ -66752,19 +67022,19 @@
                   "height": "fill_container",
                   "fill": "$bg-app",
                   "layout": "vertical",
+                  "gap": 12,
                   "padding": [
                     16,
                     20
                   ],
-                  "gap": 12,
                   "children": [
                     {
                       "type": "frame",
                       "id": "Ba0622",
                       "name": "Detail Header",
                       "width": "fill_container",
-                      "alignItems": "center",
                       "gap": 10,
+                      "alignItems": "center",
                       "children": [
                         {
                           "type": "text",
@@ -66828,15 +67098,15 @@
                       "name": "DB Fields Card",
                       "width": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 6,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 6,
                       "children": [
                         {
                           "type": "text",
@@ -66867,15 +67137,15 @@
                       "width": "fill_container",
                       "height": "fill_container",
                       "fill": "$bg-panel",
+                      "cornerRadius": "$radius-md",
                       "stroke": "$border",
                       "strokeWidth": 1,
-                      "cornerRadius": "$radius-md",
                       "layout": "vertical",
+                      "gap": 8,
                       "padding": [
                         12,
                         14
                       ],
-                      "gap": 8,
                       "children": [
                         {
                           "type": "text",
@@ -67059,16 +67329,37 @@
       }
     },
     {
-      "type": "ref",
       "id": "ClbB22",
+      "type": "ref",
+      "reusable": true,
       "ref": "p0zWw",
       "name": "33 协同 · 成员与占用动态（状态板 22）",
-      "reusable": true,
       "x": 0,
       "y": 9900,
       "descendants": {
+        "WFOqz": {
+          "enabled": false
+        },
+        "sW8Z8": {
+          "content": "ws://127.0.0.1:3240/ws"
+        },
+        "ZJWPH": {
+          "enabled": false
+        },
         "B8ceQ": {
           "content": "P&ID 编辑器 / 成员与占用动态（状态板 22）"
+        },
+        "d8apIX": {
+          "enabled": false
+        },
+        "dUsBY": {
+          "enabled": false
+        },
+        "qelzh": {
+          "enabled": false
+        },
+        "T6Pno": {
+          "enabled": false
         },
         "Q1rti": {
           "fill": "$accent-soft"
@@ -67079,6 +67370,51 @@
         "XY14O": {
           "fill": "$text-primary",
           "fontWeight": "600"
+        },
+        "UaESQ": {
+          "enabled": false
+        },
+        "TF9P1": {
+          "enabled": false
+        },
+        "Y6lo1S": {
+          "enabled": false
+        },
+        "U5aSD9": {
+          "enabled": false
+        },
+        "E0T5dQ": {
+          "enabled": false
+        },
+        "cZ2b8": {
+          "enabled": false
+        },
+        "xRIzm": {
+          "enabled": false
+        },
+        "ufLE2": {
+          "enabled": false
+        },
+        "bQMFl": {
+          "enabled": false
+        },
+        "Fkp35": {
+          "enabled": false
+        },
+        "S5dfv": {
+          "enabled": false
+        },
+        "fOiJz": {
+          "enabled": false
+        },
+        "jQaUS": {
+          "enabled": false
+        },
+        "jFWz0": {
+          "enabled": false
+        },
+        "NCR5J": {
+          "fill": "$success"
         },
         "OgfUi": {
           "content": "已连接 · 修订 128"
@@ -67102,11 +67438,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 14,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -67298,12 +67634,12 @@
                                   "id": "b22a_004",
                                   "name": "Solo",
                                   "fill": "$text-muted",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "仅自己在线时：工具条不显示头像组，名单显示「当前无其他在线成员」",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -67329,12 +67665,12 @@
                                   "id": "b22a_009",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "新成员加入或正常退出时向同图其余会话发提示条，名单实时增减",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -67360,12 +67696,12 @@
                                   "id": "b22a_012",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "人一律写成「显示名（用户 id）」，未登记显示名时仅显示用户 id",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -67391,12 +67727,12 @@
                                   "id": "b22a_015",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "提示条过期后仍保留在协同区「本次消息」列表，最新在上",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -67584,12 +67920,12 @@
                                   "id": "b22b_030",
                                   "name": "Note",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "正常退出立即标为离开并释放占用；网络闪断保留至心跳超时（90 秒）。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -67615,12 +67951,12 @@
                                   "id": "b22b_035",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "客户端重连携带 resume_session_id 接续原会话，原有占用不丢失",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -67646,12 +67982,12 @@
                                   "id": "b22b_038",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "工具条头像与成员名单中以琥珀色区分「连接中断」与正常在线",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -67789,11 +68125,11 @@
                                   "cornerRadius": "$radius-sm",
                                   "stroke": "$claim",
                                   "strokeWidth": 1,
+                                  "gap": 6,
                                   "padding": [
                                     4,
                                     8
                                   ],
-                                  "gap": 6,
                                   "alignItems": "center",
                                   "children": [
                                     {
@@ -67821,12 +68157,12 @@
                                   "id": "b22c_051",
                                   "name": "Desc",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "占用键为（图纸, 位号），不带类型编码；占用色独立于页间连接符线色（$amber）。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -67852,12 +68188,12 @@
                                   "id": "b22c_056",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "占用授予向同图全部编辑会话广播并附到期时间，未申请者列表同步刷新",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -67883,12 +68219,12 @@
                                   "id": "b22c_059",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "选中他人占用的对象时，检视面板顶部以 $claim 提示并置属性只读",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68033,24 +68369,24 @@
                                   "id": "b22d_070",
                                   "name": "T",
                                   "fill": "$claim",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "位号 P-1001A 已被 李工（u2）占用，到期 10:47:12",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
-                                  "fontWeight": "600",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "600"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b22d_071",
                                   "name": "S",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "申请直接被拒（不排队）；写入与几何修改一并撤回（CLAIM_HELD）。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68076,12 +68412,12 @@
                                   "id": "b22d_076",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "不设等候队列（#88）；不设强制释放（#89），不活动占用到期自动释放",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68107,12 +68443,12 @@
                                   "id": "b22d_079",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "只读编辑会话不可申请占用（#29），写入返回对应权限拒绝码",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68250,11 +68586,11 @@
                                   "cornerRadius": "$radius-sm",
                                   "stroke": "$claim",
                                   "strokeWidth": 1,
+                                  "gap": 6,
                                   "padding": [
                                     4,
                                     8
                                   ],
-                                  "gap": 6,
                                   "alignItems": "center",
                                   "children": [
                                     {
@@ -68282,12 +68618,12 @@
                                   "id": "b22e_092",
                                   "name": "Note",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "对自己占用的对象执行编辑动作时，有效期自动顺延 300 秒。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68313,12 +68649,12 @@
                                   "id": "b22e_097",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "临近到期窗口内向占用者发 1 条提醒（仅 1 次，续期后可再次提醒）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68344,12 +68680,12 @@
                                   "id": "b22e_100",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "连续一个有效期无编辑动作则到期释放，广播全图并写 1 条审计日志",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68484,24 +68820,24 @@
                                   "id": "b22f_110",
                                   "name": "T1",
                                   "fill": "$text-primary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "已释放 XV-1012 占用 · 其他会话可立即申请或编辑",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
-                                  "fontWeight": "500",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "500"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b22f_111",
                                   "name": "T2",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "关闭图纸标签页时自动发送 close 结束该图编辑会话并释放占用，其余已开图纸不受影响。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68527,12 +68863,12 @@
                                   "id": "b22f_116",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "每张打开的图纸拥有独立编辑会话、在线名单与位号占用（#102）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68558,12 +68894,12 @@
                                   "id": "b22f_119",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "到期释放写入 1 条审计记录，主动释放与关图释放向同图全员广播",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68594,24 +68930,6 @@
             }
           ]
         },
-        "qPf59": {
-          "content": "编辑中 · 捕捉 开 · 正交 关"
-        },
-        "sW8Z8": {
-          "content": "ws://127.0.0.1:3240/ws"
-        },
-        "WFOqz": {
-          "enabled": false
-        },
-        "ZJWPH": {
-          "enabled": false
-        },
-        "d8apIX": {
-          "enabled": false
-        },
-        "dUsBY": {
-          "enabled": false
-        },
         "C59XhI": {
           "enabled": false
         },
@@ -68627,11 +68945,53 @@
         "F6anRU": {
           "enabled": false
         },
+        "qPf59": {
+          "content": "编辑中 · 捕捉 开 · 正交 关"
+        }
+      }
+    },
+    {
+      "id": "ClbB23",
+      "type": "ref",
+      "reusable": true,
+      "ref": "p0zWw",
+      "name": "34 协同 · 只读与不一致（状态板 23）",
+      "x": 1700,
+      "y": 9900,
+      "descendants": {
+        "WFOqz": {
+          "enabled": false
+        },
+        "sW8Z8": {
+          "content": "ws://127.0.0.1:3240/ws"
+        },
+        "ZJWPH": {
+          "enabled": false
+        },
+        "B8ceQ": {
+          "content": "P&ID 编辑器 / 只读与不一致（状态板 23）"
+        },
+        "d8apIX": {
+          "enabled": false
+        },
+        "dUsBY": {
+          "enabled": false
+        },
         "qelzh": {
           "enabled": false
         },
         "T6Pno": {
           "enabled": false
+        },
+        "Q1rti": {
+          "fill": "$accent-soft"
+        },
+        "CYNJA": {
+          "fill": "$accent"
+        },
+        "XY14O": {
+          "fill": "$text-primary",
+          "fontWeight": "600"
         },
         "UaESQ": {
           "enabled": false
@@ -68676,34 +69036,13 @@
           "enabled": false
         },
         "NCR5J": {
-          "fill": "$success"
-        }
-      }
-    },
-    {
-      "type": "ref",
-      "id": "ClbB23",
-      "ref": "p0zWw",
-      "name": "34 协同 · 只读与不一致（状态板 23）",
-      "reusable": true,
-      "x": 1700,
-      "y": 9900,
-      "descendants": {
-        "B8ceQ": {
-          "content": "P&ID 编辑器 / 只读与不一致（状态板 23）"
-        },
-        "Q1rti": {
-          "fill": "$accent-soft"
-        },
-        "CYNJA": {
-          "fill": "$accent"
-        },
-        "XY14O": {
-          "fill": "$text-primary",
-          "fontWeight": "600"
+          "fill": "$danger"
         },
         "OgfUi": {
-          "content": "与服务器上的图纸不一致，已停止同步"
+          "content": "与服务器上的图纸不一致，已停止同步",
+          "textGrowth": "fixed-width",
+          "width": "fill_container",
+          "lineHeight": 1.35
         },
         "tqvXC": {
           "type": "frame",
@@ -68724,11 +69063,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 14,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -68900,12 +69239,12 @@
                                   "id": "b23a_137",
                                   "name": "R1",
                                   "fill": "$danger",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "角色权限：拒绝（校对人员不允许编辑图纸）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "600",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "600"
                                 },
                                 {
                                   "type": "text",
@@ -68951,12 +69290,12 @@
                                   "id": "b23a_144",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "画布横幅与检视面板协同区均不显示「编辑权在谁」",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -68982,12 +69321,12 @@
                                   "id": "b23a_147",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "管理员修改角色后当场重算并自动恢复写权限，无需重连",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69132,24 +69471,24 @@
                                   "id": "b23b_158",
                                   "name": "R2",
                                   "fill": "$danger",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "PBS 节点 ACL：拒绝 · 生效节点：10 裂解区（继承）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "600",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "600"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b23b_159",
                                   "name": "R3",
                                   "fill": "$text-muted",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "图纸状态：未判定（同节点用户行与角色行相反时拒绝为准）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69175,12 +69514,12 @@
                                   "id": "b23b_164",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "明确给出沿 PBS 树命中的生效节点路径及继承来源",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69206,12 +69545,12 @@
                                   "id": "b23b_167",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "管理员调整节点 ACL 后在线会话当场重算并收到恢复通知",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69346,36 +69685,36 @@
                                   "id": "b23c_177",
                                   "name": "T1",
                                   "fill": "$text-primary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "1) 图纸状态「只读」：全员不可写，不保留也不显示编辑权持有者。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b23c_178",
                                   "name": "T2",
                                   "fill": "$amber",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "2) 「单人编辑」：仅此情况显示「编辑权：李工（u2）」。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b23c_179",
                                   "name": "T3",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "3) 内置库指纹不一致：以只读加入并写明「符号库 / 类型库 / 位号规则」哪份不符。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69401,12 +69740,12 @@
                                   "id": "b23c_184",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "只读图纸可切回协同编辑；【重新申请写权限】点击当场重算，无人批",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69483,7 +69822,7 @@
                               "id": "b23d_208",
                               "name": "State Name",
                               "fill": "$text-primary",
-                              "content": "不一致：库标识不符 / 本地修订领先",
+                              "content": "不一致：库标识 / 修订领先",
                               "fontFamily": "$font-ui",
                               "fontSize": 13,
                               "fontWeight": "600"
@@ -69551,24 +69890,24 @@
                                   "id": "b23d_195",
                                   "name": "S1",
                                   "fill": "$danger",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "导航底部：● 与服务器上的图纸不一致，已停止同步",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "600",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "600"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b23d_196",
                                   "name": "S2",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "图级记录 PID_AUTHOR_COLLAB 的库标识或已应用修订与服务器对不上。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69594,12 +69933,12 @@
                                   "id": "b23d_201",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "本次连接不发队列、不收远端变更、不申请占用；提交返回 NOT_ALIGNED 留在队列不撤回",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69625,12 +69964,12 @@
                                   "id": "b23d_204",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "存盘仍保留打开时的库标识与修订，避免静默覆盖",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69765,24 +70104,24 @@
                                   "id": "b23e_214",
                                   "name": "S1",
                                   "fill": "$danger",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "本地已应用修订 80 早于服务器快照修订 100，操作日志已截断，无法增量补发。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b23e_215",
                                   "name": "S2",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "或远端变更无法应用到本图时同样进入不一致状态。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69808,12 +70147,12 @@
                                   "id": "b23e_220",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "统一表述为「与服务器上的图纸不一致」（不再写「房间」）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -69839,12 +70178,12 @@
                                   "id": "b23e_223",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "每 20 条生效操作落快照并截断旧日志（#103），早于快照须重新对齐",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70013,12 +70352,12 @@
                                       "id": "b23f_236",
                                       "name": "BtnDesc",
                                       "fill": "$text-secondary",
+                                      "textGrowth": "fixed-width",
+                                      "width": "fill_container",
                                       "content": "从服务器拉取最新对象与拓扑，刷新基线并恢复同步",
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11,
-                                      "fontWeight": "normal",
-                                      "width": "fill_container",
-                                      "textGrowth": "fixed-width"
+                                      "fontWeight": "normal"
                                     }
                                   ]
                                 },
@@ -70027,12 +70366,12 @@
                                   "id": "b23f_237",
                                   "name": "Note",
                                   "fill": "$text-muted",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "若服务器库不可用（STORE_UNAVAILABLE）或会话已满（SESSION_FULL），不建会话并说明原因。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70058,12 +70397,12 @@
                                   "id": "b23f_242",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "【重新对齐】完成后清除不一致标记，允许继续提交与申请占用",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70089,12 +70428,12 @@
                                   "id": "b23f_245",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "离线队列随图落盘（#77），对齐重连后按序补发，若无撤销栈则标不一致",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70125,24 +70464,6 @@
             }
           ]
         },
-        "qPf59": {
-          "content": "只读 · 捕捉 开 · 正交 关"
-        },
-        "sW8Z8": {
-          "content": "ws://127.0.0.1:3240/ws"
-        },
-        "WFOqz": {
-          "enabled": false
-        },
-        "ZJWPH": {
-          "enabled": false
-        },
-        "d8apIX": {
-          "enabled": false
-        },
-        "dUsBY": {
-          "enabled": false
-        },
         "C59XhI": {
           "enabled": false
         },
@@ -70156,6 +70477,38 @@
           "enabled": false
         },
         "F6anRU": {
+          "enabled": false
+        },
+        "qPf59": {
+          "content": "只读 · 捕捉 开 · 正交 关"
+        }
+      }
+    },
+    {
+      "id": "ClbB24",
+      "type": "ref",
+      "reusable": true,
+      "ref": "p0zWw",
+      "name": "35 协同 · 裁决的其他情形（状态板 24 · 下一轮界面）",
+      "x": 3400,
+      "y": 9900,
+      "descendants": {
+        "WFOqz": {
+          "enabled": false
+        },
+        "sW8Z8": {
+          "content": "ws://127.0.0.1:3240/ws"
+        },
+        "ZJWPH": {
+          "enabled": false
+        },
+        "B8ceQ": {
+          "content": "P&ID 编辑器 / 裁决的其他情形（状态板 24 · 下一轮界面）"
+        },
+        "d8apIX": {
+          "enabled": false
+        },
+        "dUsBY": {
           "enabled": false
         },
         "qelzh": {
@@ -70207,21 +70560,7 @@
           "enabled": false
         },
         "NCR5J": {
-          "fill": "$danger"
-        }
-      }
-    },
-    {
-      "type": "ref",
-      "id": "ClbB24",
-      "ref": "p0zWw",
-      "name": "35 协同 · 裁决的其他情形（状态板 24 · 下一轮界面）",
-      "reusable": true,
-      "x": 3400,
-      "y": 9900,
-      "descendants": {
-        "B8ceQ": {
-          "content": "P&ID 编辑器 / 裁决的其他情形（状态板 24 · 下一轮界面）"
+          "fill": "$success"
         },
         "OgfUi": {
           "content": "已连接 · 修订 128"
@@ -70245,11 +70584,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 14,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -70457,12 +70796,12 @@
                                   "id": "b24a_264",
                                   "name": "S",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "服务器并列窗口缺省关闭（0），同字段并发默认先到生效、落后让位（OP_SUPERSEDED）并记入审计，不会生成冲突条目。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70488,12 +70827,12 @@
                                   "id": "b24a_269",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "本轮仅在编辑器协同区展示待裁决冲突行，并提供命令级裁决",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70519,12 +70858,12 @@
                                   "id": "b24a_272",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "完整冲突列表与裁决对话框界面留到下一轮（与画框 19、20 同属下一轮）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70659,24 +70998,24 @@
                                   "id": "b24b_282",
                                   "name": "T",
                                   "fill": "$text-primary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "V-1001 · 设计压力：甲方 1.6MPa ↔ 乙方 2.5MPa → 人工改值 2.0MPa",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "500",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "500"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b24b_283",
                                   "name": "S",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "确认后服务器写回 2.0MPa，修订号加 1 并广播同图全员，同时沿页间连接符向下游传递。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70702,12 +71041,12 @@
                                   "id": "b24b_288",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "裁决前并列双方本地已退回到写之前的值（revert_local）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70733,12 +71072,12 @@
                                   "id": "b24b_291",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "裁决后写 1 条审计，条目记下裁决人、裁决时间与最终值",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70873,24 +71212,24 @@
                                   "id": "b24c_301",
                                   "name": "T",
                                   "fill": "$text-primary",
-                                  "content": "QO-1001-200 · 拓扑：甲方 add_pipe_run（赵工 u3）↔ 乙方 insert_fitting（李工 u2）",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
+                                  "content": "QO-1001-200 · 拓扑：甲方 add_pipe_run · 赵工（u3）↔ 乙方 insert_fitting · 李工（u2）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "500",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "500"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b24c_302",
                                   "name": "S",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "拓扑冲突仅支持「采用甲方」或「采用乙方」，不提供人工改值；裁决前拓扑保持不变。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70916,12 +71255,12 @@
                                   "id": "b24c_307",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "非并列窗口下的基线落后拓扑变更直接返回 STALE_BASE_REVISION",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -70947,12 +71286,12 @@
                                   "id": "b24c_310",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "拓扑裁决生效后将胜出一方的拓扑操作广播至同图全体会话",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -71097,24 +71436,24 @@
                                   "id": "b24d_321",
                                   "name": "T",
                                   "fill": "$danger",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "条目 c-7f3a 已由 王工（u1）于 10:43:12 裁决（采用乙方：2.5MPa）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "600",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "600"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b24d_322",
                                   "name": "S",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "同一冲突条目只能裁决 1 次，请勿重试，直接刷新冲突列表。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -71140,12 +71479,12 @@
                                   "id": "b24d_327",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "应答携带既有裁决结果与裁决人显示名（用户 id），便于当场核对",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -71171,12 +71510,12 @@
                                   "id": "b24d_330",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "本端表单不提交第二次变更，原裁决与审计行保持不变",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -71311,24 +71650,24 @@
                                   "id": "b24e_340",
                                   "name": "T",
                                   "fill": "$danger",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "当前角色「工艺设计人员」缺少「授权配置」权限，无法裁决冲突",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "600",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "600"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b24e_341",
                                   "name": "S",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "仅系统管理员与项目管理员可裁决；无权者可只读查看冲突条目。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -71354,12 +71693,12 @@
                                   "id": "b24e_346",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "裁决接口同时核对凭据，操作人取自核对后的身份（REQ-COLL-016）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -71385,12 +71724,12 @@
                                   "id": "b24e_349",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "被拒绝的裁决尝试写 1 条审计记录，条目维持「待裁决」状态",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -71525,24 +71864,24 @@
                                   "id": "b24f_359",
                                   "name": "T",
                                   "fill": "$danger",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "未找到冲突条目 c-9999（404 CONFLICT_UNKNOWN）或最终值为空（400）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "600",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "600"
                                 },
                                 {
                                   "type": "text",
                                   "id": "b24f_360",
                                   "name": "S",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "请刷新待裁决列表或修正人工改值输入后重新确认。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -71568,12 +71907,12 @@
                                   "id": "b24f_365",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "三种裁决被拒（已裁决 / 无权限 / 不存在或非法）均给出明确原因与动作建议",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -71599,12 +71938,12 @@
                                   "id": "b24f_368",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "本板对应之全套裁决界面留到下一轮实现",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -71635,24 +71974,6 @@
             }
           ]
         },
-        "qPf59": {
-          "content": "编辑中 · 捕捉 开 · 正交 关"
-        },
-        "sW8Z8": {
-          "content": "ws://127.0.0.1:3240/ws"
-        },
-        "WFOqz": {
-          "enabled": false
-        },
-        "ZJWPH": {
-          "enabled": false
-        },
-        "d8apIX": {
-          "enabled": false
-        },
-        "dUsBY": {
-          "enabled": false
-        },
         "C59XhI": {
           "enabled": false
         },
@@ -71668,11 +71989,53 @@
         "F6anRU": {
           "enabled": false
         },
+        "qPf59": {
+          "content": "编辑中 · 捕捉 开 · 正交 关"
+        }
+      }
+    },
+    {
+      "id": "ClbB25",
+      "type": "ref",
+      "reusable": true,
+      "ref": "p0zWw",
+      "name": "36 协同 · 页间连接符（画框 25）",
+      "x": 5100,
+      "y": 9900,
+      "descendants": {
+        "WFOqz": {
+          "enabled": false
+        },
+        "sW8Z8": {
+          "content": "ws://127.0.0.1:3240/ws"
+        },
+        "ZJWPH": {
+          "enabled": false
+        },
+        "B8ceQ": {
+          "content": "P&ID 编辑器 / 页间连接符（画框 25）"
+        },
+        "d8apIX": {
+          "enabled": false
+        },
+        "dUsBY": {
+          "enabled": false
+        },
         "qelzh": {
           "enabled": false
         },
         "T6Pno": {
           "enabled": false
+        },
+        "Q1rti": {
+          "fill": "$accent-soft"
+        },
+        "CYNJA": {
+          "fill": "$accent"
+        },
+        "XY14O": {
+          "fill": "$text-primary",
+          "fontWeight": "600"
         },
         "UaESQ": {
           "enabled": false
@@ -71718,30 +72081,6 @@
         },
         "NCR5J": {
           "fill": "$success"
-        }
-      }
-    },
-    {
-      "type": "ref",
-      "id": "ClbB25",
-      "ref": "p0zWw",
-      "name": "36 协同 · 页间连接符（画框 25）",
-      "reusable": true,
-      "x": 5100,
-      "y": 9900,
-      "descendants": {
-        "B8ceQ": {
-          "content": "P&ID 编辑器 / 页间连接符（画框 25）"
-        },
-        "Q1rti": {
-          "fill": "$accent-soft"
-        },
-        "CYNJA": {
-          "fill": "$accent"
-        },
-        "XY14O": {
-          "fill": "$text-primary",
-          "fontWeight": "600"
         },
         "OgfUi": {
           "content": "已连接 · 修订 128"
@@ -71765,11 +72104,11 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "gap": 12,
               "padding": [
                 14,
                 20
               ],
-              "gap": 12,
               "alignItems": "center",
               "children": [
                 {
@@ -71852,11 +72191,11 @@
                           "strokeWidth": {
                             "bottom": 1
                           },
+                          "gap": 8,
                           "padding": [
                             10,
                             14
                           ],
-                          "gap": 8,
                           "alignItems": "center",
                           "children": [
                             {
@@ -71893,7 +72232,7 @@
                           "id": "b25_392",
                           "name": "Canvas Area",
                           "width": "fill_container",
-                          "height": 370,
+                          "height": "fill_container",
                           "fill": "$bg-canvas",
                           "layout": "vertical",
                           "gap": 18,
@@ -71911,11 +72250,11 @@
                               "cornerRadius": "$radius-md",
                               "stroke": "$border",
                               "strokeWidth": 1,
+                              "gap": 14,
                               "padding": [
                                 14,
                                 16
                               ],
-                              "gap": 14,
                               "alignItems": "center",
                               "children": [
                                 {
@@ -71932,18 +72271,18 @@
                                   "type": "rectangle",
                                   "id": "b25_395",
                                   "name": "Pipe Line",
+                                  "fill": "$line-process",
                                   "width": 110,
-                                  "height": 3,
-                                  "fill": "$line-process"
+                                  "height": 3
                                 },
                                 {
                                   "type": "path",
                                   "id": "b25_396",
                                   "name": "Off-page Connector",
+                                  "fill": "$bg-canvas",
                                   "width": 48,
                                   "height": 24,
-                                  "stroke": "$amber",
-                                  "fill": "$bg-canvas"
+                                  "stroke": "$amber"
                                 },
                                 {
                                   "type": "frame",
@@ -71999,11 +72338,11 @@
                               "cornerRadius": "$radius-md",
                               "stroke": "$border",
                               "strokeWidth": 1,
+                              "gap": 14,
                               "padding": [
                                 14,
                                 16
                               ],
-                              "gap": 14,
                               "alignItems": "center",
                               "children": [
                                 {
@@ -72036,18 +72375,18 @@
                                   "type": "path",
                                   "id": "b25_404",
                                   "name": "Off-page Connector",
+                                  "fill": "$bg-canvas",
                                   "width": 48,
                                   "height": 24,
-                                  "stroke": "$amber",
-                                  "fill": "$bg-canvas"
+                                  "stroke": "$amber"
                                 },
                                 {
                                   "type": "rectangle",
                                   "id": "b25_405",
                                   "name": "Signal Line",
+                                  "fill": "$line-signal",
                                   "width": 110,
-                                  "height": 3,
-                                  "fill": "$line-signal"
+                                  "height": 3
                                 },
                                 {
                                   "type": "text",
@@ -72087,11 +72426,11 @@
                               "cornerRadius": "$radius-md",
                               "stroke": "$border",
                               "strokeWidth": 1,
+                              "gap": 14,
                               "padding": [
                                 14,
                                 16
                               ],
-                              "gap": 14,
                               "alignItems": "center",
                               "children": [
                                 {
@@ -72108,18 +72447,18 @@
                                   "type": "rectangle",
                                   "id": "b25_411",
                                   "name": "Pipe Line 2",
+                                  "fill": "$line-process",
                                   "width": 110,
-                                  "height": 3,
-                                  "fill": "$line-process"
+                                  "height": 3
                                 },
                                 {
                                   "type": "path",
                                   "id": "b25_412",
                                   "name": "Off-page Connector",
+                                  "fill": "$bg-canvas",
                                   "width": 48,
                                   "height": 24,
-                                  "stroke": "$amber",
-                                  "fill": "$bg-canvas"
+                                  "stroke": "$amber"
                                 },
                                 {
                                   "type": "frame",
@@ -72182,11 +72521,11 @@
                                   "cornerRadius": "$radius-sm",
                                   "stroke": "$claim",
                                   "strokeWidth": 1,
+                                  "gap": 6,
                                   "padding": [
                                     3,
                                     8
                                   ],
-                                  "gap": 6,
                                   "alignItems": "center",
                                   "children": [
                                     {
@@ -72264,11 +72603,11 @@
                           "id": "b25_425",
                           "name": "Three Prompts",
                           "width": "fill_container",
-                          "height": "fill_container",
-                          "gap": 12,
+                          "height": 156,
+                          "gap": 14,
                           "padding": [
-                            14,
-                            16
+                            16,
+                            20
                           ],
                           "children": [
                             {
@@ -72283,10 +72622,10 @@
                               "stroke": "$danger",
                               "strokeWidth": 1,
                               "layout": "vertical",
-                              "gap": 6,
+                              "gap": 8,
                               "padding": [
-                                10,
-                                12
+                                14,
+                                16
                               ],
                               "children": [
                                 {
@@ -72314,12 +72653,12 @@
                                   "id": "b25_429",
                                   "name": "P1B",
                                   "fill": "$text-primary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "管线 QO-1001-200 在本图已有 1 个流入页间连接符，不能重复创建；本次放置已撤回。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -72335,10 +72674,10 @@
                               "stroke": "$amber",
                               "strokeWidth": 1,
                               "layout": "vertical",
-                              "gap": 6,
+                              "gap": 8,
                               "padding": [
-                                10,
-                                12
+                                14,
+                                16
                               ],
                               "children": [
                                 {
@@ -72366,12 +72705,12 @@
                                   "id": "b25_433",
                                   "name": "P2B",
                                   "fill": "$text-primary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "「信号线流出」页间连接符不能挂在工艺管线 QO-1001-200 上；请选择「管道流出」或改选信号线。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -72387,10 +72726,10 @@
                               "stroke": "$border-strong",
                               "strokeWidth": 1,
                               "layout": "vertical",
-                              "gap": 6,
+                              "gap": 8,
                               "padding": [
-                                10,
-                                12
+                                14,
+                                16
                               ],
                               "children": [
                                 {
@@ -72418,12 +72757,12 @@
                                   "id": "b25_437",
                                   "name": "P3B",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "目标图纸 PID-1001-03 尚未登记或尚无同线号同族的未配对流入连接符；当前保持「未配对」，对端建好后自动配对。",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             }
@@ -72453,12 +72792,12 @@
                           "strokeWidth": {
                             "bottom": 1
                           },
+                          "layout": "vertical",
+                          "gap": 4,
                           "padding": [
                             12,
                             14
                           ],
-                          "layout": "vertical",
-                          "gap": 4,
                           "children": [
                             {
                               "type": "text",
@@ -72696,12 +73035,12 @@
                               "id": "b25i_464",
                               "name": "InpLbl",
                               "fill": "$text-muted",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
                               "content": "指定目标图号（#92 已定：检视面板填写自动配对）",
                               "fontFamily": "$font-ui",
                               "fontSize": 10.5,
-                              "fontWeight": "normal",
-                              "width": "fill_container",
-                              "textGrowth": "fixed-width"
+                              "fontWeight": "normal"
                             },
                             {
                               "type": "frame",
@@ -72769,9 +73108,9 @@
                               "type": "rectangle",
                               "id": "b25i_470",
                               "name": "Divider",
+                              "fill": "$border",
                               "width": "fill_container",
-                              "height": 1,
-                              "fill": "$border"
+                              "height": 1
                             },
                             {
                               "type": "text",
@@ -72931,9 +73270,9 @@
                               "type": "rectangle",
                               "id": "b25i_488",
                               "name": "Divider2",
+                              "fill": "$border",
                               "width": "fill_container",
-                              "height": 1,
-                              "fill": "$border"
+                              "height": 1
                             },
                             {
                               "type": "text",
@@ -72967,12 +73306,12 @@
                                   "id": "b25i_492",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "服务器按同线号、同族自动匹配目标图纸上未配对流入端，无手选对话框",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -72998,12 +73337,12 @@
                                   "id": "b25i_495",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "配对覆盖流入端原值并记入审计；流入端只读或被占用时照收上游值",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             },
@@ -73029,12 +73368,12 @@
                                   "id": "b25i_498",
                                   "name": "Text",
                                   "fill": "$text-secondary",
+                                  "textGrowth": "fixed-width",
+                                  "width": "fill_container",
                                   "content": "点击【跳转】切换并定位到对端图纸与连接符；任一端或整线删除则解除配对",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
-                                  "fontWeight": "normal",
-                                  "width": "fill_container",
-                                  "textGrowth": "fixed-width"
+                                  "fontWeight": "normal"
                                 }
                               ]
                             }
@@ -73047,24 +73386,6 @@
               ]
             }
           ]
-        },
-        "qPf59": {
-          "content": "编辑中 · 捕捉 开 · 正交 关"
-        },
-        "sW8Z8": {
-          "content": "ws://127.0.0.1:3240/ws"
-        },
-        "WFOqz": {
-          "enabled": false
-        },
-        "ZJWPH": {
-          "enabled": false
-        },
-        "d8apIX": {
-          "enabled": false
-        },
-        "dUsBY": {
-          "enabled": false
         },
         "C59XhI": {
           "enabled": false
@@ -73081,62 +73402,14 @@
         "F6anRU": {
           "enabled": false
         },
-        "qelzh": {
-          "enabled": false
-        },
-        "T6Pno": {
-          "enabled": false
-        },
-        "UaESQ": {
-          "enabled": false
-        },
-        "TF9P1": {
-          "enabled": false
-        },
-        "Y6lo1S": {
-          "enabled": false
-        },
-        "U5aSD9": {
-          "enabled": false
-        },
-        "E0T5dQ": {
-          "enabled": false
-        },
-        "cZ2b8": {
-          "enabled": false
-        },
-        "xRIzm": {
-          "enabled": false
-        },
-        "ufLE2": {
-          "enabled": false
-        },
-        "bQMFl": {
-          "enabled": false
-        },
-        "Fkp35": {
-          "enabled": false
-        },
-        "S5dfv": {
-          "enabled": false
-        },
-        "fOiJz": {
-          "enabled": false
-        },
-        "jQaUS": {
-          "enabled": false
-        },
-        "jFWz0": {
-          "enabled": false
-        },
-        "NCR5J": {
-          "fill": "$success"
+        "qPf59": {
+          "content": "编辑中 · 捕捉 开 · 正交 关"
         }
       }
     },
     {
-      "type": "ref",
       "id": "ClbL22",
+      "type": "ref",
       "ref": "ClbB22",
       "name": "33 协同 · 成员与占用动态（状态板 22） · 亮色",
       "theme": {
@@ -73146,8 +73419,8 @@
       "y": 9900
     },
     {
-      "type": "ref",
       "id": "ClbL23",
+      "type": "ref",
       "ref": "ClbB23",
       "name": "34 协同 · 只读与不一致（状态板 23） · 亮色",
       "theme": {
@@ -73157,8 +73430,8 @@
       "y": 9900
     },
     {
-      "type": "ref",
       "id": "ClbL24",
+      "type": "ref",
       "ref": "ClbB24",
       "name": "35 协同 · 裁决的其他情形（状态板 24 · 下一轮界面） · 亮色",
       "theme": {
@@ -73168,8 +73441,8 @@
       "y": 9900
     },
     {
-      "type": "ref",
       "id": "ClbL25",
+      "type": "ref",
       "ref": "ClbB25",
       "name": "36 协同 · 页间连接符（画框 25） · 亮色",
       "theme": {
