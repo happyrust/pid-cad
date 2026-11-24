@@ -138,15 +138,15 @@ jobs:
           gh release view $tag --repo $env:REPOSITORY *> $null
           if ($LASTEXITCODE -ne 0) {
             @(
-              "Windows x86_64 packages of the P&ID build $tag, made by the workflow ``P&ID packages`` from commit $($env:COMMIT). The program is Open CAD Studio $($env:PROGRAM_VERSION) with the SmartPlant P&ID work on top; it shows that version and the commit, not $tag."
+              "P&ID 构建版 $tag 的 Windows x86_64 发行包，由 ``P&ID packages`` 工作流基于提交 $($env:COMMIT) 构建（底座为 Open CAD Studio $($env:PROGRAM_VERSION)，叠加 SmartPlant P&ID 功能；程序界面显示该版本号与提交号）。"
               ''
-              '- `*-portable.exe`: the program alone, runs without installing.'
-              '- `*-installer.msi`: installer with the DWG/DXF file icons and thumbnails. It carries the product identity of the upstream installer under a lower version number, so Windows Installer refuses it where upstream Open CAD Studio is installed: remove that first.'
+              '- `*-portable.exe`：免安装便携版，单文件直接运行。'
+              '- `*-installer.msi`：带 DWG/DXF 文件图标与缩略图扩展的安装包。若机器上已安装上游原版 Open CAD Studio，请先卸载原版再安装。'
               ''
-              'Neither file is signed: Windows SmartScreen asks before the first start.'
+              '安装包与可执行文件均未签名，Windows SmartScreen 首次启动时会弹出提示。'
             ) | Set-Content -Encoding utf8 release-notes.md
             gh release create $tag --repo $env:REPOSITORY --draft --verify-tag `
-              --title "P&ID build $tag" --notes-file release-notes.md
+              --title "P&ID 构建版 $tag" --notes-file release-notes.md
             if ($LASTEXITCODE -ne 0) { throw "the draft release was not made" }
           }
           $exe = "OpenCADStudio-$tag-windows-x86_64-portable.exe"

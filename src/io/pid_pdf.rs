@@ -803,6 +803,7 @@ mod tests {
             off_sheet_primitives: 0,
             skipped_endpoint_pairs: 0,
             missing_symbols: Vec::new(),
+            library_gaps: Vec::new(),
             missing_templates: Vec::new(),
             missing_boxes: Vec::new(),
             symbols_found: 0,
