@@ -40746,7 +40746,8 @@
                       "fontSize": 12,
                       "fontWeight": "500"
                     }
-                  ]
+                  ],
+                  "enabled": false
                 },
                 {
                   "type": "frame",
@@ -41997,7 +41998,8 @@
                           "fontSize": 10,
                           "fontWeight": "600"
                         }
-                      ]
+                      ],
+                      "enabled": false
                     },
                     {
                       "type": "frame",
@@ -42215,7 +42217,7 @@
                       "id": "WIZsK",
                       "x": 318,
                       "y": 514,
-                      "name": "Claim Chip 李工 占用 · 到期 10:47",
+                      "name": "Claim Chip 李工（u2）占用 · 到期 10:47",
                       "fill": "$bg-panel",
                       "cornerRadius": 9,
                       "stroke": "$claim",
@@ -42242,7 +42244,7 @@
                           "id": "CPwIg",
                           "name": "Label",
                           "fill": "$claim",
-                          "content": "李工 占用 · 到期 10:47",
+                          "content": "李工（u2）占用 · 到期 10:47",
                           "fontFamily": "$font-ui",
                           "fontSize": 10,
                           "fontWeight": "500"
@@ -42254,7 +42256,7 @@
                       "id": "aCcgi",
                       "x": 584,
                       "y": 284,
-                      "name": "Claim Chip 本机占用 · 到期 10:46",
+                      "name": "Claim Chip 王工（u1）本机 · 到期 10:46",
                       "fill": "$bg-panel",
                       "cornerRadius": 9,
                       "stroke": "$claim",
@@ -42281,7 +42283,7 @@
                           "id": "vnoJO",
                           "name": "Label",
                           "fill": "$claim",
-                          "content": "本机占用 · 到期 10:46",
+                          "content": "王工（u1）本机 · 到期 10:46",
                           "fontFamily": "$font-ui",
                           "fontSize": 10,
                           "fontWeight": "500"
@@ -42293,7 +42295,7 @@
                       "id": "gn6OX",
                       "x": 786,
                       "y": 298,
-                      "name": "Claim Chip 赵工 占用 · 到期 10:44",
+                      "name": "Claim Chip 赵工（u3）占用 · 到期 10:44",
                       "fill": "$bg-panel",
                       "cornerRadius": 9,
                       "stroke": "$claim",
@@ -42320,7 +42322,7 @@
                           "id": "acMqQ",
                           "name": "Label",
                           "fill": "$claim",
-                          "content": "赵工 占用 · 到期 10:44",
+                          "content": "赵工（u3）占用 · 到期 10:44",
                           "fontFamily": "$font-ui",
                           "fontSize": 10,
                           "fontWeight": "500"
@@ -42376,7 +42378,7 @@
                               "id": "ExbqQ",
                               "name": "Title",
                               "fill": "$text-primary",
-                              "content": "位号 P-1001A 已被 李工 占用，到期 10:47:12",
+                              "content": "位号 P-1001A 已被 李工（u2）占用，到期 10:47:12",
                               "fontFamily": "$font-ui",
                               "fontSize": 12,
                               "fontWeight": "500"
@@ -42386,7 +42388,7 @@
                               "id": "HlmGb",
                               "name": "Sub",
                               "fill": "$text-secondary",
-                              "content": "这一步修改（改 设计流量）已撤回",
+                              "content": "这一步修改（改 设计流量）已撤回（CLAIM_HELD）",
                               "fontFamily": "$font-ui",
                               "fontSize": 11,
                               "fontWeight": "normal"
@@ -42556,7 +42558,7 @@
                               "fill": "$text-primary",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "P-1001A 由 李工 占用，到期 10:47:12。占用释放或到期之前，本会话对它的修改会被拒绝并撤回。",
+                              "content": "P-1001A 由 李工（u2）占用，到期 10:47:12。占用授予、释放与到期均向全图广播；到期前属性只读，修改会被拒绝并撤回。",
                               "lineHeight": 1.5,
                               "fontFamily": "$font-ui",
                               "fontSize": 11.5,
@@ -43187,7 +43189,7 @@
                                       "id": "fP6Lx",
                                       "name": "1.6MPa ↔ 2.5MPa",
                                       "fill": "$text-muted",
-                                      "content": "1.6MPa ↔ 2.5MPa",
+                                      "content": "王工（u1）1.6MPa ↔ 李工（u2）2.5MPa",
                                       "fontFamily": "$font-mono",
                                       "fontSize": 10.5,
                                       "fontWeight": "normal"
@@ -43272,7 +43274,7 @@
                                       "id": "NUjOk",
                                       "name": "李工 · 10:47",
                                       "fill": "$text-muted",
-                                      "content": "李工 · 10:47",
+                                      "content": "李工（u2）· 到期 10:47",
                                       "fontFamily": "$font-ui",
                                       "fontSize": 10.5,
                                       "fontWeight": "normal"
@@ -43336,7 +43338,7 @@
                                       "id": "Bn4HN",
                                       "name": "王工（本机）· 10:46",
                                       "fill": "$text-muted",
-                                      "content": "王工（本机）· 10:46",
+                                      "content": "王工（u1）· 到期 10:46",
                                       "fontFamily": "$font-ui",
                                       "fontSize": 10.5,
                                       "fontWeight": "normal"
@@ -43400,7 +43402,7 @@
                                       "id": "n8ih0F",
                                       "name": "赵工 · 10:44",
                                       "fill": "$text-muted",
-                                      "content": "赵工 · 10:44",
+                                      "content": "赵工（u3）· 到期 10:44",
                                       "fontFamily": "$font-ui",
                                       "fontSize": 10.5,
                                       "fontWeight": "normal"
@@ -43443,7 +43445,7 @@
                               "fill": "$text-muted",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "位号 P-1001A 已被 u2 占用，到期时间 10:47:12",
+                              "content": "位号 P-1001A 已被 李工（u2）占用，到期 10:47:12 · 占用授予与到期均向全图广播",
                               "lineHeight": 1.5,
                               "fontFamily": "$font-ui",
                               "fontSize": 10.5,
@@ -43987,7 +43989,8 @@
                       "fontSize": 12,
                       "fontWeight": "500"
                     }
-                  ]
+                  ],
+                  "enabled": false
                 },
                 {
                   "type": "frame",
@@ -44070,7 +44073,7 @@
                   "id": "DCu3d",
                   "name": "Reason",
                   "fill": "$text-primary",
-                  "content": "图纸处于「单人编辑」，编辑权在 李工（u2）。可以查看与导出；本会话的修改会被拒绝并撤回。",
+                  "content": "图纸处于「单人编辑」，编辑权在 李工（u2）；仅单人编辑显示编辑权持有者，图纸状态「只读」时不显示。",
                   "fontFamily": "$font-ui",
                   "fontSize": 12,
                   "fontWeight": "normal"
@@ -44087,7 +44090,7 @@
                   "id": "zNxV4",
                   "name": "Cause",
                   "fill": "$text-secondary",
-                  "content": "降级原因：他人锁定",
+                  "content": "三级拒绝：图纸状态",
                   "fontFamily": "$font-ui",
                   "fontSize": 11,
                   "fontWeight": "normal"
@@ -44096,9 +44099,9 @@
                   "type": "frame",
                   "id": "jXy2N",
                   "name": "Button 重新申请写权限",
-                  "fill": "$bg-raised",
+                  "fill": "$accent-soft",
                   "cornerRadius": "$radius-sm",
-                  "stroke": "$border",
+                  "stroke": "$accent",
                   "strokeWidth": 1,
                   "gap": 6,
                   "padding": [
@@ -44115,13 +44118,13 @@
                       "height": 12,
                       "icon": "key-round",
                       "library": "lucide",
-                      "fill": "$text-muted"
+                      "fill": "$accent"
                     },
                     {
                       "type": "text",
                       "id": "ztc5f",
                       "name": "Label",
-                      "fill": "$text-muted",
+                      "fill": "$accent",
                       "content": "重新申请写权限",
                       "fontFamily": "$font-ui",
                       "fontSize": 11,
@@ -44134,7 +44137,7 @@
                   "id": "PbQbE",
                   "name": "Hint",
                   "fill": "$text-muted",
-                  "content": "锁定解除后可用",
+                  "content": "点击当场重算（无需人批）",
                   "fontFamily": "$font-ui",
                   "fontSize": 10.5,
                   "fontWeight": "normal"
@@ -45405,7 +45408,8 @@
                           "fontSize": 10,
                           "fontWeight": "600"
                         }
-                      ]
+                      ],
+                      "enabled": false
                     },
                     {
                       "type": "frame",
@@ -45625,7 +45629,7 @@
                               "id": "MbkbC",
                               "name": "Sub",
                               "fill": "$text-secondary",
-                              "content": "已告知服务器并记入审计（write_denied）",
+                              "content": "返回 PERM_DENIED_STATE（本机 COLLAB_READONLY），已记入审计",
                               "fontFamily": "$font-ui",
                               "fontSize": 11,
                               "fontWeight": "normal"
@@ -46708,7 +46712,7 @@
                                   "fill": "$text-muted",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "PERM_DENIED_STATE · 写操作返回 COLLAB_READONLY",
+                                  "content": "PERM_DENIED_STATE · 写操作返回 COLLAB_READONLY · 只读图纸不显示编辑权持有者",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-mono",
                                   "fontSize": 10.5,
@@ -46727,7 +46731,7 @@
           ]
         },
         "qPf59": {
-          "content": "只读 · 编辑权在 李工 · 已连接 · 修订 128 · 在线 3"
+          "content": "只读 · 编辑权在 李工（u2） · 已连接 · 修订 128 · 在线 3"
         }
       }
     },
@@ -47254,7 +47258,8 @@
                       "fontSize": 12,
                       "fontWeight": "500"
                     }
-                  ]
+                  ],
+                  "enabled": false
                 },
                 {
                   "type": "frame",
@@ -48557,7 +48562,8 @@
                           "fontSize": 10,
                           "fontWeight": "600"
                         }
-                      ]
+                      ],
+                      "enabled": false
                     },
                     {
                       "type": "frame",
@@ -48771,7 +48777,7 @@
                               "fill": "$text-primary",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "李工 修改了 XV-1012 的 公称直径",
+                              "content": "李工（u2）修改了 XV-1012 的 公称直径",
                               "lineHeight": 1.4,
                               "fontFamily": "$font-ui",
                               "fontSize": 12,
@@ -48870,7 +48876,7 @@
                               "fill": "$text-secondary",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "A1A 让位于 B1A（基线 127 落后于修订 128，李工 先写入）",
+                              "content": "A1A 让位于 B1A（基线 127 落后于修订 128，李工（u2）先写入 · OP_SUPERSEDED）",
                               "lineHeight": 1.4,
                               "fontFamily": "$font-ui",
                               "fontSize": 11,
@@ -48943,7 +48949,7 @@
                               "fill": "$text-primary",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "P-1002 已被 赵工 删除，你的修改没有生效",
+                              "content": "P-1002 已被 赵工（u3）删除，你的修改没有生效",
                               "lineHeight": 1.4,
                               "fontFamily": "$font-ui",
                               "fontSize": 12,
@@ -48956,7 +48962,7 @@
                               "fill": "$text-secondary",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "设计压力 删除前的值 1.0MPa · 修订 126 · 删除不回滚",
+                              "content": "设计压力 删除前的值 1.0MPa · 修订 126 · OBJECT_DELETED",
                               "lineHeight": 1.4,
                               "fontFamily": "$font-ui",
                               "fontSize": 11,
@@ -49168,7 +49174,7 @@
                                   "id": "i33Rp",
                                   "name": "Hint",
                                   "fill": "$accent",
-                                  "content": "李工 10:42 改 · 修订 129",
+                                  "content": "最后写入：李工（u2）10:42 · 修订 129",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -49260,7 +49266,7 @@
                                   "id": "R1A5rp",
                                   "name": "Hint",
                                   "fill": "$amber",
-                                  "content": "你写的 A1A 已让位",
+                                  "content": "你写的 A1A 已让位 · 最后写入：李工（u2）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -49359,7 +49365,7 @@
                               "id": "voocI",
                               "name": "Panel Title",
                               "fill": "$text-primary",
-                              "content": "协同消息",
+                              "content": "本次消息",
                               "fontFamily": "$font-ui",
                               "fontSize": 12,
                               "fontWeight": "600"
@@ -49443,7 +49449,7 @@
                                       "fill": "$text-primary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "李工 修改了 XV-1012 的 公称直径：DN200 → DN150，已应用到本图",
+                                      "content": "李工（u2）修改了 XV-1012 的 公称直径：DN200 → DN150，已应用到本图",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -49495,7 +49501,7 @@
                                       "fill": "$text-primary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "你对 XV-1012 管道等级 的修改已让位：A1A 让位于 B1A（基线 127 落后于修订 128，李工 先写入）",
+                                      "content": "你对 XV-1012 管道等级 的修改已让位：A1A 让位于 B1A（基线 127 落后于修订 128，李工（u2）先写入）",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -49547,7 +49553,7 @@
                                       "fill": "$text-primary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "V-1001 的 设计压力 有冲突（1.6MPa 与 2.5MPa），两边的修改都没有生效，等待裁决",
+                                      "content": "V-1001 的 设计压力 有冲突（王工（u1）1.6MPa 与 李工（u2）2.5MPa），裁决前本地退回原值",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -49599,7 +49605,7 @@
                                       "fill": "$text-primary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "P-1002 已被 赵工 在修订 126 删除，你对 设计压力 的修改没有生效；删除前的值 1.0MPa",
+                                      "content": "P-1002 已被 赵工（u3）在修订 126 删除，你对 设计压力 的修改没有生效；删除前的值 1.0MPa",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -49651,7 +49657,7 @@
                                       "fill": "$text-primary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "不能删除 V-1001：被 QO-1001-200 引用为管路端点",
+                                      "content": "不能删除 V-1001：仍被管路 QO-1001-200 端点引用，删除已撤回",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -49989,7 +49995,7 @@
                                   "id": "Uxl1b",
                                   "name": "Bar Text",
                                   "fill": "$text-secondary",
-                                  "content": "● 已连接 · 修订 128 · 在线 3",
+                                  "content": "● 已连接 · 修订 128",
                                   "fontFamily": "$font-mono",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -50092,7 +50098,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "welcome 到达即建立会话，取得基线修订号、在线用户与位号占用",
+                                      "content": "welcome 到达即建立编辑会话，取得基线修订号、在线用户与位号占用",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -50124,7 +50130,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "此后每一步本地编辑作为一次操作提交，别人的修改随 op_applied 到达",
+                                      "content": "此后每一步本地编辑作为一次提交，别人的修改随 op_applied 到达",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -50156,7 +50162,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "首次连上时自动展开协同面板",
+                                      "content": "导航底部与检视面板协同区实时同步连接状态、成员与占用",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -50293,7 +50299,7 @@
                                   "id": "J8J1eq",
                                   "name": "Bar Text",
                                   "fill": "$text-secondary",
-                                  "content": "◌ 重连中（第 3 次）· 将自动重连",
+                                  "content": "◌ 连接已断开，重试第 3 次 · 已排队 2 步",
                                   "fontFamily": "$font-mono",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -50348,7 +50354,7 @@
                                       "id": "B3Dxj",
                                       "name": "Conn",
                                       "fill": "$text-primary",
-                                      "content": "未连接",
+                                      "content": "离线 · 已排队 2 步",
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11,
                                       "fontWeight": "normal"
@@ -50369,7 +50375,7 @@
                                   "fill": "$text-muted",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "read error: ConnectionReset（将自动重连）",
+                                  "content": "read error: ConnectionReset（将自动重连并补发）",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 10.5,
@@ -50415,7 +50421,7 @@
                                   "fill": "$text-primary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "与协同服务器的连接已断开，正在重连。期间的本地修改不会提交。",
+                                  "content": "与协同服务器的连接已断开，正在重连。本地修改按序排队（已排队 2 步），重连后自动补发。",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
@@ -50487,7 +50493,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "在线用户与位号占用清空；只读状态保留",
+                                      "content": "断线期间本地修改按序排队并随图落盘；只读状态保留",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -50519,7 +50525,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "当前实现：离线期间的修改不排队，重连后不补发",
+                                      "content": "重连后先按已应用修订补发历史变更，再按序提交本地队列",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -50656,7 +50662,7 @@
                                   "id": "MF6fi",
                                   "name": "Bar Text",
                                   "fill": "$text-secondary",
-                                  "content": "○ 未连接 · 还没有指定用户",
+                                  "content": "○ 未连接协同服务器 · 缺少用户",
                                   "fontFamily": "$font-mono",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -50732,7 +50738,7 @@
                                   "fill": "$text-muted",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "还没有指定用户（PIDCOLLAB USER <用户>）",
+                                  "content": "缺少用户：在协同面板补齐服务器、用户、图号后当场连接",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 10.5,
@@ -50772,7 +50778,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "服务器地址、用户、图纸三项缺一即暂不连接，并说明缺的是哪一项",
+                                      "content": "服务器地址、用户、图号三项缺一即暂不连接，并标明缺哪一项",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -50804,7 +50810,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "补齐后立即发起连接；在此之前图纸按单机方式编辑",
+                                      "content": "三项填齐后当场连接并写入设置；此前图纸按单机方式编辑",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -50904,10 +50910,10 @@
                           "width": "fill_container",
                           "height": "fill_container",
                           "layout": "vertical",
-                          "gap": 8,
+                          "gap": 6,
                           "padding": [
-                            12,
-                            14
+                            8,
+                            12
                           ],
                           "children": [
                             {
@@ -50941,7 +50947,7 @@
                                   "id": "Q9bhm",
                                   "name": "Bar Text",
                                   "fill": "$text-secondary",
-                                  "content": "✕ 会话失效 · 需重新加入",
+                                  "content": "✕ 会话失效 · 正自动重新加入",
                                   "fontFamily": "$font-mono",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -51017,7 +51023,7 @@
                                   "fill": "$text-muted",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "SESSION_EXPIRED",
+                                  "content": "SESSION_EXPIRED（自动以新会话重新加入）",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 10.5,
@@ -51063,7 +51069,7 @@
                                   "fill": "$text-primary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "会话已失效（90 秒无心跳），位号占用已释放，修改不会提交。",
+                                  "content": "90 秒无心跳会话失效，位号占用已释放，正自动重新加入。",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
@@ -51107,7 +51113,7 @@
                                       "id": "FzWTX",
                                       "name": "Label",
                                       "fill": "$text-on-accent",
-                                      "content": "重新加入",
+                                      "content": "自动重连中",
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11,
                                       "fontWeight": "500"
@@ -51119,7 +51125,7 @@
                                   "id": "PRx05",
                                   "name": "Action Hint",
                                   "fill": "$text-muted",
-                                  "content": "接管失效会话，重新取得基线",
+                                  "content": "无需手动加入，重连后补发队列",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -51158,7 +51164,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "连续 6 次心跳缺失即失效，位号占用与图纸锁自动释放",
+                                      "content": "连续 6 次无心跳失效，释放占用与单人编辑权",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -51190,7 +51196,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "失效会话上的写操作返回 SESSION_EXPIRED",
+                                      "content": "失效写入返回 SESSION_EXPIRED，重连后重发",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -51222,7 +51228,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "重新打开同一图纸可接管，接管写入审计",
+                                      "content": "同图重连可接管失效会话；到期与接管各写审计",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -51369,7 +51375,7 @@
                                   "id": "MWQc4",
                                   "name": "Bar Text",
                                   "fill": "$text-secondary",
-                                  "content": "✕ 已被接管 · 正在以新会话重新加入",
+                                  "content": "✕ 已被接管 · 正以新会话重连",
                                   "fontFamily": "$font-mono",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -51491,7 +51497,7 @@
                                   "fill": "$text-primary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "原会话已失效并被新连接接管，本窗口的连接已关闭。",
+                                  "content": "原编辑会话已失效并被新连接接管，本窗口连接已关闭并按退避重连。",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
@@ -51732,7 +51738,7 @@
                                   "id": "dRV00",
                                   "name": "Bar Text",
                                   "fill": "$text-secondary",
-                                  "content": "● 已连接 · 不一致 · 本地修改不再提交",
+                                  "content": "● 与服务器上的图纸不一致，已停止同步",
                                   "fontFamily": "$font-mono",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -51787,7 +51793,7 @@
                                       "id": "a45sV",
                                       "name": "Conn",
                                       "fill": "$text-primary",
-                                      "content": "已连接",
+                                      "content": "同步暂停",
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11,
                                       "fontWeight": "normal"
@@ -51851,7 +51857,7 @@
                                   "fill": "$text-primary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "本图与房间已不一致，本地修改不再提交。断线期间房间从修订 128 走到了 131，其间的变更本图没有收到。",
+                                  "content": "本图与服务器上的图纸不一致，本地修改不再提交（REPO_MISMATCH / REVISION_AHEAD / REPLAY_GAP）。可在协同区点【重新对齐】恢复。",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
@@ -51891,7 +51897,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "漏收修订或别人的修改无法应用到本图时进入此状态",
+                                      "content": "库标识不符、本地修订领先、日志不足补发或远端变更无法应用时触发",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -51923,7 +51929,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "保持到重新打开图纸为止",
+                                      "content": "未对齐提交返回 NOT_ALIGNED 留在队列不撤回，【重新对齐】后恢复",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -52060,7 +52066,7 @@
                                   "id": "LXUun",
                                   "name": "Bar Text",
                                   "fill": "$text-secondary",
-                                  "content": "● 已连接 · 只读 · 编辑权在 李工",
+                                  "content": "● 已连接 · 只读 · 修订 128",
                                   "fontFamily": "$font-mono",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -52179,7 +52185,7 @@
                                   "fill": "$text-primary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "只读 · 编辑权在 李工（u2）。本会话的修改会被拒绝并撤回。",
+                                  "content": "角色权限、PBS 节点 ACL 或图纸状态任一级拒绝即只读。仅「单人编辑」显示编辑权持有者，图纸状态「只读」时不显示。",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
@@ -52219,7 +52225,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "角色、PBS 节点 ACL、图纸状态任一级拒绝即只读",
+                                      "content": "三级拒绝链：角色权限 → PBS 节点 ACL（带生效节点）→ 图纸状态",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -52251,7 +52257,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "详见「16 协同 · 只读会话」",
+                                      "content": "状态切回或编辑权易手时写权限自动恢复，无需人批；详见画框 16",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -52388,7 +52394,7 @@
                                   "id": "Ffi13",
                                   "name": "Bar Text",
                                   "fill": "$text-secondary",
-                                  "content": "○ 未配置协同服务器",
+                                  "content": "○ 未连接协同服务器",
                                   "fontFamily": "$font-mono",
                                   "fontSize": 10.5,
                                   "fontWeight": "normal"
@@ -52427,7 +52433,7 @@
                                   "id": "F2DLq",
                                   "name": "Unconfigured",
                                   "fill": "$text-muted",
-                                  "content": "未配置协同服务器",
+                                  "content": "未连接协同服务器",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
                                   "fontWeight": "normal"
@@ -52439,7 +52445,7 @@
                                   "fill": "$text-muted",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "在命令行输入 PIDCOLLAB SERVER ws://主机:端口/ws",
+                                  "content": "在协同面板填写服务器、用户、图号，或执行 PIDCOLLAB SERVER",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 10.5,
@@ -52479,7 +52485,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "面板只显示「未配置协同服务器」与配置办法",
+                                      "content": "面板给出服务器、用户、图号三项输入，缺哪项即标明",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -52511,7 +52517,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "没有服务器地址时不发起任何连接，图纸按单机方式工作",
+                                      "content": "未配置时不发起连接也不排队，图纸按单机方式工作",
                                       "lineHeight": 1.45,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11.5,
@@ -52609,7 +52615,7 @@
                       "id": "GrbqR",
                       "name": "Title",
                       "fill": "$text-primary",
-                      "content": "冲突裁决",
+                      "content": "冲突裁决（下一轮界面）",
                       "fontFamily": "$font-ui",
                       "fontSize": 18,
                       "fontWeight": "600"
@@ -52619,7 +52625,7 @@
                       "id": "OmPvK",
                       "name": "Subtitle",
                       "fill": "$text-secondary",
-                      "content": "PID-1001-01 急冷油循环系统 · 同一基线上对同一字段写入不同值才进入此列表，由项目管理员裁决",
+                      "content": "【下一轮界面 · 本轮仅编辑器协同区冲突行 + 命令级裁决】并列窗口缺省关闭（0），默认先到生效、落后让位；仅显式开窗且同基线写入不同值或变更同管线拓扑才生成条目",
                       "fontFamily": "$font-ui",
                       "fontSize": 12,
                       "fontWeight": "normal"
@@ -53096,7 +53102,7 @@
                                   "id": "IHJCh",
                                   "name": "· 王工",
                                   "fill": "$text-muted",
-                                  "content": "· 王工",
+                                  "content": "· 王工（u1）10:41:07",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
                                   "fontWeight": "normal"
@@ -53132,7 +53138,7 @@
                                   "id": "Veptm",
                                   "name": "· 李工",
                                   "fill": "$text-muted",
-                                  "content": "· 李工",
+                                  "content": "· 李工（u2）10:41:08",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
                                   "fontWeight": "normal"
@@ -53334,7 +53340,7 @@
                                   "id": "wj27X",
                                   "name": "· 赵工",
                                   "fill": "$text-muted",
-                                  "content": "· 赵工",
+                                  "content": "· 赵工（u3）10:36:12",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
                                   "fontWeight": "normal"
@@ -53370,7 +53376,7 @@
                                   "id": "KtzXi",
                                   "name": "· 李工",
                                   "fill": "$text-muted",
-                                  "content": "· 李工",
+                                  "content": "· 李工（u2）10:36:13",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11,
                                   "fontWeight": "normal"
@@ -53704,7 +53710,7 @@
                                   "id": "B46ki",
                                   "name": "Cell",
                                   "clip": true,
-                                  "width": 84,
+                                  "width": 108,
                                   "height": "fill_container",
                                   "gap": 6,
                                   "padding": [
@@ -53940,7 +53946,7 @@
                                   "id": "jjjXa",
                                   "name": "Cell",
                                   "clip": true,
-                                  "width": 84,
+                                  "width": 108,
                                   "height": "fill_container",
                                   "gap": 6,
                                   "padding": [
@@ -53954,7 +53960,7 @@
                                       "id": "M74ZW",
                                       "name": "王工",
                                       "fill": "$text-primary",
-                                      "content": "王工",
+                                      "content": "王工（u1）",
                                       "fontFamily": "$font-ui",
                                       "fontSize": 12,
                                       "fontWeight": "normal"
@@ -54176,7 +54182,7 @@
                                   "id": "SVmWU",
                                   "name": "Cell",
                                   "clip": true,
-                                  "width": 84,
+                                  "width": 108,
                                   "height": "fill_container",
                                   "gap": 6,
                                   "padding": [
@@ -54190,7 +54196,7 @@
                                       "id": "uGls1",
                                       "name": "王工",
                                       "fill": "$text-primary",
-                                      "content": "王工",
+                                      "content": "王工（u1）",
                                       "fontFamily": "$font-ui",
                                       "fontSize": 12,
                                       "fontWeight": "normal"
@@ -54412,7 +54418,7 @@
                                   "id": "PO7yL",
                                   "name": "Cell",
                                   "clip": true,
-                                  "width": 84,
+                                  "width": 108,
                                   "height": "fill_container",
                                   "gap": 6,
                                   "padding": [
@@ -54426,7 +54432,7 @@
                                       "id": "SXKH0",
                                       "name": "王工",
                                       "fill": "$text-primary",
-                                      "content": "王工",
+                                      "content": "王工（u1）",
                                       "fontFamily": "$font-ui",
                                       "fontSize": 12,
                                       "fontWeight": "normal"
@@ -54727,7 +54733,7 @@
                                       "fill": "$text-secondary",
                                       "textGrowth": "fixed-width",
                                       "width": "fill_container",
-                                      "content": "两边的修改都不生效，生成条目等待裁决",
+                                      "content": "并列窗口缺省关闭（0）；显式开窗时同字段或同管线拓扑变更并列均生成条目，裁决前本地退回写之前（拓扑不变）",
                                       "lineHeight": 1.5,
                                       "fontFamily": "$font-ui",
                                       "fontSize": 11,
@@ -54832,7 +54838,7 @@
                                   "fill": "$text-secondary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "裁决前，字段保持写入前的值；写入方自己的图里保留它写的值，直到裁决到达。",
+                                  "content": "并列窗口缺省关闭（0）。显式开窗产生冲突时，并列双方在裁决前本地退回写之前；拓扑冲突在裁决前拓扑不变，基线落后拓扑变更返回 STALE_BASE_REVISION。",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
@@ -54864,7 +54870,7 @@
                                   "fill": "$text-secondary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "裁决结果三选一：采用甲方、采用乙方、人工改值。选中的值由服务器写回为一次修改，修订加一并广播。",
+                                  "content": "裁决三选一：采用甲方、采用乙方、人工改值。选中的值由服务器写回并广播，同时沿页间连接符向下游传递。",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
@@ -54896,7 +54902,7 @@
                                   "fill": "$text-secondary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "裁决结果与双方原值写入审计日志；条目变为「已裁决」，不能再裁决（409 CONFLICT_ALREADY_RESOLVED）。",
+                                  "content": "裁决结果与双方原值写入审计日志；条目变为「已裁决」，重复裁决返回 409 CONFLICT_ALREADY_RESOLVED，不存在返回 404 CONFLICT_UNKNOWN。",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
@@ -55011,7 +55017,7 @@
                           "id": "ghM0I",
                           "name": "Dialog Title",
                           "fill": "$text-primary",
-                          "content": "裁决冲突",
+                          "content": "裁决冲突（下一轮界面）",
                           "fontFamily": "$font-ui",
                           "fontSize": 14,
                           "fontWeight": "600"
@@ -55430,7 +55436,7 @@
                               "fill": "$text-primary",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "确认后由服务器把选中的值写回为一次修改（修订 129 → 130）并广播给房间；裁决结果与双方原值写入审计日志。",
+                              "content": "确认后由服务器把选中的值写回为一次修改（修订 129 → 130）并广播给同图全部会话；裁决结果与双方原值写入审计日志。",
                               "lineHeight": 1.5,
                               "fontFamily": "$font-ui",
                               "fontSize": 11.5,
@@ -55472,7 +55478,7 @@
                           "id": "xbMb5",
                           "name": "裁决人 王工 · 项目管理员",
                           "fill": "$text-secondary",
-                          "content": "裁决人 王工 · 项目管理员",
+                          "content": "裁决人 王工（u1）· 项目管理员",
                           "fontFamily": "$font-ui",
                           "fontSize": 11.5,
                           "fontWeight": "normal"
@@ -55643,7 +55649,7 @@
                       "id": "sq8Ze",
                       "name": "Subtitle",
                       "fill": "$text-secondary",
-                      "content": "按位号检索审计日志 · 每次写入、让位、冲突与裁决各记一行 · 含被覆盖的原值",
+                      "content": "从选中对象进入 · 按位号/用户/时间范围检索审计，支持按字段与操作类型筛选 · 含让位原值、占用到期、会话接管与状态切换",
                       "fontFamily": "$font-ui",
                       "fontSize": 12,
                       "fontWeight": "normal"
@@ -56003,7 +56009,7 @@
                               "id": "KEVov",
                               "name": "Cell",
                               "clip": true,
-                              "width": 84,
+                              "width": 108,
                               "height": "fill_container",
                               "gap": 6,
                               "padding": [
@@ -56172,7 +56178,7 @@
                               "id": "dIzCC",
                               "name": "Cell",
                               "clip": true,
-                              "width": 84,
+                              "width": 108,
                               "height": "fill_container",
                               "gap": 6,
                               "padding": [
@@ -56186,7 +56192,7 @@
                                   "id": "I9ZUC",
                                   "name": "王工",
                                   "fill": "$text-primary",
-                                  "content": "王工",
+                                  "content": "王工（u1）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 12,
                                   "fontWeight": "normal"
@@ -56364,7 +56370,7 @@
                               "id": "V1374",
                               "name": "Cell",
                               "clip": true,
-                              "width": 84,
+                              "width": 108,
                               "height": "fill_container",
                               "gap": 6,
                               "padding": [
@@ -56378,7 +56384,7 @@
                                   "id": "JLovn",
                                   "name": "李工",
                                   "fill": "$text-primary",
-                                  "content": "李工",
+                                  "content": "李工（u2）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 12,
                                   "fontWeight": "normal"
@@ -56556,7 +56562,7 @@
                               "id": "OQi0O",
                               "name": "Cell",
                               "clip": true,
-                              "width": 84,
+                              "width": 108,
                               "height": "fill_container",
                               "gap": 6,
                               "padding": [
@@ -56570,7 +56576,7 @@
                                   "id": "o2wSqp",
                                   "name": "王工",
                                   "fill": "$text-primary",
-                                  "content": "王工",
+                                  "content": "王工（u1）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 12,
                                   "fontWeight": "normal"
@@ -56731,7 +56737,7 @@
                               "id": "DCiav",
                               "name": "Cell",
                               "clip": true,
-                              "width": 90,
+                              "width": 108,
                               "height": "fill_container",
                               "gap": 6,
                               "padding": [
@@ -56771,7 +56777,7 @@
                                   "id": "w69GO",
                                   "name": "李工",
                                   "fill": "$text-primary",
-                                  "content": "李工",
+                                  "content": "李工（u2）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 12,
                                   "fontWeight": "normal"
@@ -56872,7 +56878,7 @@
                                   "id": "cGszU",
                                   "name": "2.5MPa 让位于 1.2MPa（基线 125 落后于",
                                   "fill": "$text-primary",
-                                  "content": "2.5MPa 让位于 1.2MPa（基线 125 落后于修订 126，王工 先写入）",
+                                  "content": "2.5MPa 让位于 1.2MPa（基线 125 落后于修订 126，王工（u1）先写入）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
                                   "fontWeight": "normal"
@@ -56949,7 +56955,7 @@
                               "id": "mSFlM",
                               "name": "Cell",
                               "clip": true,
-                              "width": 84,
+                              "width": 108,
                               "height": "fill_container",
                               "gap": 6,
                               "padding": [
@@ -56963,7 +56969,7 @@
                                   "id": "oUe89",
                                   "name": "王工",
                                   "fill": "$text-primary",
-                                  "content": "王工",
+                                  "content": "王工（u1）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 12,
                                   "fontWeight": "normal"
@@ -57141,7 +57147,7 @@
                               "id": "brzZq",
                               "name": "Cell",
                               "clip": true,
-                              "width": 84,
+                              "width": 108,
                               "height": "fill_container",
                               "gap": 6,
                               "padding": [
@@ -57155,7 +57161,7 @@
                                   "id": "QVVfh",
                                   "name": "赵工",
                                   "fill": "$text-primary",
-                                  "content": "赵工",
+                                  "content": "赵工（u3）",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 12,
                                   "fontWeight": "normal"
@@ -57333,7 +57339,7 @@
                               "id": "vrYz6",
                               "name": "Cell",
                               "clip": true,
-                              "width": 84,
+                              "width": 108,
                               "height": "fill_container",
                               "gap": 6,
                               "padding": [
@@ -57440,7 +57446,7 @@
                                   "id": "tP2U4",
                                   "name": "位号占用 300 秒未续期，自动释放（原占用者 李工）",
                                   "fill": "$text-primary",
-                                  "content": "位号占用 300 秒未续期，自动释放（原占用者 李工）",
+                                  "content": "位号占用 300 秒未续期，自动释放并写审计（原占用者 李工（u2））",
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
                                   "fontWeight": "normal"
@@ -57973,7 +57979,7 @@
                                   "fill": "$text-secondary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "set_property V-1001.设计压力: 2.5MPa 让位于 1.2MPa（基线 125 落后于修订 126，u1 先写入）",
+                                  "content": "set_property V-1001.设计压力: 2.5MPa 让位于 1.2MPa（基线 125 落后于修订 126，王工（u1）先写入）",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-mono",
                                   "fontSize": 11,
@@ -58076,7 +58082,7 @@
                                   "fill": "$text-secondary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "每次写操作固定记 9 个字段；按位号可查到对象最近一次修改。",
+                                  "content": "每次写操作固定记 9 字段：操作模块、操作类型、操作时间、操作对象、用户、公司、IP、来源工作区、变更前后值。",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
@@ -58108,7 +58114,7 @@
                                   "fill": "$text-secondary",
                                   "textGrowth": "fixed-width",
                                   "width": "fill_container",
-                                  "content": "让位、对已删除对象的修改、被拒的删除与只读会话的写入都各留一行，变更前后值里带原值。",
+                                  "content": "让位、对已删除对象的修改、被拒删除、只读写入、占用到期、失效会话接管与图纸状态切换各留 1 行。",
                                   "lineHeight": 1.5,
                                   "fontFamily": "$font-ui",
                                   "fontSize": 11.5,
