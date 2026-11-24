@@ -1401,6 +1401,9 @@ impl State {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn sync_client_config(&self) {}
+
     /// Attach a detached per-instance transport link for in-process multi-editor
     /// tests (#20, #33).
     #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -65,6 +65,7 @@ use super::pidprops::{PROPS_FIELD_PREFIX, TAG_FIELD};
 use super::pidpublish::{why_of, Publications};
 use super::pidsnapshot::{snapshot_said, Failure, Side};
 use crate::app::{Message, OpenCADStudio};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::io::edit_lock::FileFingerprint;
 use crate::pid::bom::{self, Bom, BomError, BomScope};
 use crate::pid::drc::{self, CheckResult};
@@ -209,6 +210,7 @@ pub(in crate::app) struct PanelSnapshots {
 #[derive(Default)]
 pub(in crate::app) struct PanelPublish {
     records: Option<Result<Records, String>>,
+    #[cfg(not(target_arch = "wasm32"))]
     read_with: Option<FileFingerprint>,
     file_unchanged: bool,
     gates: Option<(GatesFound, Vec<(u64, u64)>)>,
@@ -516,7 +518,10 @@ impl OpenCADStudio {
             kept.verified.clear();
         }
         kept.records = records;
-        kept.read_with = tab.disk_fingerprint.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            kept.read_with = tab.disk_fingerprint.clone();
+        }
         kept.file_unchanged = file_unchanged;
     }
 
@@ -524,6 +529,7 @@ impl OpenCADStudio {
     /// records were read (saved, saved as, read again): on 「快照与发布」,
     /// open, they are read again, so 「当前」 and whether the file was changed
     /// elsewhere follow it. True when they were.
+    #[cfg(not(target_arch = "wasm32"))]
     fn pid_verify_follow_disk(&mut self) -> bool {
         let i = self.active_tab;
         let moved = self
@@ -539,6 +545,11 @@ impl OpenCADStudio {
         }
         self.pid_verify_reread_publish(i);
         true
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn pid_verify_follow_disk(&mut self) -> bool {
+        false
     }
 
     /// The checks kept for the drawing in front (§3.1): its own, on its tab,
@@ -1583,6 +1594,7 @@ impl OpenCADStudio {
 
     /// 【浏览…】 beside the publish folder (§4.6): ask for a folder, starting
     /// in the drawing's; the one picked is typed in the box.
+    #[cfg(not(target_arch = "wasm32"))]
     fn pid_verify_pick_publish_dir(&self) -> Task<Message> {
         let dir = self
             .tabs
@@ -1608,6 +1620,11 @@ impl OpenCADStudio {
                 None => Message::Noop,
             },
         )
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn pid_verify_pick_publish_dir(&self) -> Task<Message> {
+        Task::none()
     }
 
     /// A place of a tag repeated in the project, clicked under its condition

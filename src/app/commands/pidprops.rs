@@ -2023,9 +2023,7 @@ impl OpenCADStudio {
     }
 
     fn dispatch_piddiff_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
-        use crate::io::pid_convert::{
-            diff_pid_documents, write_pid_diff_file, ConvertOptions, DiffKind,
-        };
+        use crate::io::pid_convert::{diff_pid_documents, ConvertOptions, DiffKind};
 
         let tokens = tokenize_command_words(cmd);
         let first = tokens.first()?;
@@ -2205,7 +2203,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_diff_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_diff_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDDIFF EXPORT: {err}"));
                 return Some(Task::none());
@@ -2310,8 +2308,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidisolate_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            solve_pid_isolation_by_query, solve_pid_isolation_from_handles,
-            write_pid_isolation_file, OpcSheetInput,
+            solve_pid_isolation_by_query, solve_pid_isolation_from_handles, OpcSheetInput,
         };
 
         let tokens = tokenize_command_words(cmd);
@@ -2413,7 +2410,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_isolation_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_isolation_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDISOLATE EXPORT: {err}"));
                 return Some(Task::none());
@@ -2579,7 +2576,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidloop_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_loops, loop_matches_query, write_pid_loops_file, LoopStatus, OpcSheetInput,
+            analyze_pid_loops, loop_matches_query, LoopStatus, OpcSheetInput,
         };
 
         let tokens = tokenize_command_words(cmd);
@@ -2663,7 +2660,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_loops_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_loops_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDLOOP EXPORT: {err}"));
                 return Some(Task::none());
@@ -2810,7 +2807,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidspec_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            audit_pid_spec_consistency, write_pid_spec_file, OpcSheetInput, SpecFindingKind,
+            audit_pid_spec_consistency, OpcSheetInput, SpecFindingKind,
         };
 
         let tokens = tokenize_command_words(cmd);
@@ -2884,7 +2881,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_spec_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_spec_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDSPEC EXPORT: {err}"));
                 return Some(Task::none());
@@ -3227,7 +3224,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidrenum_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            plan_or_apply_sheet_renumber, write_pid_renumber_file, PidRenumberReport,
+            plan_or_apply_sheet_renumber, PidRenumberReport,
             PidRenumberSummary, RenumberOptions,
         };
 
@@ -3373,7 +3370,7 @@ impl OpenCADStudio {
             };
             if let Some(ref out_p) = export_path {
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Err(err) = write_pid_renumber_file(&rep, out_p) {
+                if let Err(err) = crate::io::pid_convert::write_pid_renumber_file(&rep, out_p) {
                     self.command_line
                         .push_error(&format!("PIDRENUM EXPORT: {err}"));
                     return Some(Task::none());
@@ -3453,7 +3450,7 @@ impl OpenCADStudio {
         };
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_renumber_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_renumber_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDRENUM EXPORT: {err}"));
                 return Some(Task::none());
@@ -3469,7 +3466,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidhazop_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_hazop_nodes, hazop_node_matches_query, write_pid_hazop_file,
+            analyze_pid_hazop_nodes, hazop_node_matches_query,
             HazopSafeguardStatus, OpcSheetInput,
         };
 
@@ -3566,7 +3563,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_hazop_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_hazop_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDHAZOP EXPORT: {err}"));
                 return Some(Task::none());
@@ -3711,7 +3708,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidutility_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_utilities_and_interfaces, write_pid_utility_file, OpcSheetInput,
+            analyze_pid_utilities_and_interfaces, OpcSheetInput,
         };
 
         let tokens = tokenize_command_words(cmd);
@@ -3807,7 +3804,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_utility_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_utility_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDUTILITY EXPORT: {err}"));
                 return Some(Task::none());
@@ -3976,7 +3973,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidvalve_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_valve_mto, write_pid_valve_file, OpcSheetInput, ValveCategory,
+            analyze_pid_valve_mto, OpcSheetInput, ValveCategory,
         };
 
         let tokens = tokenize_command_words(cmd);
@@ -4072,7 +4069,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_valve_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_valve_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDVALVE EXPORT: {err}"));
                 return Some(Task::none());
@@ -4208,7 +4205,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidnozzle_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_equipment_nozzles, nozzle_matches_equipment, write_pid_nozzle_file,
+            analyze_pid_equipment_nozzles, nozzle_matches_equipment,
             NozzleStatus, OpcSheetInput,
         };
 
@@ -4305,7 +4302,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_nozzle_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_nozzle_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDNOZZLE EXPORT: {err}"));
                 return Some(Task::none());
@@ -4449,7 +4446,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidindex_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_drawing_index, drawing_index_matches_query, write_pid_drawing_index_file,
+            analyze_pid_drawing_index, drawing_index_matches_query,
             DrawingIndexStatus, OpcSheetInput,
         };
 
@@ -4574,7 +4571,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_drawing_index_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_drawing_index_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDINDEX EXPORT: {err}"));
                 return Some(Task::none());
@@ -4661,7 +4658,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidspecialty_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_specialty_items, write_pid_specialty_file, OpcSheetInput, SpecialtyCategory,
+            analyze_pid_specialty_items, OpcSheetInput, SpecialtyCategory,
         };
 
         let tokens = tokenize_command_words(cmd);
@@ -4759,7 +4756,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_specialty_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_specialty_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDSPECIALTY EXPORT: {err}"));
                 return Some(Task::none());
@@ -4893,7 +4890,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidlinelist_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_line_list, pipeline_row_matches_query, write_pid_line_list_file,
+            analyze_pid_line_list, pipeline_row_matches_query,
             LineTerminationStatus, OpcSheetInput,
         };
 
@@ -5002,7 +4999,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_line_list_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_line_list_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDLINELIST EXPORT: {err}"));
                 return Some(Task::none());
@@ -5145,7 +5142,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidequip_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_equipment_schedule, equipment_row_matches_query, write_pid_equipment_file,
+            analyze_pid_equipment_schedule, equipment_row_matches_query,
             EquipmentCategory, EquipmentTagStatus, OpcSheetInput,
         };
 
@@ -5243,7 +5240,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_equipment_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_equipment_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDEQUIP EXPORT: {err}"));
                 return Some(Task::none());
@@ -5393,7 +5390,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidrelief_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_relief_devices, relief_row_matches_query, write_pid_relief_file,
+            analyze_pid_relief_devices, relief_row_matches_query,
             OpcSheetInput, ReliefDestinationKind,
         };
 
@@ -5490,7 +5487,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_relief_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_relief_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDRELIEF EXPORT: {err}"));
                 return Some(Task::none());
@@ -5639,7 +5636,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidcause_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_cause_effect, cause_effect_row_matches_query, write_pid_cause_effect_file,
+            analyze_pid_cause_effect, cause_effect_row_matches_query,
             InterlockStatus, OpcSheetInput,
         };
 
@@ -5736,7 +5733,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_cause_effect_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_cause_effect_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDCAUSE EXPORT: {err}"));
                 return Some(Task::none());
@@ -5878,7 +5875,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidio_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_io_list, io_item_matches_query, write_pid_io_list_file, ControlSystemKind,
+            analyze_pid_io_list, io_item_matches_query, ControlSystemKind,
             MountStatus, OpcSheetInput,
         };
 
@@ -5987,7 +5984,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_io_list_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_io_list_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDIO EXPORT: {err}"));
                 return Some(Task::none());
@@ -6142,7 +6139,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidtiein_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_tie_ins, tie_in_row_matches_query, write_pid_tie_in_file, OpcSheetInput,
+            analyze_pid_tie_ins, tie_in_row_matches_query, OpcSheetInput,
             TieInIsolationReadiness,
         };
 
@@ -6250,7 +6247,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_tie_in_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_tie_in_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDTIEIN EXPORT: {err}"));
                 return Some(Task::none());
@@ -6394,7 +6391,7 @@ impl OpenCADStudio {
 
     fn dispatch_pidinsul_cmd(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         use crate::io::pid_convert::{
-            analyze_pid_insulation, insulated_line_matches_query, write_pid_insulation_file,
+            analyze_pid_insulation, insulated_line_matches_query,
             InsulationCategory, OpcSheetInput,
         };
 
@@ -6493,7 +6490,7 @@ impl OpenCADStudio {
 
         if let Some(ref out_p) = export_path {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Err(err) = write_pid_insulation_file(&rep, out_p) {
+            if let Err(err) = crate::io::pid_convert::write_pid_insulation_file(&rep, out_p) {
                 self.command_line
                     .push_error(&format!("PIDINSUL EXPORT: {err}"));
                 return Some(Task::none());
@@ -6784,7 +6781,6 @@ pub(in crate::app) fn mark_manual_run_overrides(
     author.store(document, handle);
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn tokenize_command_words(cmd: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();

@@ -227,6 +227,7 @@ pub(crate) fn status_parts(app: &OpenCADStudio, screen: PidScreen) -> Vec<Status
             },
         ]
     };
+    #[cfg(not(target_arch = "wasm32"))]
     parts.extend(super::backup_export_ui::status_bar_parts(app, screen));
     parts
 }

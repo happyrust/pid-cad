@@ -7034,6 +7034,7 @@ impl OpenCADStudio {
     /// Write a vector preview of the current layout through the same page and
     /// plot-style pipeline PLOT uses. Returns page count, byte size, the first
     /// sheet's millimetres, the plot scale and the style name (if any).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn export_preview_svg(
         &mut self,
         path: &std::path::Path,
@@ -7064,6 +7065,14 @@ impl OpenCADStudio {
         .map_err(|error| error.to_string())?;
         let bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         Ok((1, bytes, (paper_w, paper_h), scale, style_name))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(in crate::app) fn export_preview_svg(
+        &mut self,
+        _path: &std::path::Path,
+    ) -> Result<(usize, u64, (f64, f64), f64, String), String> {
+        Err("SVG export is not available in the web build.".to_string())
     }
 
     pub(in crate::app) fn on_plot_export_path_some(
@@ -7099,7 +7108,14 @@ impl OpenCADStudio {
             // SVG shares the plot page with PDF: pick the writer from the
             // chosen extension.
             let result = if is_svg {
-                crate::io::svg_export::export_svg(&page, &worker_path)
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    crate::io::svg_export::export_svg(&page, &worker_path)
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    Err("SVG export is not available in the web build.".to_string())
+                }
             } else {
                 crate::io::pdf_export::export_plot_pdf(&page, &worker_path)
             };
@@ -7144,7 +7160,14 @@ impl OpenCADStudio {
         let open_when_done = self.plot_dialog.open_when_done;
         let work = move || {
             let result = if is_svg {
-                crate::io::svg_export::export_svg(&page, &worker_path)
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    crate::io::svg_export::export_svg(&page, &worker_path)
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    Err("SVG export is not available in the web build.".to_string())
+                }
             } else {
                 crate::io::pdf_export::export_plot_pdf(&page, &worker_path)
             };

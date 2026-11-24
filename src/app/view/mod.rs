@@ -4206,11 +4206,14 @@ impl OpenCADStudio {
         };
         #[cfg(target_arch = "wasm32")]
         let sheet_set_poll = Subscription::none();
+        #[cfg(not(target_arch = "wasm32"))]
         let pid_backup_tick = if self.pid_backup_wants_second_tick() {
             iced::time::every(std::time::Duration::from_secs(1)).map(Message::Tick)
         } else {
             Subscription::none()
         };
+        #[cfg(target_arch = "wasm32")]
+        let pid_backup_tick = Subscription::none();
         let hatch_pattern_keys = if self.tabs[self.active_tab]
             .properties
             .hatch_pattern_picker_open

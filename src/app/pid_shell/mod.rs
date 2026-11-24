@@ -146,7 +146,28 @@ pub mod chrome;
 pub mod collab_ui;
 pub(crate) mod rebase;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod backup;
+#[cfg(target_arch = "wasm32")]
+pub mod backup {
+    use iced::Task;
+
+    use super::super::{Message as AppMessage, OpenCADStudio};
+    use super::ViewFn;
+
+    pub const VIEW: Option<ViewFn> = None;
+
+    #[derive(Default)]
+    pub struct State;
+
+    #[derive(Clone, Debug)]
+    pub enum Message {}
+
+    pub fn update(_app: &mut OpenCADStudio, message: Message) -> Task<AppMessage> {
+        match message {}
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
 pub mod backup_export_ui;
 pub mod bom;
 pub mod color_rules;
