@@ -2628,3 +2628,41 @@
 | `scripts\fmt-newhunks.ps1` | — | `insulation.rs`、`mod.rs`、`pidprops.rs`、`examples/pid_convert.rs` 全部 **`new=0`** | **0 格式偏差** |
 | `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
 | `python -m pytest scripts/sppid -q -p no:cacheprovider` | `202 passed` | **`202 passed`** | **全绿** |
+
+---
+
+## 66. 阶段一与协同主线全量对账收口：关联单 `#116 / #117`、协同总单 `#17` 闭环及深度质量审计四项回归修复（2026-11-24）
+
+| 项 | 值 |
+|---|---|
+| 测量日期 | `2026-11-24` |
+| 关联归档提交 | `#116`（`32ac241dd` `.sym` 预览与只读标签页）、`#117`（`7a43bf4bf` + `pid-parse @ 7cb03e48a` 备份包码表缺口三计数）、`#17` 协同全线收官（`#18`–`#105` 含 Pencil 桌面验收 `30b88118d` / `a57d8acff`）、深度审计修复（`b5bc6a095`、`487fa9589`、`6aab9f474`） |
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` |
+| `pid-parse` 钉定提交 | `7cb03e48a564311d6b83cbde5bc1af9dc79e8e51` |
+| 外部待办状态 | 仅余 **`RES-06`**（受控 SPPID 验收环境 `c1/d` 真机预检）与 **`RES-15`**（外部数字化交付平台通道与回执）；`#106` 保持 `OPEN` |
+
+### 66.1 收口对账与四项隐性质量/构建回归修复摘要
+
+1. **阶段一关联单全部闭环**：
+   - `#116`（合并提交 `32ac241dd`）：完成备份面板 `.sym` 缩略图、只读标签页及参考数据检索合入 `main` 并关单；
+   - `#117`（提交 `7a43bf4bf` + `pid-parse @ 7cb03e48a`）：完成备份包导出侧 `unmapped_leaf_levels`、`unmapped_specialty_codes`、`plant_added_instruments_skipped` 三项缺口计数恒定输出并关单；
+   - `#17`（协同设计总单）：全部 88 个子单（`#18`–`#105`）及 `#24 / #43–#47` Pencil 桌面帧校验与导出对拍全部收官关单。
+2. **深度质量审计四项回归修复（均以原子提交合入 `main`）**：
+   - **集成测试对齐（`b5bc6a095`）**：更新 `tests/pid_import.rs` 两处随 `RD-13 / RD-14` 演进的旧断言（`(Left, Baseline)` 按 DXF 规格校验 `alignment_point.is_none()`；图框原点改对图纸真实 `igSmartFrame2d` / `FramePlacement` 原点），`pid_import` 恢复 `68 / 68` 全绿；
+   - **`wasm32-unknown-unknown` 构建修复（`487fa9589`）**：为 `crates/ocs_collab/Cargo.toml` 补齐 `wasm32` 目标 `uuid = { version = "1", features = ["js"] }`（零改动 `Cargo.lock`），并补齐 `OpenCADStudio` 各 native-only 协同/备份/导出分支条件编译，`wasm32` 目标恢复零报错通过；
+   - **测试档 Clippy 复原与架构解耦（`6aab9f474`）**：清除 `src/app/collab/` 与 `src/app/pid_shell/pid_shell_chrome.rs` 新增的 6 处测试档告警（`--lib --profile test` 降至 **`1,049`**，优于基线 `1,051`）；将 `ConflictListItem` 数据结构下沉至 `src/ui/window/pid_collab.rs` 并由 `src/app/collab/query.rs` 向下重导出，`arch_check.py` 向上依赖文件数回落至基线 **`183`**（`ui -> app: 39`，`io` 四行维持 `3, 1, 1, 1`）。
+
+### 66.2 全量十项验证门禁实测读数（`6aab9f474`）
+
+| 门禁项 | 实测读数 | 达标结论 |
+|---|---|---|
+| `cargo test --offline --locked -p ocs_collab -p ocs_collab_server -p ocs_save` | **`387 passed; 0 failed; 0 ignored`**（`ocs_collab` `113+2`、`ocs_collab_server` `212+22+1+1+2+1+1`、`ocs_save` `32`） | **通过** |
+| `cargo test --offline --locked -j 2 --tests --no-fail-fast` | **`8,291 passed; 0 failed; 116 ignored`**（含 `--lib` `8,035 passed / 0 failed / 116 ignored`、`integration` `150`、`pid_import` `68`、`pid_legend` `31`、`dwg_acadsharp_samples` `3`、`pid_panel_localization` `2`、`bevy_composite_shader` `1`、`text_width_variants` `1`） | **0 失败全绿** |
+| `cargo check --offline --locked --examples` | 退出码 `0` | **通过** |
+| `cargo check --offline --locked -j 2 --workspace --all-targets` | 退出码 `0` | **通过** |
+| `cargo check --offline --locked --target wasm32-unknown-unknown` | 退出码 `0` | **通过** |
+| `cargo clippy --offline --locked --lib` | **`656` 条警告**（基线 `<= 656`） | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | **`1,049` 条警告**（基线 `<= 1,051`） | **较基线 `-2`** |
+| `python -m pytest scripts/pid-platform -q -p no:cacheprovider` | **`590 passed`** | **全绿** |
+| `python -m pytest scripts/sppid -q -p no:cacheprovider` | **`202 passed`** | **全绿** |
+| `python scripts/arch_check.py report` | **`33 module pairs, 183 files`**（`ui -> app: 39`，`io` 四行 `3, 1, 1, 1`） | **复原基线** |

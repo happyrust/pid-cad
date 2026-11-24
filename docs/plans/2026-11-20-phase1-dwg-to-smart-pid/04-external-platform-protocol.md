@@ -69,16 +69,18 @@ round-01-YYYYMMDD/
   - `V2-03`（`03-v2-piping-no-signal`）：保留管道连通（`Piping*`），仅去掉仪表信号连通（`Signal*`）；
   - `V2-04`（`04-v2-leaf-codelist-only`）：保留末级类型码表，置空 `LEAF_LEVELS` 上级类型分级父链属性（验证 `#117` 上级类型链是否为平台硬要求）。
 
-### 第三轮 / 首轮配套包：真实存量图转换与交互编辑件试点包（检查点 C，已在 [#140](https://github.com/happyrust/pid-cad/issues/140) / [#143](https://github.com/happyrust/pid-cad/issues/143) 预构建就绪）
+### 第三轮 / 首轮配套包：真实存量图转换与交互编辑件试点包（检查点 C，已在 [#140](https://github.com/happyrust/pid-cad/issues/140) / [#143](https://github.com/happyrust/pid-cad/issues/143) / [#147](https://github.com/happyrust/pid-cad/issues/147) 预构建就绪）
 
-- 由 `scripts/sppid/build_submission_converted.py` 自动构建 `submissions/round-01b-converted-20261121/`（`package_kind = "converted_pilot"`，`CONV-01..CONV-06` 脱敏主干），一次覆盖全部 6 类真实转换与编辑存回原型：
+- 由 `scripts/sppid/build_submission_converted.py` 自动构建 `submissions/round-01b-converted-20261121/`（`package_kind = "converted_pilot"`，`CONV-01..CONV-08` 脱敏主干，共 8 槽 24 文件），一次覆盖全部 8 类真实转换、外置表回填与交互重建原型：
   1. `01-sppid-dxf-direct`（`CONV-01`）：SPPID 导出拆分 DXF → `pid_convert` 双产物；
   2. `02-legacy-block-circle-direct`（`CONV-02`）：原生 AutoCAD 图块+散圆存量图 → `pid_convert` 双产物；
   3. `03-legacy-exploded-shape-direct`（`CONV-03`）：原生 AutoCAD 全散线形状存量图 → `pid_convert` 双产物；
   4. `04-legacy-inapp-pidsavepid`（`CONV-04`）：原生 AutoCAD 存量图 → 应用内 `PIDPROMOTE → PIDREVIEW → PIDSAVEPID` 存回双产物；
   5. `05-binary-dwg-direct`（`CONV-05`）：二进制 `AC1032` `.dwg` → `pid_convert` 直转双产物；
-  6. `06-pid-inapp-edit-save`（`CONV-06`）：既有真实 `.pid` 原图 → 应用内 `PIDPROMOTE → 面板改位号 + PIDINSERT → PIDSAVEPID` 存回双产物。
-- 收到回执后运行 `python scripts/sppid/precheck_and_receipt.py evaluate-receipt`（同时兼容 `"status": "accepted"/"rejected"` 与 `"accepted": true/false` 两种回填写法）自动判定 `C1..C6` 六类原型通过状态与定向排查项（详见 `readings.md` §29、§32）。
+  6. `06-pid-inapp-edit-save`（`CONV-06`）：既有真实 `.pid` 原图 → 应用内 `PIDPROMOTE → 面板改位号 + PIDINSERT → PIDSAVEPID` 存回双产物；
+  7. `07-sppid-dxf-external-props`（`CONV-07`）：SPPID 拆分 DXF + 双工作表 `.xlsx` 外置设备/管线表回填属性与 `.PPT` 工艺点温压双产物；
+  8. `08-bare-pid-inapp-rebuild`（`CONV-08`）：全厂备份包无伴随 `_Data.xml` 纯裸 `.pid` → 应用内放置边界归并与逆向拓扑重建双产物。
+- 收到回执后运行 `python scripts/sppid/precheck_and_receipt.py evaluate-receipt`（同时兼容 `"status": "accepted"/"rejected"` 与 `"accepted": true/false` 两种回填写法）自动判定 `C1..C8` 八类原型通过状态与跨槽对比 `diagnostic_hints`（详见 `readings.md` §29、§32、§36）。
 
 ---
 

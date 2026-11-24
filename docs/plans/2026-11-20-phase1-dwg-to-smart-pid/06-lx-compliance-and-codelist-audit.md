@@ -41,7 +41,7 @@
 2. **本仓阶段一导出侧（`src/io/pid_publish/` + `src/io/pid_convert/`）已在本单直接落地这两项机制**：
    - **可观测性（`VariantResolutionSummary`）**：`resolve_variant_tracked` 与 `_Coverage.json` 对每张转换图纸显式输出四项计数（`exact_variant_id`、`symbol_path_match`、`class_default_fallback`、`unmapped_class_variant`）及按类兜底明细 `fallback_by_class`（即使全为 `0` 也恒定写出，绝不静默省掉）；
    - **按厂热替换（`--class-map <path>`）**：外置文件 `assets/pid-class-map.json` 已独立存放全部 237 种变体与分级码表元组，`ConvertOptions::class_map_path` 与 `examples/pid_convert.rs --class-map <file.json>` 支持在不重编译程序的情况下加载其他工厂或从 `EFSchema.xml` 导出的类变体表。
-3. **备份包导出侧（`pid-parse` 仓）衔接建议**：待后续需要升级 `Cargo.toml` 钉定的 `pid-parse` 版本时，可在 `pid-parse` 的 `BackupPublishReport` 中按本报告第 1.2 节口径增加 `unmapped_leaf_levels`、`unmapped_specialty_codes`、`plant_added_instruments_skipped` 三个计数字段。
+3. **备份包导出侧（`pid-parse` 仓）已闭环落地（[#117](https://github.com/happyrust/pid-cad/issues/117) 已关单）**：`2026-11-23` 已由提交 `7a43bf4bf` + `Cargo.toml` 升级至 `pid-parse @ 7cb03e48a564311d6b83cbde5bc1af9dc79e8e51` 在备份包导出侧正式落地三项缺口计数（`unmapped_leaf_levels`、`unmapped_specialty_codes`、`plant_added_instruments_skipped`，全零也恒定输出），`#117` 已于 `happyrust/pid-cad` 正式闭环关单。
 
 ---
 

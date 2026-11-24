@@ -1,9 +1,9 @@
 # 智能 PID 平台 · 阶段一进度与现状全景梳理（2026-11-23）
 
-> 日期：`2026-11-23`
+> 日期：`2026-11-23`（**`2026-11-24` 对账更新**：同步 `#17` 协同总单闭环与全量十项门禁读数）
 > 所属目录：`docs/plans/2026-11-20-phase1-dwg-to-smart-pid/`
 > 跟踪总单：[happyrust/pid-cad#106](https://github.com/happyrust/pid-cad/issues/106)
-> 代码基准：本地 `main` 已与 `pid-cad/main` 同步（`pid-parse @ 7cb03e48a564311d6b83cbde5bc1af9dc79e8e51`）；全量实测账本见同目录 `readings.md` §1–§65 与 `05-phase1-acceptance-report.md`。
+> 代码基准：本地 `main` 已与 `pid-cad/main` 同步（`pid-parse @ 7cb03e48a564311d6b83cbde5bc1af9dc79e8e51`）；全量实测账本见同目录 `readings.md` §1–§66 与 `05-phase1-acceptance-report.md`。
 
 ---
 
@@ -25,7 +25,7 @@
 | 阶段一总跟踪单 | [#106](https://github.com/happyrust/pid-cad/issues/106) | **`OPEN`** | 因仍缺 `RES-06` 与 `RES-15` 保持打开，等待真机预检与外部送测回执后收口 |
 | 阶段一全部子单 | [#107](https://github.com/happyrust/pid-cad/issues/107)–[#176](https://github.com/happyrust/pid-cad/issues/176) | **全部 `CLOSED`** | 已全部提交并推送至 `pid-cad/main`，涵盖 `L0–L6`、本地 `LX` 工具包与 EPC 扩展命令群 |
 | 备份包/符号关联单 | [#115](https://github.com/happyrust/pid-cad/issues/115)、[#116](https://github.com/happyrust/pid-cad/issues/116)、[#117](https://github.com/happyrust/pid-cad/issues/117) | **全部 `CLOSED`** | `#116`（`.sym` 预览 `32ac241dd`）与 `#117`（备份包码表缺口三计数 `7a43bf4bf` + `pid-parse @ 7cb03e48a`）均已于 2026-11-23 合入 `main` 关单 |
-| 后续主线方向 | [#17](https://github.com/happyrust/pid-cad/issues/17)（协同设计） | 进行中 | 代码研发主线已转向协同设计（`#74`–`#105` 已陆续合入），阶段一代码层已处于稳定冻结待验收状态 |
+| 后续主线方向 | [#17](https://github.com/happyrust/pid-cad/issues/17)（协同设计） | **已收官 `CLOSED`** | 全部 88 个子单（`#18`–`#105`）含 Pencil 桌面验收（`#24 / #43–#47`）已全部闭环并通过全量门禁，于 `2026-11-24` 正式关单 |
 
 ### 2.2 四大检查点状态
 
@@ -73,9 +73,12 @@
 
 ---
 
-## 5. 质量门禁基线对照（`#109` → `#176`）
+## 5. 质量门禁基线对照（`#109` → `#176` → `2026-11-24` 全量门禁）
 
-- **`cargo test --offline --locked --lib`**：`7,145` 条 → **`7,278` 条**（净增 **`+133`**，**0 新增失败**）
-- **双 `clippy`**：`656` / `1,051` → **`656` / `1,051`**（**0 新增警告**）
-- **架构检查 `arch_check.py`**：`33 module pairs, 183 files`（**0 新增向上依赖**）
-- **`pytest scripts/sppid`**：`159 passed` → **`202 passed`**（净增 **`+43`**，全绿）
+- **`cargo test --offline --locked --lib`**：`7,145` 条 → `7,278` 条 → **`8,151` 条（`8,035 passed / 0 failed / 116 ignored`）**
+- **`cargo test --offline --locked -j 2 --tests --no-fail-fast`**：**`8,291 passed / 0 failed / 116 ignored`**（含 `pid_import` `68 / 68` 全绿）
+- **协同与存盘工作区 crates（`ocs_collab` + `ocs_collab_server` + `ocs_save`）**：**`387 passed / 0 failed`**
+- **全目标与跨平台检查（`--examples` / `--workspace --all-targets` / `wasm32-unknown-unknown`）**：全部退出码 **`0`**
+- **双 `clippy`**：`656` / `1,051` → **`656` / `1,049`**（**0 新增警告，测试档净减 2**）
+- **架构检查 `arch_check.py`**：**`33 module pairs, 183 files`**（`ui -> app: 39`，`io` 四行 `3, 1, 1, 1`，**0 新增向上依赖**）
+- **`pytest scripts/sppid` / `scripts/pid-platform`**：`159 passed` → **`202 passed`** / **`590 passed`**（**全绿**）

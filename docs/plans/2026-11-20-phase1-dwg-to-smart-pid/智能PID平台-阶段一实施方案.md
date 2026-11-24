@@ -3,7 +3,7 @@
 > 日期：2026-11-20（**2026-11-23 对账更新**：本地研发与离线验证已 100% 收官并合入 `pid-cad/main`，解析库已同步至 `pid-parse @ 7cb03e48a`，仅余 `RES-06` 与 `RES-15` 两项外部实测）
 > 状态：**本地研发已全线收官，等待外部实测收口**（详见 `05-phase1-acceptance-report.md` 与 `07-phase1-status-summary-2026-11-23.md`）。
 > 所属目录：`docs/plans/2026-11-20-phase1-dwg-to-smart-pid/`（跟踪总单：[happyrust/pid-cad#106](https://github.com/happyrust/pid-cad/issues/106)）。
-> 依据：本仓库（`main @ 6377fe233`，解析库钉在 `pid-parse @ a85fa10285cc5379953495fa391f374981b9e587`，见 `Cargo.toml`）的代码、计划与读数；SPPID 样本（94 对 `.pid` + XML、11 对厂商参考样本、备份包、`.sym`）。样本细节见同目录《智能PID平台-样本分析-XML规格与pid结构》，源码问答见《03-parse-answers.md》，模型细节见《智能PID平台-内部模型合一分析》，资料清单见《智能PID平台-资料清单》，实测读数见《readings.md》。
+> 依据：本仓库当前 `main`（解析库钉在 `pid-parse @ 7cb03e48a564311d6b83cbde5bc1af9dc79e8e51`，初拟基线为 `6377fe233` / `a85fa10`，见 `Cargo.toml`）的代码、计划与读数；SPPID 样本（94 对 `.pid` + XML、11 对厂商参考样本、备份包、`.sym`）。样本细节见同目录《智能PID平台-样本分析-XML规格与pid结构》，源码问答见《03-parse-answers.md》，模型细节见《智能PID平台-内部模型合一分析》，资料清单见《智能PID平台-资料清单》，实测读数见《readings.md》。
 > 写法约定：本文件只写项目本身。所有路径都是仓库相对路径；样本用逻辑名（`EXPORT_SET`、`SEED` 等）和环境变量引用，不写盘符、用户名、主机名。进行中与已完成的任务均在第 7 节对应任务下维护**「解决记录」**以便回溯。
 > 全文分十一节：前三节交代目的、功能点、计划与路径；第四节到第七节是执行细则（约定、资料、问题、逐任务做法）；后四节是顺序、检查点、风险、文档分工。
 
@@ -576,7 +576,7 @@ flowchart LR
 - **LX-6 未解字段补充分析（视情况）— 已完成（[#137](https://github.com/happyrust/pid-cad/issues/137)）**：已在 `06-lx-compliance-and-codelist-audit.md` 第 2 节逐流核查 `passthrough_preserve` 的 10 类容器流，确认对阶段一 `a/b` 级与 `c1` 级完全够用，并完成 `#117` 备份包分级来源全包实查与阶段一 `_Coverage.json` `VariantResolutionSummary` 可观测性落地（见 `readings.md` §26）。
 - **LX-7 合规（S）— 已完成（[#137](https://github.com/happyrust/pid-cad/issues/137)）**：已在 `06-lx-compliance-and-codelist-audit.md` 第 3 节完成不分发厂商二进制、客户样本与连接串零入库、本机信息脱敏及受控环境单向隔离四条红线书面归档。
 - **LX-8 送测前预检三关（M）— 编排 CLI 与第①关已全部通过（[#135](https://github.com/happyrust/pid-cad/issues/135) / [#137](https://github.com/happyrust/pid-cad/issues/137)）**：落地 `scripts/sppid/precheck_and_receipt.py precheck`，统一串联第①关（`StrictVendor` + XML 比对）、第②关（`$OCS_PID_SPPID_RUNNER open`）与第③关（`$OCS_PID_SPPID_RUNNER publish` + `xml_diff`），未设运行器时默认退出码 `2` 阻断盲目送测（第②③关真机执行待 `RES-06`）。
-- **LX-9 外部平台送测（M）— 首轮减法包、第二轮二分包、六槽真实转换试点包与全系回执收敛器均已就绪（[#135](https://github.com/happyrust/pid-cad/issues/135) / [#137](https://github.com/happyrust/pid-cad/issues/137) / [#140](https://github.com/happyrust/pid-cad/issues/140) / [#143](https://github.com/happyrust/pid-cad/issues/143) / [#144](https://github.com/happyrust/pid-cad/issues/144)）**：三套送测实物包（`round-01`、`round-02-bisect`、`round-01b-converted`）均已预构建并通过本地预检，`precheck_and_receipt.py evaluate-receipt` 原生支持 `R1..R5`、`B1..B4` 与 `C1..C6` 自动收敛（见 `readings.md` §23、§26、§29、§32–§33）。
+- **LX-9 外部平台送测（M）— 首轮减法包、第二轮二分包、八槽真实转换试点包、探针包、总审计门禁与全系回执收敛器均已就绪（[#135](https://github.com/happyrust/pid-cad/issues/135) / [#137](https://github.com/happyrust/pid-cad/issues/137) / [#140](https://github.com/happyrust/pid-cad/issues/140) / [#143](https://github.com/happyrust/pid-cad/issues/143) / [#144](https://github.com/happyrust/pid-cad/issues/144) / [#147](https://github.com/happyrust/pid-cad/issues/147) / [#148](https://github.com/happyrust/pid-cad/issues/148)）**：四套实物包（`round-01` 6 槽、`round-01b-converted` 8 槽 `CONV-01..08`、`round-02-bisect` 5 槽、`lx4-sppid-probes` 3 槽，共 22 槽 65 文件）均已预构建并通过 `precheck_and_receipt.py audit-packages` 密码学哈希与零泄漏总审计，`evaluate-receipt` 原生支持 `R1..R5`、`B1..B4`、`C1..C8`（含跨槽诊断）与 `E1..E3` 自动收敛（见 `readings.md` §23、§26、§29、§32–§33、§36–§37）。
 
 ## 8. 推进顺序
 

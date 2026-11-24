@@ -1,6 +1,6 @@
 # `L6-3`（[#135](https://github.com/happyrust/pid-cad/issues/135)）：智能 PID 平台 · 阶段一总验收报告（本地离线闭环与首轮送测就绪版）
 
-> 日期：`2026-11-21`（**`2026-11-23` 对账更新**：`#107`–`#176` 及关联单 `#115`–`#117` 均已推送至 `pid-cad/main` 关单）
+> 日期：`2026-11-21`（**`2026-11-24` 对账更新**：`#107`–`#176`、关联单 `#115`–`#117` 及协同总单 `#17` 全线收官，全量十项验证门禁 0 失败通过）
 > 所属目录：`docs/plans/2026-11-20-phase1-dwg-to-smart-pid/`（跟踪总单：[happyrust/pid-cad#106](https://github.com/happyrust/pid-cad/issues/106)）
 > 编译器版本：`rustc 1.102.0-nightly (65ce8611f 2026-11-18)`；`pid-parse` 当前钉定提交：`7cb03e48a564311d6b83cbde5bc1af9dc79e8e51`（含 `#117` 备份包缺口计数，兼容 `a85fa10` 基线规格）
 > 绑定语料清单摘要：`manifest_sha256 = 487b320319a9dfad20b1f9b70c8647ad2885ece4d2f8d3a217f71c88b9112038`（`1,115` 文件只读 SHA-256 绑定）
@@ -79,22 +79,25 @@
 
 ---
 
-## 4. 固定六门禁全阶段演进核验表
+## 4. 全量验证门禁演进核验表（更新至 2026-11-24）
 
-| 门禁项 | 初始基线（#109，`9b5faf294`） | 当前收官节点（#176） | 演进结论 |
-|---|---|---|---|
-| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` | 同一编译器 |
-| `cargo test --offline --locked --lib` | `7,145` 条（`7,089` 过 / `55` 忽略 / `1` `.pen`） | **`7,278` 条**（**`7,177` 过** / **`100` 忽略** / **`1` 同一既有 `.pen`**） | 净增 **`+133` 条测试**，**0 新增失败** |
-| `cargo clippy --offline --locked --lib` | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
-| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | **`1,051` 条警告** | **0 新增警告** |
-| `scripts\fmt-newhunks.ps1` | — | 全阶段全部新增与修改 `.rs` 文件 **`new=0`** | **0 格式偏差** |
-| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` 四行 `3, 1, 1, 1` | **0 新增向上依赖** |
-| `python -m pytest scripts/sppid -q -p no:cacheprovider` | `159 passed` | **`202 passed`** | 净增 **`+43` 条测试**，**全绿** |
+| 门禁项 | 初始基线（#109，`9b5faf294`） | 阶段一子单收官（#176） | 当前全量门禁（2026-11-24，`readings.md` §66） | 演进结论 |
+|---|---|---|---|---|
+| `rustc -V` | `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` | 同一编译器 | 同一编译器 | 一致 |
+| `cargo test --offline --locked --lib` | `7,145` 条（`7,089` 过 / `55` 忽略 / `1` `.pen`） | `7,278` 条（`7,177` 过 / `100` 忽略 / `1` `.pen`） | **`8,151` 条（`8,035` 过 / `0` 失败 / `116` 忽略）** | 净增 **`+1,006` 条**，**0 失败** |
+| `cargo test --offline --locked -j 2 --tests --no-fail-fast` | — | — | **`8,291` 过 / `0` 失败 / `116` 忽略**（含 `pid_import` `68 / 68`） | **全二进制 0 失败** |
+| `cargo test -p ocs_collab -p ocs_collab_server -p ocs_save` | — | — | **`387` 过 / `0` 失败** | **全绿** |
+| `cargo check --examples` / `--workspace --all-targets` / `wasm32` | — | — | 三项均退出码 **`0`** | **跨平台与全目标通过** |
+| `cargo clippy --offline --locked --lib` | `656` 条警告 | `656` 条警告 | **`656` 条警告** | **0 新增警告** |
+| `cargo clippy --offline --locked --lib --profile test` | `1,051` 条警告 | `1,051` 条警告 | **`1,049` 条警告** | **较基线 `-2`** |
+| `scripts\fmt-newhunks.ps1` | — | 新增与修改 `.rs` **`new=0`** | 本轮修改 `.rs` 全部 **`new=0`** | **0 格式偏差** |
+| `python scripts/arch_check.py report` | `33 module pairs, 183 files`，`io` `3, 1, 1, 1` | `33 module pairs, 183 files`，`io` `3, 1, 1, 1` | **`33 module pairs, 183 files`**（`ui -> app: 39`，`io` `3, 1, 1, 1`） | **0 新增向上依赖** |
+| `python -m pytest scripts/sppid` / `scripts/pid-platform` | `159 passed` / — | `202 passed` / — | **`202 passed`** / **`590 passed`** | **全绿** |
 
 ---
 
-## 5. 待外部条件就绪后的收尾交接清单（2026-11-23 更新）
+## 5. 待外部条件就绪后的收尾交接清单（2026-11-24 更新）
 
-1. **并行分支关联单均已合入收官**：`L0–L6` 本机功能、EPC 清册命令群（`#149–#176`）以及关联单 `#116`（`.sym` 图形预览，`32ac241dd`）与 `#117`（备份包导出侧码表缺口可观测性，`7a43bf4bf` + `pid-parse @ 7cb03e48a`）均已合入 `main` 并推送至 `pid-cad/main` 关单；阶段一已无任何未合并代码依赖。
+1. **阶段一与协同主线本地代码已全部闭环**：`L0–L6` 本机功能、EPC 清册命令群（`#149–#176`）、关联单 `#116`（`.sym` 图形预览，`32ac241dd`）、`#117`（备份包导出侧码表缺口可观测性，`7a43bf4bf` + `pid-parse @ 7cb03e48a`）以及协同总单 `#17`（`#18`–`#105`）均已合入 `main` 并通过全量十项门禁验证，无任何未合并代码依赖。
 2. **待受控 SPPID 环境（`RES-06`）配置 `$OCS_PID_SPPID_RUNNER` 后**：先执行 `submissions/lx4-sppid-probes-20261121/`（`E1..E3` 探针）验证 `c1` 接受度，再对自主导出 `.pid` 执行 `LX-5 / L5-7 / LX-8` 原生打开（`c1`）与发布一致（`d`）真机预检，更新 `_Coverage.json` 与本报告口径 3 状态。
 3. **待外部数字化交付平台渠道（`RES-15`）开放后**：投递 `submissions/round-01-20261121/`（6 槽减法包）及配套 `submissions/round-01b-converted-20261121/`（8 槽全原型转换试点包），将返回结果填入 `receipt.json`，运行 `precheck_and_receipt.py evaluate-receipt` 收敛结果；如遇被拒则按 `04-external-platform-protocol.md` 投递预构建好的 `submissions/round-02-bisect-20261121/` 二分定位。

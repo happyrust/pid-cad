@@ -1,5 +1,7 @@
 # 国产二维智能 P&ID 平台 · 阶段一路线图
 
+> **历史基线提示（2026-11-24）**：本文档保留 `2026-11-20` 初期规划基线（`main @ 6377fe233`、`pid-parse @ a85fa10`）作设计决策回溯；阶段一全部本地研发、离线验证、双产物导出与 EPC 清册命令群现已 100% 完工（仅余 `RES-06` 与 `RES-15` 两项外部实测），最新现状与量化读数请查阅同目录 [`05-phase1-acceptance-report.md`](05-phase1-acceptance-report.md)、[`07-phase1-status-summary-2026-11-23.md`](07-phase1-status-summary-2026-11-23.md) 与 [`readings.md`](readings.md)。
+
 > 日期：2026-11-19 初拟；**2026-11-20 对齐 `main @ 6377fe233`、`pid-parse @ a85fa10` 与阶段一进展更新**
 > 所属目录：`docs/plans/2026-11-20-phase1-dwg-to-smart-pid/`（跟踪总单：[happyrust/pid-cad#106](https://github.com/happyrust/pid-cad/issues/106)）
 > 范围：阶段一只做一件事——**把 DWG 格式的原 P&ID 图纸，转换成智能 P&ID 图纸，并导出 `.pid` 与 publish XML**，全程不依赖 SPPID 软件。协同、三维接入、规则检查、材料清单等都留到后面。
